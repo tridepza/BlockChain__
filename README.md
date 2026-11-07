@@ -44,6 +44,25 @@ Ký quỹ, giải ngân và hoàn tiền trên website là giao dịch MOCK. Li�
 
 ## Kiểm thử tự động
 
+### Bộ công cụ blockchain — Giai đoạn 5, phần 1–2
+
+Đã cài Hardhat 3, Viem và Viem Toolbox (Node.js test runner). Phiên bản các dependency mới được cố định trong `package.json` và `package-lock.json`; kiểu Node.js dùng nhánh 24. Cấu hình dựa trên [Viem Toolbox](https://hardhat.org/docs/plugins/hardhat-toolbox-viem) và [cấu hình Hardhat](https://hardhat.org/docs/reference/configuration).
+
+`hardhat.config.ts` cố định Solidity **0.8.30**, optimizer **enabled, 200 runs**, EVM target **shanghai**. Nguồn nằm trong `contracts/`, test TypeScript trong `tests/contracts/`, đầu ra/cache mới nằm trong `.hardhat/` và không đưa vào Git. Cấu hình TypeScript cho blockchain nằm riêng trong `tsconfig.hardhat.json`, không thay cấu hình React.
+
+```powershell
+npm.cmd ci --cache .npm-cache --no-audit --no-fund
+npm.cmd run compile:contracts
+npm.cmd run typecheck:contracts
+npm.cmd run test:contracts
+```
+
+Lần biên dịch đầu cần Internet để Hardhat tải compiler. `ToolchainCheck.sol` chỉ kiểm tra môi trường; test triển khai nó trên mạng mô phỏng tạm thời và đọc giá trị bằng Viem, không cần mở node riêng hoặc MetaMask. Chưa triển khai MockUSDC, factory hoặc nghiệp vụ escrow. Cấu hình node local lâu dài, ví và deploy/seed thuộc các phần tiếp theo.
+
+Các thư mục `artifacts/` và `cache/` có từ trước không được dùng bởi cấu hình mới; không coi chúng là kết quả biên dịch có thể tái tạo từ mã nguồn escrow hiện tại.
+
+### Website và API
+
 ```powershell
 npm.cmd run build
 npm.cmd test
