@@ -6,6 +6,7 @@ test-results/
 .npm-cache/
 *.tsbuildinfo
 *.log
+.hardhat/
 .env
 .env.*
 !.env.example
