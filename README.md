@@ -10,6 +10,8 @@ Tiếp theo, xem [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](d
 
 Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. SQLite lưu tài khoản, phiên và dữ liệu workspace tại `.data/escrow.sqlite`.
 
+Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md), đã cải tiến ngày 07/11/2026 ở mức tài liệu. Bước tiếp theo là Giai đoạn 4 — kiến trúc chi tiết, ERD và luồng giao dịch.
+
 ## Chạy website local
 
 Yêu cầu Node.js 24 trở lên. Mở PowerShell tại thư mục dự án rồi chạy:
@@ -58,6 +60,7 @@ README.md
 docs/
   01-mvp-va-nghiep-vu.md
   02-yeu-cau-va-use-case.md
+  03-state-machine-va-quy-tac-tien.md
 server/
   api.mjs
 src/
@@ -78,7 +81,7 @@ vite.config.ts
 
 1. Phân tích bài toán và phạm vi MVP — đã có tài liệu; mặc định nghiệp vụ là giả định làm việc.
 2. Yêu cầu chức năng, phi chức năng và use case — đã soạn đặc tả, chờ người học xem; chưa triển khai chức năng.
-3. State machine, quyền hạn, thời hạn và quy tắc tiền.
+3. State machine, quyền hạn, thời hạn và quy tắc tiền — đã hoàn thành và cải tiến tài liệu; chưa nghiệm thu triển khai on-chain.
 4. Kiến trúc chi tiết, ERD và transaction flow.
 5. Thiết lập môi trường và cấu trúc dự án.
 6. Mock ERC-20 và escrow contract.

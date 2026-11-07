@@ -2,7 +2,9 @@
 
 **Trạng thái bàn giao:** Hoàn thành thiết kế nghiệp vụ MVP. Các quy tắc trong tài liệu này cụ thể hóa [phân tích Giai đoạn 1](01-mvp-va-nghiep-vu.md) và [đặc tả Giai đoạn 2](02-yeu-cau-va-use-case.md). Các thay đổi so với giả định ban đầu được ghi ở mục 7. Tên thao tác dưới đây là tên nghiệp vụ dự kiến.
 
-Mã nguồn tại thời điểm bắt đầu là prototype React/Vite. `src/App.tsx` lưu dữ liệu mẫu bằng `localStorage`, tự sinh mã giao dịch và gộp nghiệm thu với `Paid`. Các quy tắc dưới đây sẽ áp dụng khi triển khai contract và backend. Chỉ MockUSDC và ETH thử nghiệm được dùng trên mạng local.
+**Cập nhật: 07/11/2026, Asia/Saigon.** Hiện có React/Vite, API Node.js và SQLite cho tài khoản/workspace; demo riêng vẫn dùng `localStorage`. `src/workflow.ts` mô phỏng tiền bằng `funded/paid` và trạng thái `Paid/Refunded`; `server/api.mjs` sinh mã `DEMO-*`. Đây chưa phải sổ tiền hoặc bằng chứng on-chain. Các quy tắc dưới đây là đích triển khai, không phải chức năng đã nghiệm thu. Chỉ MockUSDC và ETH thử nghiệm được dùng trên mạng local.
+
+Giai đoạn 3 cụ thể hóa các giả định nghiệp vụ của Giai đoạn 1–2; giữ mã FR/UC/AT để truy vết. Lượt cải tiến này chỉ sửa tài liệu, chưa chuyển luồng mô phỏng sang blockchain.
 
 ## 1. Trạng thái và dữ liệu điều khoản
 
@@ -162,7 +164,62 @@ Ba kịch bản tách nhánh sau dòng Freelancer rút 30. Nếu hủy **trướ
 
 Các ca cần bổ sung tình huống khi triển khai gồm đúng tại deadline và sau hạn một giây, duyệt cạnh tranh mở dispute, hủy trong khi 30 còn chờ rút, xác nhận đề nghị sau một lần withdraw, phát lại nonce, đổi ví khi còn agreement mở hoặc khoản chờ rút, và hòa giải cạnh tranh với phán quyết. Các mã AT ở trên là tham chiếu để kiểm thử sau.
 
-## 8. Điểm bàn giao
+## 8. Quy tắc bổ sung để triển khai nhất quán
+
+### 8.1. Điều khoản và vòng đời dự án
+
+- Bản nháp được sửa trước tạo escrow. Từ giao dịch tạo, khóa ba ví, token, ngân sách, danh sách/thứ tự milestone, hạn cơ sở, hash điều khoản và phiên bản chính sách. MVP không có sửa điều khoản, gia hạn hoặc thay trọng tài giữa chừng.
+- Nếu điều khoản sai hoặc Freelancer không đồng ý, Client hủy trước nạp hoặc hai bên chờ hết hạn nạp để đóng. Thỏa thuận lại phải tạo agreement mới, giữ lịch sử cũ.
+- Project chỉ được liên kết agreement chính thức mới sau khi agreement cũ `Closed`. Khoản chờ rút cũ vẫn rút riêng; không gộp sổ tiền giữa agreement. Đổi ví vẫn chịu điều kiện mục 2.
+- Quy tắc đổi ví mục 2 áp dụng cả Arbitrator: agreement còn mở với vai trò trọng tài cũng chặn đổi ví. Đóng agreement không chuyển quyền trong escrow cũ sang ví mới.
+- Hủy đồng thuận chỉ hoàn toàn bộ `U` cho Client, kể cả phần đang làm/chờ review. Muốn chia thêm cho Freelancer phải qua dispute và hòa giải theo căn cứ hợp lệ, không tự diễn giải xác nhận hủy thành chia tiền tùy ý.
+
+### 8.2. Phiên bản và đề nghị đồng thuận
+
+| Dữ liệu | Quy tắc |
+| --- | --- |
+| Phiên bản công việc | Khởi tạo 0 khi tạo escrow; mỗi thao tác thành công thuộc danh sách mục 5 tăng đúng 1, kể cả khi đồng thời kích hoạt milestone kế. Giao dịch thất bại không tăng. |
+| Phiên bản bản nộp | Mỗi milestone bắt đầu 0 (chưa nộp), lần đầu 1, hai bản sửa tối đa 2 và 3. Hash giống bản cũ không thay thế kiểm tra phiên bản. Duyệt/yêu cầu sửa phải trỏ đúng bản hiện hành. |
+| Lượt sửa | Khởi tạo 0, chỉ tăng khi yêu cầu sửa thành công, không giảm khi nộp lại hoặc hết hạn. |
+| Bằng chứng | Số thứ tự khởi tạo 0 khi mở dispute, tăng 1 mỗi bằng chứng bổ sung hợp lệ. Hash lý do mở vụ lưu riêng. Trọng tài xác nhận đúng vụ và số thứ tự mới nhất. |
+| Nonce đề nghị | Bắt đầu 1, tăng khi tạo đề nghị mới, không tái sử dụng. MVP không có rút lại/sửa đề nghị còn hiệu lực; người tạo đã chấp thuận trong cửa sổ 72 giờ, trừ khi công việc đổi phiên bản. |
+| Bế tắc hủy | Ghi hạn đề nghị hủy đầu tiên của phiên bản hiện hành. Đề nghị thay thế không dời thời điểm được mở dispute. Hết hạn không tự mở dispute hoặc đóng agreement. |
+
+Tạo đề nghị không khóa tiến triển công việc. Start, nộp, yêu cầu sửa, nghiệm thu hoặc mở dispute hợp lệ vẫn thực hiện được và vô hiệu đề nghị cũ. Đề nghị hủy còn hạn không ngăn dispute theo căn cứ khác đã đủ điều kiện. Bổ sung bằng chứng không vô hiệu hòa giải vì hai bên đã đồng ý phân bổ cụ thể, nhưng làm phán quyết dùng số thứ tự cũ bị từ chối.
+
+### 8.3. Bằng chứng và dữ liệu được công nhận
+
+Upload thành công tạo phiên bản nội dung bất biến cùng hash để xem trước khi ký. Sửa nội dung phải tạo phiên bản/hash mới, giữ bản cũ; không ghi đè file đã neo. Upload thất bại thì chưa có bản để ký. Upload xong nhưng từ chối ký hoặc giao dịch thất bại thì bản đó vẫn là nháp, không tạo `Submitted` hoặc mở review.
+
+Hash chứng minh nội dung trùng khớp, không chứng minh chất lượng hoặc khả năng tải file. Nếu file không truy cập được hoặc không khớp hash, giao diện phải hiện rõ chưa kiểm chứng. Không đưa nội dung riêng, URL chứa quyền truy cập hoặc thông tin đăng nhập lên chain. Quy cách băm, giới hạn file và chính sách lưu trữ chốt ở Giai đoạn 4.
+
+Trạng thái, deadline và sổ tiền lấy từ chain đúng deployment; tài khoản, nháp và quyền tải file lấy từ backend. Session hết hạn không tước quyền ví trong contract. API hiện có không được tự ghi thành công tài chính cho luồng chính thức. Khi RPC lỗi hoặc chưa đối soát, hiển thị chưa xác minh, không suy ra thất bại hoặc tự gửi lại. Receipt `approve` không xác nhận đã nạp; receipt `withdraw` không thay đổi kết quả milestone.
+
+## 9. Ma trận rà soát thiết kế bổ sung
+
+Các mã `BR3-*` bổ sung cho 21 ca AT Giai đoạn 2, không thay thế chúng. Đây là ca dự kiến cho contract/tích hợp, **chưa thực thi trên hệ thống**.
+
+| Mã | Thiết lập/thao tác | Kết quả bắt buộc | Truy vết |
+| --- | --- | --- | --- |
+| BR3-01 | Chấp nhận/nạp/start/nộp/yêu cầu sửa/xác nhận tại hạn và sau 1 giây | Tại hạn được phép nếu đủ điều kiện khác; sau hạn từ chối. Timeout chỉ hợp lệ sau hạn. | FR-07–11, FR-14–16, FR-19 |
+| BR3-02 | Dispute trễ việc tại `submitBy + 72 giờ`, rồi sau 1 giây; lặp với hạn sửa | Tại mốc từ chối, sau mốc Client được mở; nộp muộn vẫn bị chặn trong khoảng chờ. | FR-10–11, FR-16–17 |
+| BR3-03 | Duyệt muộn cạnh tranh dispute theo hai thứ tự | Chỉ thao tác hợp lệ đầu tiên thành công; không phân bổ hai lần. | FR-12, FR-16–17 |
+| BR3-04 | Yêu cầu sửa lần ba; duyệt bản 1 khi bản 2 hiện hành | Đều bị từ chối; giữ lịch sử các bản nộp. | FR-10–12 |
+| BR3-05 | Đề nghị hủy khi `Cf=30, U=70`; F rút, ví còn lại xác nhận | Đề nghị vẫn hợp lệ; `Wf=30, Cc=70, U=0`. | FR-13, FR-15 |
+| BR3-06 | Đề nghị rồi start/nộp/nghiệm thu; xác nhận đề nghị cũ | Tiến triển không bị khóa; phiên bản đổi, đề nghị cũ bị từ chối. | FR-09–12, FR-15, FR-19 |
+| BR3-07 | Tạo lại đề nghị hủy sau khi đề nghị đầu hết hạn, cùng phiên bản | Căn cứ bế tắc cũ còn hiệu lực; nonce mới không dời thời điểm mở dispute. | FR-15, FR-17 |
+| BR3-08 | Chính ví đề nghị xác nhận; sai nonce/hash; phát lại sau đóng | Từ chối, sổ tiền không đổi. | FR-15, FR-19 |
+| BR3-09 | Bằng chứng mới trước phán quyết; hòa giải cạnh tranh phán quyết | Số thứ tự cũ bị từ chối; chỉ thao tác đóng hợp lệ đầu tiên thành công. | FR-17–19 |
+| BR3-10 | Chia mốc 40 thành 15/25, hoàn tương lai 30; thử chia 15/26 hoặc ví thứ ba | Chỉ đúng tổng và hai ví cố định được hưởng; giữ phần phân bổ cũ. | FR-18–19 |
+| BR3-11 | Token chuyển thất bại khi nạp/rút; rút lặp hoặc gọi lại | Hoàn tác, không mất quyền rút hoặc tăng D/W sai. | FR-08, FR-13 |
+| BR3-12 | Gửi token trực tiếp, rồi đóng và rút hết phần hợp lệ | Phần dư không tăng D/U/C; còn ở escrow, không có quyền quét. | FR-08, FR-13, FR-21 |
+| BR3-13 | Đổi ví khi chưa nạp nhưng còn mở, còn C hoặc còn nhiệm vụ trọng tài | Từ chối, kể cả request đổi ví cạnh tranh đăng ký agreement. | FR-02–04, FR-22 |
+| BR3-14 | Upload rồi từ chối ký/revert; gửi hash giả hoặc receipt approve | Không ghi bàn giao/nạp thành công; nháp tách khỏi dữ liệu chain. | FR-08, FR-10, FR-20–21 |
+| BR3-15 | Đóng theo từng lý do ở mục 4, trước và sau nạp | Không còn mốc hiện hành; trước nạp tất cả Voided, sau nạp tất cả Finalized; U=0, vẫn rút C được. | FR-12–19 |
+
+Sau mỗi thao tác thành công hoặc bị từ chối, kiểm tra bất biến mục 6 và phân bổ từng milestone. Thao tác bị từ chối không thay đổi trạng thái hoặc sổ tiền escrow; gas ETH vẫn có thể bị tính.
+
+## 10. Điểm bàn giao
 
 Thiết kế đạt khi đủ sáu quyết định, mọi thao tác có quyền và điều kiện từ chối, mọi nhánh đóng kết thúc các milestone, và ba kịch bản đối soát đúng. Kiểm tra bằng cách đọc đặc tả và so sánh số liệu với các bất biến ở mục 6. Từ thư mục gốc của repo có thể đọc bản UTF-8 và kiểm tra chênh lệch văn bản.
 
@@ -171,4 +228,4 @@ Get-Content -LiteralPath '.\docs\03-state-machine-va-quy-tac-tien.md' -Encoding 
 git diff --check
 ```
 
-Giai đoạn 4 dùng các trạng thái, quyền và dữ liệu đã chốt để thiết kế ERD, quy cách hash, sự kiện và luồng đối soát. Các ca nghiệm thu hệ thống vẫn chưa chạy.
+Giai đoạn 4 dùng các trạng thái, quyền và dữ liệu đã chốt để thiết kế ERD, quy cách hash, sự kiện và luồng đối soát. Cần thể hiện định danh deployment/agreement, liên kết ví lịch sử, phiên bản điều khoản/bản nộp, đề nghị/nonce, bằng chứng, phân bổ và lần rút; luồng xác minh ví, approve → fund, withdraw và phục hồi đồng bộ phải giữ các bất biến trên. Đối chiếu thêm toàn bộ BR3 ở mục 9 trước bàn giao triển khai. Các ca nghiệm thu hệ thống vẫn chưa chạy.
