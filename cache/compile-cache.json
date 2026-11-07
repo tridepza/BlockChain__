@@ -1,0 +1,18 @@
+{
+  "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\contracts\\Escrow.sol": {
+    "jobHash": "solc-0_8_30-28c5725ce6652277b806020ac586c15c328a6475",
+    "isolated": false,
+    "compilerType": "solc",
+    "artifactPaths": [
+      "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\contracts\\Escrow.sol\\Escrow.json",
+      "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\contracts\\Escrow.sol\\EscrowFactory.json",
+      "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\contracts\\Escrow.sol\\MockUSDC.json"
+    ],
+    "buildInfoPath": "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\build-info\\solc-0_8_30-28c5725ce6652277b806020ac586c15c328a6475.json",
+    "buildInfoOutputPath": "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\build-info\\solc-0_8_30-28c5725ce6652277b806020ac586c15c328a6475.output.json",
+    "typeFilePath": "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts\\contracts\\Escrow.sol\\artifacts.d.ts",
+    "wasm": true,
+    "artifactsDirectory": "C:\\Users\\daoph\\OneDrive\\Documents\\GitHub\\BlockChain__\\artifacts",
+    "emitsTypeDeclarations": true
+  }
+}

@@ -8,6 +8,8 @@ Nền tảng Client–Freelancer dùng smart contract giữ token thử nghiệm
 
 Tiếp theo: [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](docs/02-yeu-cau-va-use-case.md). Có bảng đối chiếu giao diện hiện có với chức năng thật còn thiếu, 23 yêu cầu chức năng, 12 use case và 21 ca nghiệm thu dự kiến. Các ca chưa được chạy vì backend/contract chưa được triển khai.
 
+Đọc [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) để xem thiết kế nghiệp vụ đã chốt cho MVP.
+
 Hiện tại repository có giao diện React + TypeScript + Vite dùng dữ liệu mẫu và `localStorage`. Nút đổi vai trò, số dư, transaction hash và trạng thái xác nhận trên giao diện là mô phỏng; chưa chứng minh có giao dịch blockchain. Chưa có backend, Prisma/PostgreSQL hay Solidity/Hardhat. Đã cài dependency và kiểm tra `npm.cmd run build` thành công sau Giai đoạn 1.
 
 ## Chạy giao diện demo
@@ -49,6 +51,7 @@ README.md
 docs/
   01-mvp-va-nghiep-vu.md
   02-yeu-cau-va-use-case.md
+  03-state-machine-va-quy-tac-tien.md
 src/
   App.tsx
   main.tsx
@@ -64,7 +67,7 @@ vite.config.ts
 
 1. Phân tích bài toán và phạm vi MVP — đã có tài liệu; mặc định nghiệp vụ là giả định làm việc.
 2. Yêu cầu chức năng, phi chức năng và use case — đã soạn đặc tả, chờ người học xem; chưa triển khai chức năng.
-3. State machine, quyền hạn, thời hạn và quy tắc tiền.
+3. State machine, quyền hạn, thời hạn và quy tắc tiền — đã có đặc tả thiết kế.
 4. Kiến trúc chi tiết, ERD và transaction flow.
 5. Thiết lập môi trường và cấu trúc dự án.
 6. Mock ERC-20 và escrow contract.
