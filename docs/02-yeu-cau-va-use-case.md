@@ -235,7 +235,7 @@ Các mốc thời gian trong test phải dùng điều khiển thời gian của
 | DL-05 | Tài khoản/ví khi còn nghĩa vụ | Chốt ràng buộc một ví/tài khoản, điều kiện thay ví khi không còn nghĩa vụ và cách người dùng truy xuất agreement cũ; không đổi địa chỉ nhận trong escrow |
 | DL-06 | Tên trạng thái | Tách agreement khỏi milestone và transaction; phân biệt Approved/Allocated/Withdrawn; đóng công việc vẫn cho rút tiền chờ rút |
 
-Đây là đầu vào công việc tiếp theo, không phải chức năng đã có hoặc lỗi build. Không viết Solidity khi các nhánh này còn mâu thuẫn. Chi tiết ERD/API thuộc Giai đoạn 4 và 8; tài liệu này không bịa endpoint đã tồn tại.
+Xem [quyết định DL-01–06 ở Giai đoạn 3](03-state-machine-va-quy-tac-tien.md#7-đối-chiếu-quyết-định-và-ca-nghiệm-thu). Các quyết định này là thiết kế nghiệp vụ. Chi tiết ERD và API thuộc Giai đoạn 4 và 8.
 
 ## 9. Hướng dẫn người học thực hiện bước này
 
