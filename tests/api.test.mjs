@@ -120,13 +120,39 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.deepEqual(funding.map(result => result.status).sort(), [200, 409]);
   assert.equal((await action(freelancer, 'submit', { milestoneId: 2, note: 'Bàn giao sai thứ tự' })).status, 409);
   assert.equal((await action(freelancer, 'submit', { milestoneId: 1, note: 'Bàn giao hợp lệ' })).status, 200);
+  assert.equal((await action(owner, 'cancel')).status, 403);
+  const proposed = await action(owner, 'requestCancel', { note: 'Đề nghị hủy sau khi bàn giao' });
+  assert.equal(proposed.status, 200);
+  assert.equal(proposed.body.projects[0].status, 'Submitted');
+  assert.deepEqual(proposed.body.txs.map(tx => tx.amount), [0.3]);
+  const firstRequest = { cancellationId: proposed.body.projects[0].cancellation.id };
+  assert.equal((await action(owner, 'confirmCancel', firstRequest)).status, 403);
+  assert.equal((await action(other, 'confirmCancel', firstRequest)).status, 403);
+  assert.equal((await action(freelancer, 'requestCancel', { note: 'Ghi đè đề nghị đang mở' })).status, 409);
   assert.equal((await action(freelancer, 'approve', { milestoneId: 1 })).status, 403);
   assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Chỉ mô phỏng trong demo' })).status, 403);
   const approvals = await Promise.all([action(owner, 'approve', { milestoneId: 1 }), action(owner, 'approve', { milestoneId: 1 })]);
   assert.deepEqual(approvals.map(result => result.status).sort(), [200, 409]);
-  const cancelled = await action(owner, 'cancel');
-  assert.equal(cancelled.status, 200);
+  assert.equal((await action(freelancer, 'confirmCancel', firstRequest)).status, 409);
+  const expired = await action(freelancer, 'requestCancel', { note: 'Đề nghị hoàn phần còn lại' });
+  assert.equal(expired.status, 200);
+  const expiredRequest = expired.body.projects[0].cancellation;
+  t.mock.timers.enable({ apis: ['Date'], now: expiredRequest.expiresAt + 1 });
+  assert.equal((await action(owner, 'confirmCancel', { cancellationId: expiredRequest.id })).status, 409);
+  const renewed = await action(freelancer, 'requestCancel', { note: 'Đề nghị mới' });
+  assert.equal(renewed.status, 200);
+  const confirmation = { cancellationId: renewed.body.projects[0].cancellation.id };
+  assert.notEqual(confirmation.cancellationId, expiredRequest.id);
+  assert.equal((await action(owner, 'confirmCancel', { cancellationId: expiredRequest.id })).status, 409);
+  const confirmations = await Promise.all([
+    action(owner, 'confirmCancel', confirmation),
+    action(owner, 'confirmCancel', confirmation),
+  ]);
+  assert.deepEqual(confirmations.map(result => result.status).sort(), [200, 409]);
+  const cancelled = confirmations.find(result => result.status === 200);
   assert.equal(cancelled.body.projects[0].status, 'Cancelled');
+  assert.equal(cancelled.body.projects[0].paid, 0.1);
+  assert.equal(cancelled.body.projects[0].cancellation, undefined);
   assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
   assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
 });

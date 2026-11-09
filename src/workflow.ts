@@ -12,6 +12,8 @@ export type Milestone = {
   revisionReason?: string;
 };
 
+type CancellationRequest = { id: string; proposerId: string; reason: string; expiresAt: number };
+
 export type Project = {
   id: number;
   title: string;
@@ -29,6 +31,7 @@ export type Project = {
   created: string;
   disputeReason?: string;
   decision?: string;
+  cancellation?: CancellationRequest;
 };
 
 export type Tx = {
@@ -67,6 +70,16 @@ export function escrowBalance(project: Project) {
   if (project.status === 'Cancelled') return 0;
   const refunded = project.milestones.reduce((sum, m) => sum + (m.status === 'Refunded' ? cents(m.amount) : 0), 0);
   return (cents(project.funded) - cents(project.paid) - refunded) / 100;
+}
+
+export function canRequestCancellation(project: Project) {
+  return Boolean(project.freelancerId) && escrowBalance(project) > 0 &&
+    ['Funded', 'In progress', 'Submitted', 'Revision requested'].includes(project.status);
+}
+
+export function pendingCancellation(project: Project, now = Date.now()) {
+  const request = project.cancellation;
+  return request && now <= request.expiresAt ? request : undefined;
 }
 
 export function canSeePrivate(project: Project, actor: Account) {
@@ -127,20 +140,25 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   };
 }
 
-export type ProjectAction = { action: string; milestoneId?: number; note?: string; email?: string };
+export type ProjectAction = { action: string; milestoneId?: number; note?: string; email?: string; cancellationId?: string };
 type ActionResult = { project: Project; transaction?: Pick<Tx, 'action' | 'amount'> };
 
 export function applyProjectAction(p: Project, actor: Account, input: ProjectAction, freelancer?: Account): ActionResult {
-  const clientActions = ['assign', 'fund', 'cancel', 'approve', 'revision'];
+  const clientActions = ['assign', 'fund', 'approve', 'revision'];
   const ownerAction = clientActions.includes(input.action) ||
     (input.action === 'dispute' && actor.id === demoAccounts.Client.id);
-  const allowed = ownerAction && actor.role === 'Client' && actor.id === p.ownerId ||
-    input.action === 'submit' && actor.role === 'Freelancer' && actor.id === p.freelancerId ||
+  const owner = actor.role === 'Client' && actor.id === p.ownerId;
+  const assignee = actor.role === 'Freelancer' && actor.id === p.freelancerId;
+  const cancellationAction = ['requestCancel', 'confirmCancel'].includes(input.action);
+  const allowed = ownerAction && owner ||
+    input.action === 'submit' && assignee ||
+    cancellationAction && (owner || assignee) ||
     ['release', 'refund'].includes(input.action) && actor.id === demoAccounts.Arbitrator.id;
   if (!allowed) throw new WorkflowError(403, 'Bạn không có quyền thực hiện thao tác này.');
 
   const invalidState = () => new WorkflowError(409, 'Trạng thái dự án đã thay đổi hoặc chưa cho phép thao tác này.');
   const milestone = currentMilestone(p);
+  const note = text(input.note, 2000);
   const updateMilestone = (changes: Partial<Milestone>) => p.milestones.map(m =>
     m.id === milestone?.id ? { ...m, ...changes } : m);
 
@@ -152,30 +170,46 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
     case 'fund':
       if (p.status !== 'Proposal sent' || !p.freelancerId || p.funded !== 0) throw invalidState();
       return { project: { ...p, status: 'Funded', funded: p.budget }, transaction: { action: 'Ký quỹ', amount: p.budget } };
-    case 'cancel': {
+    case 'requestCancel': {
+      if (!canRequestCancellation(p)) throw invalidState();
+      const now = Date.now();
+      if (pendingCancellation(p, now)) throw new WorkflowError(409, 'Đã có đề nghị hủy còn hiệu lực.');
+      if (!note) throw new WorkflowError(400, 'Nhập lý do đề nghị hủy.');
+      const cancellation = { id: crypto.randomUUID(), proposerId: actor.id, reason: note, expiresAt: now + 72 * 60 * 60 * 1000 };
+      return { project: { ...p, cancellation } };
+    }
+    case 'confirmCancel': {
+      const request = pendingCancellation(p);
+      if (!canRequestCancellation(p) || !request || request.id !== input.cancellationId) {
+        throw new WorkflowError(409, 'Đề nghị hủy đã hết hạn hoặc không còn hiệu lực.');
+      }
+      if (request.proposerId === actor.id) throw new WorkflowError(403, 'Đề nghị cần xác nhận của bên còn lại.');
       const amount = escrowBalance(p);
-      if (['Disputed', 'Completed', 'Cancelled'].includes(p.status) || amount <= 0) throw invalidState();
       const milestones = p.milestones.map(m => isSettled(m) ? m : { ...m, status: 'Refunded' as const });
-      return { project: { ...p, milestones, status: 'Cancelled' }, transaction: { action: 'Hoàn tiền khi hủy', amount } };
+      return {
+        project: { ...p, milestones, status: 'Cancelled', cancellation: undefined },
+        transaction: { action: 'Hoàn tiền khi hủy', amount },
+      };
     }
   }
 
   if (!milestone || milestone.id !== input.milestoneId || p.funded !== p.budget) throw invalidState();
-  const note = text(input.note, 2000);
+  // Work changes invalidate the pending request, even when the balance stays the same.
+  const updatedProject = { ...p, cancellation: undefined };
   switch (input.action) {
     case 'submit':
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
         !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
-      return { project: { ...p, status: 'Submitted', milestones: updateMilestone({ status: 'Submitted', submission: note }) } };
+      return { project: { ...updatedProject, status: 'Submitted', milestones: updateMilestone({ status: 'Submitted', submission: note }) } };
     case 'revision':
     case 'dispute': {
       if (milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập lý do để tiếp tục.');
       if (input.action === 'dispute') {
-        return { project: { ...p, status: 'Disputed', disputeReason: note, milestones: updateMilestone({ status: 'Disputed' }) } };
+        return { project: { ...updatedProject, status: 'Disputed', disputeReason: note, milestones: updateMilestone({ status: 'Disputed' }) } };
       }
-      return { project: { ...p, status: 'Revision requested', milestones: updateMilestone({ status: 'Revision requested', revisionReason: note }) } };
+      return { project: { ...updatedProject, status: 'Revision requested', milestones: updateMilestone({ status: 'Revision requested', revisionReason: note }) } };
     }
     case 'approve':
     case 'release':
@@ -190,7 +224,7 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       const decision = dispute ? (refund ? 'Hoàn trả Client' : 'Giải ngân cho Freelancer') : p.decision;
       const action = dispute ? (refund ? 'Phân xử: hoàn tiền' : 'Phân xử: giải ngân') : `Giải ngân milestone ${milestone.id}`;
       return {
-        project: { ...p, paid, decision, milestones, status: milestones.every(isSettled) ? 'Completed' : 'In progress' },
+        project: { ...updatedProject, paid, decision, milestones, status: milestones.every(isSettled) ? 'Completed' : 'In progress' },
         transaction: { action, amount: milestone.amount },
       };
     }

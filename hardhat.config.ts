@@ -8,6 +8,7 @@ export default defineConfig({
     settings: {
       optimizer: { enabled: true, runs: 200 },
       evmVersion: 'shanghai',
+      viaIR: true,
     },
   },
   paths: {

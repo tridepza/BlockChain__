@@ -8,8 +8,8 @@ import Auth from './Auth';
 import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
-  applyProjectAction, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
-  escrowBalance, money, visibleWorkspace,
+  applyProjectAction, canRequestCancellation, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
+  escrowBalance, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
@@ -32,7 +32,8 @@ const actionLabels: Record<string, string> = {
   dispute: 'Mở tranh chấp',
   release: 'Quyết định giải ngân',
   refund: 'Quyết định hoàn tiền',
-  cancel: 'Hủy & hoàn số dư',
+  requestCancel: 'Đề nghị hủy',
+  confirmCancel: 'Đồng ý hủy và hoàn tiền',
 };
 
 export default function App() {
@@ -170,7 +171,8 @@ function Workspace(props: WorkspaceProps) {
         let project: Project;
         if (demo) {
           project = createProject(actor, fields, Date.now());
-          persistDemo({ ...data, projects: [project, ...data.projects] });
+          const latest = loadDemo();
+          persistDemo({ ...latest, projects: [project, ...latest.projects] });
         } else {
           const result = await api<{ project: Project; data: WorkspaceData }>('projects', fields, actor.id);
           project = result.project;
@@ -179,21 +181,23 @@ function Workspace(props: WorkspaceProps) {
         select(project);
         setNotice('Đã tạo dự án.');
       } else {
-        const project = projects.find(project => project.id === dialog.projectId);
-        if (!project) return;
         const input = { ...dialog.action, ...fields };
         if (demo) {
+          const latest = loadDemo();
+          setData(latest);
+          const project = latest.projects.find(project => project.id === dialog.projectId);
+          if (!project) throw new WorkflowError(409, 'Dự án không còn trong bản demo.');
           const result = applyProjectAction(project, actor, input, demoAccounts.Freelancer);
           const tx: Tx | null = result.transaction ? {
             ...result.transaction, id: `DEMO-${crypto.randomUUID().slice(0, 8)}`, projectId: project.id,
             project: project.title, status: 'Mô phỏng', time: new Date().toLocaleString('vi-VN'),
           } : null;
           persistDemo({
-            projects: data.projects.map(p => p.id === project.id ? result.project : p),
-            txs: tx ? [tx, ...data.txs] : data.txs,
+            projects: latest.projects.map(p => p.id === project.id ? result.project : p),
+            txs: tx ? [tx, ...latest.txs] : latest.txs,
           });
         } else {
-          setData(await api<WorkspaceData>('projects/action', { ...input, projectId: project.id }, actor.id));
+          setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
         }
         setNotice(`Đã thực hiện: ${actionLabels[dialog.action.action]}.`);
       }
@@ -332,6 +336,7 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
   const create = dialog.kind === 'create';
   const action = create ? '' : dialog.action.action;
   const title = create ? 'Tạo dự án mới' : actionLabels[action];
+  const needsNote = ['submit', 'revision', 'dispute', 'requestCancel'].includes(action);
   useEffect(() => {
     const element = ref.current;
     element?.showModal();
@@ -357,10 +362,13 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
           <p className="hint">Ví dụ ngân sách 100 MOCK chia thành 3 milestone có số tiền 30, 40 và 30.</p>
         </> : action === 'assign' && !demo ? (
           <label>Email của Freelancer<input name="email" type="email" required autoFocus maxLength={254}/></label>
-        ) : ['submit', 'revision', 'dispute'].includes(action) ? (
-          <label>{action === 'submit' ? 'Mô tả bàn giao' : 'Lý do'}<textarea name="note" required autoFocus maxLength={2000}/></label>
-        ) : <p className="hint">{action === 'cancel' ? 'Số dư chưa phân bổ sẽ được hoàn lại trong mô phỏng.' : 'Xác nhận thao tác trên dự án mô phỏng.'}</p>}
-        <button className="primary full" type="submit" autoFocus={!create && !['assign', 'submit', 'revision', 'dispute'].includes(action)}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
+        ) : needsNote ? (
+          <>
+            {action === 'requestCancel' && <p className="hint">Đề nghị có hiệu lực 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi bên còn lại xác nhận.</p>}
+            <label>{action === 'submit' ? 'Mô tả bàn giao' : 'Lý do'}<textarea name="note" required autoFocus maxLength={2000}/></label>
+          </>
+        ) : <p className="hint">{action === 'confirmCancel' ? 'Dự án sẽ đóng và số dư chưa phân bổ sẽ được hoàn lại cho Client.' : 'Xác nhận thao tác trên dự án mô phỏng.'}</p>}
+        <button className="primary full" type="submit" autoFocus={!create && action !== 'assign' && !needsNote}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
       </fieldset>
     </form>
   </dialog>;
@@ -415,7 +423,8 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
   const arbitrator = demo && actor.role === 'Arbitrator';
   const privateProject = canSeePrivate(p, actor);
   const current = currentMilestone(p);
-  const canCancel = owner && escrowBalance(p) > 0 && !['Disputed', 'Completed', 'Cancelled'].includes(p.status);
+  const canCancel = (owner || freelancer) && canRequestCancellation(p);
+  const cancellation = canCancel ? pendingCancellation(p) : undefined;
 
   function actionButton(action: string, label = actionLabels[action], milestoneId?: number, style = 'primary') {
     return <button className={style} onClick={() => onAction({ action, milestoneId })}>{label}</button>;
@@ -435,8 +444,17 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
       <div className="detail-actions">
         {owner && p.status === 'Open' && actionButton('assign', demo ? 'Chọn Freelancer demo' : undefined)}
         {owner && p.status === 'Proposal sent' && actionButton('fund', `Ký quỹ ${money(p.budget)}`)}
-        {canCancel && actionButton('cancel', undefined, undefined, 'danger-outline')}
+        {canCancel && !cancellation && actionButton('requestCancel', undefined, undefined, 'danger-outline')}
+        {cancellation && cancellation.proposerId !== actor.id && <button className="danger-outline"
+          onClick={() => onAction({ action: 'confirmCancel', cancellationId: cancellation.id })}>
+          {actionLabels.confirmCancel}
+        </button>}
       </div>
+      {cancellation && <div className="hint">
+        <b>{cancellation.proposerId === actor.id ? 'Đang chờ bên còn lại đồng ý hủy' : 'Bên còn lại đề nghị hủy'}</b>
+        <p>{cancellation.reason}</p>
+        <small>Hết hạn lúc {new Date(cancellation.expiresAt).toLocaleString('vi-VN')}</small>
+      </div>}
       <div className="tabs">
         <button className={tab === 'milestones' ? 'active' : ''} onClick={() => setTab('milestones')}>Milestone</button>
         <button className={tab === 'terms' ? 'active' : ''} onClick={() => setTab('terms')}>Điều khoản</button>

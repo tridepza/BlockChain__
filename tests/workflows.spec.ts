@@ -137,7 +137,7 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await click(page, 'Thử bản demo');
   await openProject(page, title);
   await perform(page, 'Mở tranh chấp', { label: 'Lý do', value: 'Kiểm tra nhánh hoàn tiền' });
-  await expect(page.getByRole('button', { name: 'Hủy & hoàn số dư' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Đề nghị hủy' })).toHaveCount(0);
   await page.getByLabel('Vai trò demo').selectOption('Arbitrator');
   await page.getByRole('button', { name: /^Tranh chấp/ }).click();
   await click(page, 'Xem tranh chấp');
@@ -145,7 +145,14 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await expect(page.getByText('Còn ký quỹ: 30.00 MOCK · Đã trả: 30.00 MOCK')).toBeVisible();
   await page.getByLabel('Vai trò demo').selectOption('Client');
   await openProject(page, title);
-  await perform(page, 'Hủy & hoàn số dư');
+  await perform(page, 'Đề nghị hủy', { label: 'Lý do', value: 'Hai bên dừng phần còn lại' });
+  await expect(page.getByText('Đang chờ bên còn lại đồng ý hủy')).toBeVisible();
+  await expect(page.getByText('Còn ký quỹ: 30.00 MOCK · Đã trả: 30.00 MOCK')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Đồng ý hủy và hoàn tiền' })).toHaveCount(0);
+  await page.getByLabel('Vai trò demo').selectOption('Freelancer');
+  await openProject(page, title);
+  await expect(page.getByText('Hai bên dừng phần còn lại')).toBeVisible();
+  await perform(page, 'Đồng ý hủy và hoàn tiền');
   await expect(page.getByText('Còn ký quỹ: 0.00 MOCK · Đã trả: 30.00 MOCK')).toBeVisible();
   await click(page, 'Ví & giao dịch');
   await expect(page.getByRole('row', { name: /Phân xử: hoàn tiền.*40.00 MOCK/ })).toBeVisible();

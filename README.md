@@ -37,18 +37,18 @@ npm.cmd ci --cache .npm-cache --no-audit --no-fund
 
 ## Thử các luồng
 
-- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt hoặc một cửa sổ thường và một cửa sổ ẩn danh để giữ hai phiên riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký rồi ký quỹ. Freelancer bấm **Làm mới** để thấy dự án và gửi bàn giao. Client có thể yêu cầu sửa, nghiệm thu hoặc hủy hợp đồng để hoàn phần chưa phân bổ trong mô phỏng.
+- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt hoặc một cửa sổ thường và một cửa sổ ẩn danh để giữ hai phiên riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký rồi ký quỹ. Freelancer bấm **Làm mới** để thấy dự án và gửi bàn giao. Client có thể yêu cầu sửa hoặc nghiệm thu. Để hủy dự án đã ký quỹ, một bên chọn **Đề nghị hủy**, bên còn lại bấm **Làm mới** và xác nhận trong 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi xác nhận thành công. Tiến độ thay đổi làm đề nghị cũ hết hiệu lực.
 - **Bản demo.** Chọn **Thử bản demo** ở trang đăng nhập để đổi giữa Client, Freelancer và Arbitrator trên dữ liệu mẫu. Milestone 2 của dự án website đã có bàn giao để thử nhánh tranh chấp và phân xử. Dữ liệu demo lưu riêng trong trình duyệt. Xóa hai khóa `fe-projects` và `fe-txs` để trở về dữ liệu mẫu.
 
 Ký quỹ, giải ngân và hoàn tiền trên website là giao dịch MOCK. Liên kết ví, giao dịch on-chain và phân xử trên workspace tài khoản nằm ngoài phần triển khai hiện tại.
 
 ## Kiểm thử tự động
 
-### Bộ công cụ blockchain — Giai đoạn 5, phần 1–2
+### Smart contract và bộ công cụ blockchain
 
 Đã cài Hardhat 3, Viem và Viem Toolbox (Node.js test runner). Phiên bản các dependency mới được cố định trong `package.json` và `package-lock.json`; kiểu Node.js dùng nhánh 24. Cấu hình dựa trên [Viem Toolbox](https://hardhat.org/docs/plugins/hardhat-toolbox-viem) và [cấu hình Hardhat](https://hardhat.org/docs/reference/configuration).
 
-`hardhat.config.ts` cố định Solidity **0.8.30**, optimizer **enabled, 200 runs**, EVM target **shanghai**. Nguồn nằm trong `contracts/`, test TypeScript trong `tests/contracts/`, đầu ra/cache mới nằm trong `.hardhat/` và không đưa vào Git. Cấu hình TypeScript cho blockchain nằm riêng trong `tsconfig.hardhat.json`, không thay cấu hình React.
+`hardhat.config.ts` cố định Solidity **0.8.30**, optimizer **200 runs**, **viaIR** và EVM target **shanghai**. Mã Solidity nằm trong `contracts/`, dùng OpenZeppelin Contracts 5.6.1. Test TypeScript nằm trong `tests/contracts/`. ABI, bytecode và cache mới được sinh trong `.hardhat/`.
 
 ```powershell
 npm.cmd ci --cache .npm-cache --no-audit --no-fund
@@ -57,9 +57,9 @@ npm.cmd run typecheck:contracts
 npm.cmd run test:contracts
 ```
 
-Lần biên dịch đầu cần Internet để Hardhat tải compiler. `ToolchainCheck.sol` chỉ kiểm tra môi trường; test triển khai nó trên mạng mô phỏng tạm thời và đọc giá trị bằng Viem, không cần mở node riêng hoặc MetaMask. Chưa triển khai MockUSDC, factory hoặc nghiệp vụ escrow. Cấu hình node local lâu dài, ví và deploy/seed thuộc các phần tiếp theo.
+Lần biên dịch đầu cần Internet để Hardhat tải compiler. Test triển khai `ToolchainCheck`, `MockUSDC`, `EscrowFactory` và `Escrow` trên mạng mô phỏng tạm thời.
 
-Các thư mục `artifacts/` và `cache/` có từ trước không được dùng bởi cấu hình mới; không coi chúng là kết quả biên dịch có thể tái tạo từ mã nguồn escrow hiện tại.
+`EscrowFactory` nhận địa chỉ token và `instanceKey` khác 0. Mỗi lần triển khai dùng một khóa ngẫu nhiên 32 byte mới. `createEscrow(terms, expectedTermsHash)` tính lại hash theo [quy cách Giai đoạn 4](docs/04-kien-truc-erd-va-transaction-flow.md#74-file-điều-khoản-và-đề-nghị-đồng-thuận), kiểm tra hạn tạo và chỉ tạo một lần cho mỗi cặp Client–`agreementRef`. Các hàm xử lý milestone, phân xử và đồng thuận trong `Escrow` dùng ABI của bản Solidity khôi phục. Chữ ký hàm và event thực tế nằm trong ABI mới tại `.hardhat/artifacts/`. Thư mục `artifacts/` ở gốc là đầu ra của bản cũ.
 
 ### Website và API
 
