@@ -10,7 +10,7 @@ Tiếp theo, xem [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](d
 
 Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. SQLite lưu tài khoản, phiên và dữ liệu workspace tại `.data/escrow.sqlite`.
 
-Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md), đã cải tiến ngày 07/11/2026 ở mức tài liệu. [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md) đã có mục 1: sơ đồ thành phần, ranh giới trách nhiệm, nơi lưu file và quyền đọc; mục 2: ERD, lược đồ quan hệ và ràng buộc dữ liệu. Luồng giao dịch chi tiết và các mục còn lại chưa thực hiện; chưa triển khai PostgreSQL.
+Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) và [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md). Giai đoạn 4 đã hoàn thành ở mức thiết kế, gồm sơ đồ dữ liệu, luồng xác minh ví và giao dịch, giao diện API/contract, quy cách hash và đối soát. Bước tiếp theo là hoàn tất môi trường local của Giai đoạn 5.
 
 ## Chạy website local
 
@@ -102,7 +102,7 @@ vite.config.ts
 1. Phân tích bài toán và phạm vi MVP — đã có tài liệu; mặc định nghiệp vụ là giả định làm việc.
 2. Yêu cầu chức năng, phi chức năng và use case — đã soạn đặc tả, chờ người học xem; chưa triển khai chức năng.
 3. State machine, quyền hạn, thời hạn và quy tắc tiền — đã hoàn thành và cải tiến tài liệu; chưa nghiệm thu triển khai on-chain.
-4. Kiến trúc chi tiết, ERD và transaction flow — đã có thiết kế sơ đồ thành phần và ERD/lược đồ quan hệ; các phần còn lại chưa thực hiện.
+4. Kiến trúc chi tiết, ERD và transaction flow — đã hoàn thành thiết kế.
 5. Thiết lập môi trường và cấu trúc dự án.
 6. Mock ERC-20 và escrow contract.
 7. Unit test, kiểm thử thất bại và hành vi tấn công.
