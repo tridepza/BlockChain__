@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { createServer as createViteServer } from 'vite';
 import { createApi } from '../server/api.mjs';
 
 const password = 'mật-khẩu-test-2026';
@@ -119,7 +120,11 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   const funding = await Promise.all([action(owner, 'fund'), action(owner, 'fund')]);
   assert.deepEqual(funding.map(result => result.status).sort(), [200, 409]);
   assert.equal((await action(freelancer, 'submit', { milestoneId: 2, note: 'Bàn giao sai thứ tự' })).status, 409);
-  assert.equal((await action(freelancer, 'submit', { milestoneId: 1, note: 'Bàn giao hợp lệ' })).status, 200);
+  const submission = { milestoneId: 1, note: 'Bàn giao hợp lệ' };
+  const first = await action(freelancer, 'submit', submission);
+  assert.equal(first.status, 200);
+  const firstReview = { milestoneId: 1, submissionVersion: first.body.projects[0].milestones[0].submissionVersion };
+  assert.equal(firstReview.submissionVersion, 1);
   assert.equal((await action(owner, 'cancel')).status, 403);
   const proposed = await action(owner, 'requestCancel', { note: 'Đề nghị hủy sau khi bàn giao' });
   assert.equal(proposed.status, 200);
@@ -131,7 +136,18 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal((await action(freelancer, 'requestCancel', { note: 'Ghi đè đề nghị đang mở' })).status, 409);
   assert.equal((await action(freelancer, 'approve', { milestoneId: 1 })).status, 403);
   assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Chỉ mô phỏng trong demo' })).status, 403);
-  const approvals = await Promise.all([action(owner, 'approve', { milestoneId: 1 }), action(owner, 'approve', { milestoneId: 1 })]);
+  assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Xem lại yêu cầu' })).status, 200);
+  const second = await action(freelancer, 'submit', submission);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.projects[0].milestones[0].submissionVersion, 2);
+  assert.equal((await action(owner, 'approve', firstReview)).status, 409);
+  assert.equal((await action(owner, 'approve', { milestoneId: 1 })).status, 409);
+  assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Yêu cầu cũ' })).status, 409);
+  const beforeApproval = (await req('workspace', { cookie: owner })).body;
+  assert.equal(beforeApproval.projects[0].paid, 0);
+  assert.deepEqual(beforeApproval.txs.map(tx => tx.amount), [0.3]);
+  const currentReview = { ...firstReview, submissionVersion: 2 };
+  const approvals = await Promise.all([action(owner, 'approve', currentReview), action(owner, 'approve', currentReview)]);
   assert.deepEqual(approvals.map(result => result.status).sort(), [200, 409]);
   assert.equal((await action(freelancer, 'confirmCancel', firstRequest)).status, 409);
   const expired = await action(freelancer, 'requestCancel', { note: 'Đề nghị hoàn phần còn lại' });
@@ -155,4 +171,37 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal(cancelled.body.projects[0].cancellation, undefined);
   assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
   assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
+});
+
+test('Vite dev chặn tệp SQLite và dữ liệu xác thực cũ qua HTTP', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-vite-'));
+  const dbPath = process.env.ESCROW_DB_PATH;
+  const privateFiles = ['.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite', 'backup.db-wal', 'backup.sqlite3'];
+  let server;
+  try {
+    await mkdir(join(root, '.local-data'));
+    await mkdir(join(root, '.data'));
+    for (const file of privateFiles) await writeFile(join(root, file), 'private fixture');
+    await writeFile(join(root, 'visible.txt'), 'public fixture');
+    process.env.ESCROW_DB_PATH = ':memory:';
+    server = await createViteServer({
+      root,
+      configFile: resolve('vite.config.ts'),
+      logLevel: 'silent',
+      optimizeDeps: { disabled: true },
+      server: { host: '127.0.0.1', port: 5197, hmr: false, watch: null },
+    });
+    await server.listen();
+    const url = `http://127.0.0.1:${server.httpServer.address().port}/`;
+    const visible = await fetch(url + 'visible.txt');
+    assert.equal(await visible.text(), 'public fixture');
+    for (const path of [...privateFiles, '.local-data/auth.sqlite?raw', '%2elocal-data/auth.sqlite']) {
+      assert.equal((await fetch(url + path)).status, 403, path);
+    }
+  } finally {
+    if (dbPath === undefined) delete process.env.ESCROW_DB_PATH;
+    else process.env.ESCROW_DB_PATH = dbPath;
+    await server?.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });

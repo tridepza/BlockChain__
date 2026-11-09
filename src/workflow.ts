@@ -9,6 +9,7 @@ export type Milestone = {
   amount: number;
   status: MilestoneStatus;
   submission?: string;
+  submissionVersion?: number;
   revisionReason?: string;
 };
 
@@ -65,6 +66,11 @@ export class WorkflowError extends Error {
 const cents = (amount: number) => Math.round(amount * 100);
 const isSettled = (milestone: Milestone) => ['Paid', 'Refunded'].includes(milestone.status);
 export const currentMilestone = (project: Project) => project.milestones.find(m => !isSettled(m));
+
+export function getSubmissionVersion(milestone: Milestone) {
+  // Existing projects stored the submission text without a version.
+  return milestone.submissionVersion ?? (milestone.submission || milestone.status === 'Submitted' ? 1 : 0);
+}
 
 export function escrowBalance(project: Project) {
   if (project.status === 'Cancelled') return 0;
@@ -140,7 +146,14 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   };
 }
 
-export type ProjectAction = { action: string; milestoneId?: number; note?: string; email?: string; cancellationId?: string };
+export type ProjectAction = {
+  action: string;
+  milestoneId?: number;
+  submissionVersion?: number;
+  note?: string;
+  email?: string;
+  cancellationId?: string;
+};
 type ActionResult = { project: Project; transaction?: Pick<Tx, 'action' | 'amount'> };
 
 export function applyProjectAction(p: Project, actor: Account, input: ProjectAction, freelancer?: Account): ActionResult {
@@ -194,6 +207,10 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
   }
 
   if (!milestone || milestone.id !== input.milestoneId || p.funded !== p.budget) throw invalidState();
+  const submissionVersion = getSubmissionVersion(milestone);
+  if (['approve', 'revision', 'dispute'].includes(input.action) && input.submissionVersion !== submissionVersion) {
+    throw new WorkflowError(409, 'Bản bàn giao đã thay đổi. Hãy làm mới dự án và xem lại bản hiện hành.');
+  }
   // Work changes invalidate the pending request, even when the balance stays the same.
   const updatedProject = { ...p, cancellation: undefined };
   switch (input.action) {
@@ -201,7 +218,13 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
         !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
-      return { project: { ...updatedProject, status: 'Submitted', milestones: updateMilestone({ status: 'Submitted', submission: note }) } };
+      return {
+        project: {
+          ...updatedProject,
+          status: 'Submitted',
+          milestones: updateMilestone({ status: 'Submitted', submission: note, submissionVersion: submissionVersion + 1 }),
+        },
+      };
     case 'revision':
     case 'dispute': {
       if (milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();

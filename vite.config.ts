@@ -7,7 +7,14 @@ const databaseName = basename(process.env.ESCROW_DB_PATH || 'escrow.sqlite');
 
 export default defineConfig({
   server: {
-    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.data/**', '**/server/**', `**/${databaseName}*`] },
+    fs: {
+      deny: [
+        '.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/server/**',
+        '**/.data/**', '**/.local-data/**',
+        '**/*.{sqlite,sqlite3,db}', '**/*.{sqlite,sqlite3,db}-{wal,shm,journal}',
+        `**/${databaseName}*`,
+      ],
+    },
   },
   plugins: [
     react(),

@@ -9,7 +9,7 @@ import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
   applyProjectAction, canRequestCancellation, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
-  escrowBalance, money, pendingCancellation, visibleWorkspace, WorkflowError,
+  escrowBalance, getSubmissionVersion, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
@@ -426,8 +426,8 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
   const canCancel = (owner || freelancer) && canRequestCancellation(p);
   const cancellation = canCancel ? pendingCancellation(p) : undefined;
 
-  function actionButton(action: string, label = actionLabels[action], milestoneId?: number, style = 'primary') {
-    return <button className={style} onClick={() => onAction({ action, milestoneId })}>{label}</button>;
+  function actionButton(action: ProjectAction, label = actionLabels[action.action], style = 'primary') {
+    return <button className={style} onClick={() => onAction(action)}>{label}</button>;
   }
 
   return <>
@@ -442,9 +442,9 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
         </div>
       </div>
       <div className="detail-actions">
-        {owner && p.status === 'Open' && actionButton('assign', demo ? 'Chọn Freelancer demo' : undefined)}
-        {owner && p.status === 'Proposal sent' && actionButton('fund', `Ký quỹ ${money(p.budget)}`)}
-        {canCancel && !cancellation && actionButton('requestCancel', undefined, undefined, 'danger-outline')}
+        {owner && p.status === 'Open' && actionButton({ action: 'assign' }, demo ? 'Chọn Freelancer demo' : undefined)}
+        {owner && p.status === 'Proposal sent' && actionButton({ action: 'fund' }, `Ký quỹ ${money(p.budget)}`)}
+        {canCancel && !cancellation && actionButton({ action: 'requestCancel' }, undefined, 'danger-outline')}
         {cancellation && cancellation.proposerId !== actor.id && <button className="danger-outline"
           onClick={() => onAction({ action: 'confirmCancel', cancellationId: cancellation.id })}>
           {actionLabels.confirmCancel}
@@ -459,28 +459,31 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
         <button className={tab === 'milestones' ? 'active' : ''} onClick={() => setTab('milestones')}>Milestone</button>
         <button className={tab === 'terms' ? 'active' : ''} onClick={() => setTab('terms')}>Điều khoản</button>
       </div>
-      {tab === 'milestones' ? <div className="milestones">{p.milestones.map(m => <div className="milestone" key={m.id}>
-        <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
-        <div className="mile-content">
-          <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
-          {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
-          {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
-          {current?.id === m.id && <div className="mile-buttons">
-            {freelancer && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
-              ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton('submit', undefined, m.id, 'primary small')}
-            {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
-              {actionButton('approve', undefined, m.id, 'primary small')}
-              {actionButton('revision', undefined, m.id, 'secondary small')}
-              {demo && actionButton('dispute', undefined, m.id, 'secondary small')}
-            </>}
-            {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>
-              {actionButton('release', undefined, m.id, 'primary small')}
-              {actionButton('refund', undefined, m.id, 'secondary small')}
-            </>}
-          </div>}
-        </div>
-        <div className="mile-amount">{money(m.amount)}</div>
-      </div>)}</div> : <div className="terms">
+      {tab === 'milestones' ? <div className="milestones">{p.milestones.map(m => {
+        const review = { milestoneId: m.id, submissionVersion: getSubmissionVersion(m) };
+        return <div className="milestone" key={m.id}>
+          <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
+          <div className="mile-content">
+            <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
+            {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
+            {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
+            {current?.id === m.id && <div className="mile-buttons">
+              {freelancer && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
+                ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton({ action: 'submit', milestoneId: m.id }, undefined, 'primary small')}
+              {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
+                {actionButton({ ...review, action: 'approve' }, undefined, 'primary small')}
+                {actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
+                {demo && actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
+              </>}
+              {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>
+                {actionButton({ action: 'release', milestoneId: m.id }, undefined, 'primary small')}
+                {actionButton({ action: 'refund', milestoneId: m.id }, undefined, 'secondary small')}
+              </>}
+            </div>}
+          </div>
+          <div className="mile-amount">{money(m.amount)}</div>
+        </div>;
+      })}</div> : <div className="terms">
         <div><small>NGÂN SÁCH</small><b>{money(p.budget)}</b></div>
         <div><small>THỜI GIAN TẠO</small><b>{p.created}</b></div>
         <div><small>QUY TẮC</small><b>Thực hiện milestone theo thứ tự</b></div>

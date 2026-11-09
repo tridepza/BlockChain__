@@ -114,10 +114,17 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await perform(freelancer, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Bản đầu tiên' });
     await click(page, 'Làm mới');
     await expect(page.getByText('Bản đầu tiên', { exact: true })).toBeVisible();
+    const staleTab = await page.context().newPage();
+    await staleTab.goto('/');
+    await openProject(staleTab, title);
+    await click(staleTab, 'Nghiệm thu & giải ngân');
     await perform(page, 'Yêu cầu sửa', { label: 'Lý do', value: 'Bổ sung bản mobile' });
     await click(freelancer, 'Làm mới');
     await expect(freelancer.getByText('Yêu cầu sửa: Bổ sung bản mobile')).toBeVisible();
     await perform(freelancer, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Đã bổ sung bản mobile' });
+    await staleTab.getByRole('dialog').getByRole('button', { name: 'Xác nhận', exact: true }).click();
+    await expect(staleTab.getByRole('dialog').getByRole('alert')).toContainText('Bản bàn giao đã thay đổi.');
+    await staleTab.close();
     await click(page, 'Làm mới');
     await perform(page, 'Nghiệm thu & giải ngân');
     await expect(page.getByText('Completed', { exact: true })).toBeVisible();
