@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { createServer as createViteServer } from 'vite';
+import { createServer as createViteServer, preview, resolveConfig } from 'vite';
 import { createApi } from '../server/api.mjs';
 
 const password = 'mật-khẩu-test-2026';
@@ -143,10 +143,13 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal((await action(owner, 'approve', firstReview)).status, 409);
   assert.equal((await action(owner, 'approve', { milestoneId: 1 })).status, 409);
   assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Yêu cầu cũ' })).status, 409);
+  assert.equal((await action(owner, 'revision', { milestoneId: 1, submissionVersion: 2, note: 'Yêu cầu sửa lần hai' })).status, 200);
+  assert.equal((await action(freelancer, 'submit', submission)).status, 200);
+  assert.equal((await action(owner, 'revision', { milestoneId: 1, submissionVersion: 3, note: 'Yêu cầu sửa lần ba' })).status, 409);
   const beforeApproval = (await req('workspace', { cookie: owner })).body;
   assert.equal(beforeApproval.projects[0].paid, 0);
   assert.deepEqual(beforeApproval.txs.map(tx => tx.amount), [0.3]);
-  const currentReview = { ...firstReview, submissionVersion: 2 };
+  const currentReview = { ...firstReview, submissionVersion: 3 };
   const approvals = await Promise.all([action(owner, 'approve', currentReview), action(owner, 'approve', currentReview)]);
   assert.deepEqual(approvals.map(result => result.status).sort(), [200, 409]);
   assert.equal((await action(freelancer, 'confirmCancel', firstRequest)).status, 409);
@@ -171,6 +174,43 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal(cancelled.body.projects[0].cancellation, undefined);
   assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
   assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
+});
+
+test('Vite từ chối DB đặt trong public hoặc thư mục đầu ra và chặn bản SQLite còn sót', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-vite-output-'));
+  const dbPath = process.env.ESCROW_DB_PATH;
+  const dbMode = process.env.ESCROW_DB;
+  const config = { root, configFile: resolve('vite.config.ts'), logLevel: 'silent' };
+  let server;
+  try {
+    process.env.ESCROW_DB = 'sqlite';
+    for (const dir of ['public', 'dist']) {
+      await mkdir(join(root, dir));
+      process.env.ESCROW_DB_PATH = join(root, dir, 'unsafe.sqlite');
+      const fixture = new DatabaseSync(process.env.ESCROW_DB_PATH);
+      fixture.exec("CREATE TABLE users(email TEXT); INSERT INTO users VALUES ('private@example.test')");
+      fixture.close();
+      await assert.rejects(resolveConfig(config, 'serve'), /ESCROW_DB_PATH/);
+      await assert.rejects(resolveConfig(config, 'build'), /ESCROW_DB_PATH/);
+    }
+    process.env.ESCROW_DB_PATH = ':memory:';
+    const resolved = await resolveConfig(config, 'build');
+    assert.equal(resolved.publicDir, '');
+    await writeFile(join(root, 'dist', 'index.html'), 'public fixture');
+    server = await preview({ ...config, preview: { host: '127.0.0.1', port: 0 } });
+    const url = 'http://127.0.0.1:' + server.httpServer.address().port;
+    assert.equal(await (await fetch(url + '/')).text(), 'public fixture');
+    for (const path of ['/unsafe.sqlite', '/%75nsafe.sqlite?raw']) {
+      assert.equal((await fetch(url + path)).status, 403);
+    }
+  } finally {
+    if (dbPath === undefined) delete process.env.ESCROW_DB_PATH;
+    else process.env.ESCROW_DB_PATH = dbPath;
+    if (dbMode === undefined) delete process.env.ESCROW_DB;
+    else process.env.ESCROW_DB = dbMode;
+    if (server) await new Promise(resolve => server.httpServer.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('Vite dev chặn tệp SQLite, dữ liệu xác thực cũ và cấu hình PostgreSQL qua HTTP', async () => {

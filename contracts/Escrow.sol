@@ -57,6 +57,9 @@ contract Escrow is ReentrancyGuard {
 
     uint64 public constant WINDOW = 72 hours;
     uint32 public constant POLICY_VERSION = 1;
+    bytes32 private constant CONSENT_STATE_TAG = keccak256("FreelancerEscrow/ConsentState/v1");
+    bytes32 private constant CONSENT_PAYLOAD_TAG = keccak256("FreelancerEscrow/ConsentPayload/v1");
+    bytes32 private constant CONSENT_TAG = keccak256("FreelancerEscrow/Consent/v1");
     IERC20 public immutable token;
     address public immutable factory;
     address public immutable client;
@@ -83,6 +86,7 @@ contract Escrow is ReentrancyGuard {
     mapping(bytes32 => bool) public evidenceExists;
     uint256 public offerNonce;
     Offer public offer;
+    bytes32 private offerStateHash;
     uint256[] private offeredShares;
     uint64 public firstCancelExpiry;
 
@@ -283,7 +287,7 @@ contract Escrow is ReentrancyGuard {
     function confirmOffer(uint256 nonce, bytes32 digest) external participant {
         Offer memory pending = offer;
         if (pending.author == msg.sender || pending.author == address(0)) revert Unauthorized();
-        if (nonce != offerNonce || digest != pending.digest || version != pending.version) revert StaleAction();
+        if (nonce != offerNonce || digest != pending.digest || consentStateHash() != offerStateHash) revert StaleAction();
         if (block.timestamp > pending.expiresAt) revert InvalidTime();
         if (pending.settlement) {
             if (state != State.Disputed) revert InvalidState();
@@ -335,6 +339,7 @@ contract Escrow is ReentrancyGuard {
         state = next;
         ++version;
         delete offer;
+        delete offerStateHash;
         delete offeredShares;
         delete firstCancelExpiry;
         emit StateChanged(next, closure, version);
@@ -357,15 +362,26 @@ contract Escrow is ReentrancyGuard {
         close(why);
     }
 
+    function consentStateHash() private view returns (bytes32) {
+        uint8 absent = type(uint8).max;
+        uint8 currentOrdinal = state == State.Active || state == State.Disputed ? uint8(current) : absent;
+        uint8 disputedOrdinal = state == State.Disputed ? currentOrdinal : absent;
+        return keccak256(abi.encode(CONSENT_STATE_TAG, version, uint8(state), currentOrdinal, disputedOrdinal, unallocated));
+    }
+
     function makeOffer(uint256 expectedVersion, bytes32 reasonHash, uint256[] memory shares, bool settlement) private {
         if (expectedVersion != version) revert StaleAction();
         if (reasonHash == bytes32(0)) revert InvalidTerms();
         if (offer.author != address(0) && block.timestamp <= offer.expiresAt) revert InvalidTime();
         uint64 expiresAt = uint64(block.timestamp) + WINDOW;
         uint256 nonce = ++offerNonce;
+        uint256[] memory clientShares = new uint256[](shares.length);
+        for (uint256 i; i < shares.length; ++i) clientShares[i] = milestones[current + i].amount - shares[i];
+        bytes32 payloadHash = keccak256(abi.encode(CONSENT_PAYLOAD_TAG, reasonHash, clientShares, shares));
+        offerStateHash = consentStateHash();
         bytes32 digest = keccak256(abi.encode(
-            uint256(1), block.chainid, address(this), settlement, msg.sender, nonce, expiresAt,
-            version, state, current, unallocated, reasonHash, shares
+            CONSENT_TAG, POLICY_VERSION, block.chainid, address(this), uint8(settlement ? 1 : 0),
+            msg.sender, nonce, expiresAt, offerStateHash, payloadHash
         ));
         offer = Offer(msg.sender, expiresAt, version, digest, settlement);
         offeredShares = shares;

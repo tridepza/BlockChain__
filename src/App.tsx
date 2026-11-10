@@ -8,7 +8,7 @@ import Auth from './Auth';
 import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
-  applyProjectAction, canRequestCancellation, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
+  applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
   escrowBalance, getSubmissionVersion, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
@@ -188,13 +188,13 @@ function Workspace(props: WorkspaceProps) {
           const project = latest.projects.find(project => project.id === dialog.projectId);
           if (!project) throw new WorkflowError(409, 'Dự án không còn trong bản demo.');
           const result = applyProjectAction(project, actor, input, demoAccounts.Freelancer);
-          const tx: Tx | null = result.transaction ? {
-            ...result.transaction, id: `DEMO-${crypto.randomUUID().slice(0, 8)}`, projectId: project.id,
+          const txs: Tx[] = (result.transactions ?? []).map(transaction => ({
+            ...transaction, id: `DEMO-${crypto.randomUUID().slice(0, 8)}`, projectId: project.id,
             project: project.title, status: 'Mô phỏng', time: new Date().toLocaleString('vi-VN'),
-          } : null;
+          }));
           persistDemo({
             projects: latest.projects.map(p => p.id === project.id ? result.project : p),
-            txs: tx ? [tx, ...latest.txs] : latest.txs,
+            txs: [...txs, ...latest.txs],
           });
         } else {
           setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
@@ -472,7 +472,7 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
                 ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton({ action: 'submit', milestoneId: m.id }, undefined, 'primary small')}
               {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
                 {actionButton({ ...review, action: 'approve' }, undefined, 'primary small')}
-                {actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
+                {canRequestRevision(m) && actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
                 {demo && actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
               </>}
               {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>

@@ -232,9 +232,9 @@ function createDatabaseApi(db) {
             ? await execute(findUser, [freelancerEmail]) : [];
           const result = applyProjectAction(readProject(row), current, body, freelancer);
           await execute('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(result.project), body.projectId]);
-          if (result.transaction) {
+          for (const transaction of result.transactions ?? []) {
             const tx = {
-              ...result.transaction, id: `DEMO-${randomInt(100_000_000, 999_999_999)}`, projectId: body.projectId,
+              ...transaction, id: `DEMO-${randomInt(100_000_000, 999_999_999)}`, projectId: body.projectId,
               project: result.project.title, time: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }),
               status: 'Mô phỏng',
             };

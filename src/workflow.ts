@@ -72,6 +72,9 @@ export function getSubmissionVersion(milestone: Milestone) {
   return milestone.submissionVersion ?? (milestone.submission || milestone.status === 'Submitted' ? 1 : 0);
 }
 
+export const canRequestRevision = (milestone: Milestone) =>
+  milestone.status === 'Submitted' && getSubmissionVersion(milestone) < 3;
+
 export function escrowBalance(project: Project) {
   if (project.status === 'Cancelled') return 0;
   const refunded = project.milestones.reduce((sum, m) => sum + (m.status === 'Refunded' ? cents(m.amount) : 0), 0);
@@ -154,7 +157,7 @@ export type ProjectAction = {
   email?: string;
   cancellationId?: string;
 };
-type ActionResult = { project: Project; transaction?: Pick<Tx, 'action' | 'amount'> };
+type ActionResult = { project: Project; transactions?: Pick<Tx, 'action' | 'amount'>[] };
 
 export function applyProjectAction(p: Project, actor: Account, input: ProjectAction, freelancer?: Account): ActionResult {
   const clientActions = ['assign', 'fund', 'approve', 'revision'];
@@ -182,7 +185,7 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       return { project: { ...p, status: 'Proposal sent', freelancer: freelancer.name, freelancerId: freelancer.id } };
     case 'fund':
       if (p.status !== 'Proposal sent' || !p.freelancerId || p.funded !== 0) throw invalidState();
-      return { project: { ...p, status: 'Funded', funded: p.budget }, transaction: { action: 'Ký quỹ', amount: p.budget } };
+      return { project: { ...p, status: 'Funded', funded: p.budget }, transactions: [{ action: 'Ký quỹ', amount: p.budget }] };
     case 'requestCancel': {
       if (!canRequestCancellation(p)) throw invalidState();
       const now = Date.now();
@@ -201,7 +204,7 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       const milestones = p.milestones.map(m => isSettled(m) ? m : { ...m, status: 'Refunded' as const });
       return {
         project: { ...p, milestones, status: 'Cancelled', cancellation: undefined },
-        transaction: { action: 'Hoàn tiền khi hủy', amount },
+        transactions: [{ action: 'Hoàn tiền khi hủy', amount }],
       };
     }
   }
@@ -232,6 +235,7 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       if (input.action === 'dispute') {
         return { project: { ...updatedProject, status: 'Disputed', disputeReason: note, milestones: updateMilestone({ status: 'Disputed' }) } };
       }
+      if (!canRequestRevision(milestone)) throw new WorkflowError(409, 'Milestone đã đạt giới hạn hai lần yêu cầu sửa.');
       return { project: { ...updatedProject, status: 'Revision requested', milestones: updateMilestone({ status: 'Revision requested', revisionReason: note }) } };
     }
     case 'approve':
@@ -242,13 +246,19 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       if (dispute ? p.status !== 'Disputed' || milestone.status !== 'Disputed' :
         milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();
       if (cents(escrowBalance(p)) < cents(milestone.amount)) throw invalidState();
-      const milestones = updateMilestone({ status: refund ? 'Refunded' : 'Paid' });
+      let milestones = updateMilestone({ status: refund ? 'Refunded' : 'Paid' });
       const paid = (cents(p.paid) + (refund ? 0 : cents(milestone.amount))) / 100;
       const decision = dispute ? (refund ? 'Hoàn trả Client' : 'Giải ngân cho Freelancer') : p.decision;
       const action = dispute ? (refund ? 'Phân xử: hoàn tiền' : 'Phân xử: giải ngân') : `Giải ngân milestone ${milestone.id}`;
+      const transactions = [{ action, amount: milestone.amount }];
+      if (dispute) {
+        const futureRefund = milestones.filter(m => !isSettled(m)).reduce((sum, m) => sum + cents(m.amount), 0);
+        milestones = milestones.map(m => isSettled(m) ? m : { ...m, status: 'Refunded' });
+        if (futureRefund > 0) transactions.push({ action: 'Hoàn tiền các milestone còn lại', amount: futureRefund / 100 });
+      }
       return {
         project: { ...updatedProject, paid, decision, milestones, status: milestones.every(isSettled) ? 'Completed' : 'In progress' },
-        transaction: { action, amount: milestone.amount },
+        transactions,
       };
     }
     default:
