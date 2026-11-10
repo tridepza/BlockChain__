@@ -8,7 +8,7 @@
 
 Tiếp theo, xem [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](docs/02-yeu-cau-va-use-case.md) để đối chiếu đặc tả MVP. Các ca nghiệm thu trong tài liệu bao gồm nhiều bước tích hợp blockchain ngoài phạm vi mô phỏng hiện tại.
 
-Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. SQLite lưu tài khoản, phiên và dữ liệu workspace tại `.data/escrow.sqlite`.
+Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. Backend lưu tài khoản, phiên và workspace trong PostgreSQL khi được cấu hình. Mặc định backend dùng SQLite tại `.data/escrow.sqlite`.
 
 Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) và [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md). Giai đoạn 4 đã hoàn thành ở mức thiết kế, gồm sơ đồ dữ liệu, luồng xác minh ví và giao dịch, giao diện API/contract, quy cách hash và đối soát. Bước tiếp theo là hoàn tất môi trường local của Giai đoạn 5.
 
@@ -34,6 +34,19 @@ Nếu npm báo `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, với Node 24 đang dùng trê
 $env:NODE_USE_SYSTEM_CA = '1'
 npm.cmd ci --cache .npm-cache --no-audit --no-fund
 ```
+
+## Kết nối PostgreSQL local
+
+1. Tạo tài khoản có quyền đăng nhập `freelancer_app` và database `freelancer_escrow` với **Owner** là tài khoản đó.
+2. Sao chép `.env.postgres.example` sang `.env.postgres.local` ở thư mục gốc. Điền mật khẩu của `freelancer_app` vào `PGPASSWORD`. Dùng dấu ngoặc kép bao quanh giá trị nếu mật khẩu có khoảng trắng hoặc ký tự `#`. Git bỏ qua tệp cấu hình cục bộ này.
+3. Trong terminal tại thư mục dự án, khởi tạo bảng rồi kiểm tra kết nối.
+
+```powershell
+npm.cmd run db:migrate
+npm.cmd run db:check
+```
+
+Khởi động lại website bằng lệnh dev ở trên. PostgreSQL lưu dữ liệu mới sau khi chuyển kết nối. Dữ liệu SQLite cũ vẫn nằm ở `.data/escrow.sqlite` và có thể mở lại bằng cách đặt `ESCROW_DB=sqlite` trong cấu hình cục bộ.
 
 ## Thử các luồng
 
@@ -106,7 +119,7 @@ vite.config.ts
 5. Thiết lập môi trường và cấu trúc dự án.
 6. Mock ERC-20 và escrow contract.
 7. Unit test, kiểm thử thất bại và hành vi tấn công.
-8. Backend, tài khoản và database — đã có đăng ký, phiên và hồ sơ trên SQLite local. Liên kết ví thuộc phần tích hợp tiếp theo.
+8. Backend, tài khoản và database — đã có đăng ký, phiên và hồ sơ trên SQLite hoặc PostgreSQL local. Liên kết ví thuộc phần tích hợp tiếp theo.
 9. MetaMask và giao tiếp on-chain.
 10. Dashboard cho ba vai trò.
 11. Tích hợp, đối soát và xử lý lỗi.

@@ -25,7 +25,7 @@ async function listen(filename) {
   return {
     close: async () => {
       await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      api.close();
+      await api.close();
     },
     async request(path, { data, cookie, headers } = {}) {
       const response = await fetch(baseURL + path, {
@@ -173,10 +173,11 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
 });
 
-test('Vite dev chặn tệp SQLite và dữ liệu xác thực cũ qua HTTP', async () => {
+test('Vite dev chặn tệp SQLite, dữ liệu xác thực cũ và cấu hình PostgreSQL qua HTTP', async () => {
   const root = await mkdtemp(join(tmpdir(), 'escrow-vite-'));
   const dbPath = process.env.ESCROW_DB_PATH;
-  const privateFiles = ['.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite', 'backup.db-wal', 'backup.sqlite3'];
+  const dbMode = process.env.ESCROW_DB;
+  const privateFiles = ['.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite', 'backup.db-wal', 'backup.sqlite3', '.env.postgres.local'];
   let server;
   try {
     await mkdir(join(root, '.local-data'));
@@ -184,6 +185,7 @@ test('Vite dev chặn tệp SQLite và dữ liệu xác thực cũ qua HTTP', as
     for (const file of privateFiles) await writeFile(join(root, file), 'private fixture');
     await writeFile(join(root, 'visible.txt'), 'public fixture');
     process.env.ESCROW_DB_PATH = ':memory:';
+    process.env.ESCROW_DB = 'sqlite';
     server = await createViteServer({
       root,
       configFile: resolve('vite.config.ts'),
@@ -201,6 +203,8 @@ test('Vite dev chặn tệp SQLite và dữ liệu xác thực cũ qua HTTP', as
   } finally {
     if (dbPath === undefined) delete process.env.ESCROW_DB_PATH;
     else process.env.ESCROW_DB_PATH = dbPath;
+    if (dbMode === undefined) delete process.env.ESCROW_DB;
+    else process.env.ESCROW_DB = dbMode;
     await server?.close();
     await rm(root, { recursive: true, force: true });
   }

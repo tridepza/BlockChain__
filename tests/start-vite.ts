@@ -2,6 +2,7 @@ import { createServer } from 'vite';
 
 export default async function startVite() {
   process.env.ESCROW_DB_PATH = ':memory:';
+  process.env.ESCROW_DB = 'sqlite';
   const server = await createServer({
     logLevel: 'silent',
     cacheDir: 'node_modules/.vite-e2e',

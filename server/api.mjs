@@ -1,9 +1,9 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { applyProjectAction, createProject, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { openPostgres, postgresConfig, postgresError } from './postgres.mjs';
+import { openSqlite } from './sqlite.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -12,12 +12,12 @@ const cookieName = 'escrow_session';
 const hashToken = token => createHash('sha256').update(token).digest('hex');
 const passwordHash = (password, salt) => deriveKey(password, salt, 64, passwordOptions);
 const normalizeEmail = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
-const validEmail = email => email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const validEmail = email => email.length <= 254 && !email.includes('\0') && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const publicAccount = ({ id, name, email, role }) => ({ id, name, email, role });
 
 function readName(value) {
   const name = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
-  if (name.length < 2 || name.length > 80) throw new WorkflowError(400, 'Tên phải có từ 2 đến 80 ký tự.');
+  if (name.length < 2 || name.length > 80 || name.includes('\0')) throw new WorkflowError(400, 'Tên phải có từ 2 đến 80 ký tự hợp lệ.');
   return name;
 }
 
@@ -65,44 +65,35 @@ async function readJson(req) {
 }
 
 export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.data/escrow.sqlite')) {
-  if (filename !== ':memory:') mkdirSync(dirname(resolve(filename)), { recursive: true });
-  const db = new DatabaseSync(filename, { timeout: 3000 });
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
-      role TEXT NOT NULL CHECK(role IN ('Client', 'Freelancer')),
-      salt BLOB NOT NULL, password_hash BLOB NOT NULL
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS sessions (
-      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      expires INTEGER NOT NULL
-    ) STRICT;
-    CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, data TEXT NOT NULL) STRICT;
-    CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY, data TEXT NOT NULL) STRICT;
-  `);
-  const userByEmail = db.prepare('SELECT * FROM users WHERE email = ?');
-  const userByToken = db.prepare(`
+  return createDatabaseApi(openSqlite(filename));
+}
+
+export async function createConfiguredApi(root) {
+  const config = postgresConfig(root);
+  if (!config) return createApi();
+  const db = openPostgres(config);
+  try {
+    if (!(await db.check()).ready) throw new Error('Chưa có đủ bảng PostgreSQL. Chạy npm.cmd run db:migrate.');
+    return createDatabaseApi(db);
+  } catch (error) {
+    await db.close();
+    throw new Error(postgresError(error));
+  }
+}
+
+const findUser = 'SELECT * FROM users WHERE email = ?';
+const findSession = `
     SELECT u.id, u.name, u.email, u.role FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires > ?
-  `);
-  const deleteSession = db.prepare('DELETE FROM sessions WHERE token_hash = ?');
-  const getProjects = db.prepare('SELECT data FROM projects ORDER BY id DESC');
+`;
+const deleteSession = 'DELETE FROM sessions WHERE token_hash = ?';
+const readProject = row => JSON.parse(row.data);
+
+function createDatabaseApi(db) {
+  const { query, transaction } = db;
   const attempts = new Map();
   const dummySalt = randomBytes(16);
   const dummyHash = randomBytes(64);
-
-  function transaction(operation) {
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = operation();
-      db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
-  }
 
   function limitAttempts(req, path) {
     const now = Date.now();
@@ -116,20 +107,27 @@ export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.dat
     attempts.set(key, limit);
   }
 
-  function startSession(req, res, user) {
+  async function startSession(req, res, user) {
     const previous = sessionToken(req);
     const token = randomBytes(32).toString('hex');
-    transaction(() => {
-      if (previous) deleteSession.run(hashToken(previous));
-      db.prepare('DELETE FROM sessions WHERE expires <= ?').run(Date.now());
-      db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(hashToken(token), user.id, Date.now() + sessionSeconds * 1000);
+    await transaction(async execute => {
+      if (previous) await execute(deleteSession, [hashToken(previous)]);
+      await execute('DELETE FROM sessions WHERE expires <= ?', [Date.now()]);
+      await execute('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)',
+        [hashToken(token), user.id, Date.now() + sessionSeconds * 1000]);
     });
     setSessionCookie(req, res, token);
   }
 
-  function workspace(user) {
-    const projects = getProjects.all().map(row => JSON.parse(row.data));
-    const txs = db.prepare('SELECT data FROM transactions ORDER BY id DESC').all().map(row => JSON.parse(row.data));
+  async function workspace(user) {
+    const rows = await query(`
+      SELECT id, data, 0 AS kind FROM projects
+      UNION ALL
+      SELECT id, data, 1 AS kind FROM transactions
+      ORDER BY kind, id DESC
+    `);
+    const projects = rows.filter(row => row.kind === 0).map(readProject);
+    const txs = rows.filter(row => row.kind === 1).map(row => JSON.parse(row.data));
     return visibleWorkspace({ projects, txs }, user);
   }
 
@@ -138,7 +136,7 @@ export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.dat
     const method = req.method;
     const token = sessionToken(req);
     if (method === 'GET' && path === '/api/projects/public') {
-      const projects = getProjects.all().map(row => JSON.parse(row.data))
+      const projects = (await query('SELECT data FROM projects ORDER BY id DESC')).map(readProject)
         .filter(p => p.status === 'Open')
         .map(({ id, title, category, description, budget }) => ({ id, title, category, description, budget }));
       return json(res, 200, { projects });
@@ -156,30 +154,37 @@ export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.dat
         const name = readName(body.name);
         if (!['Client', 'Freelancer'].includes(body.role)) throw new WorkflowError(400, 'Chọn vai trò Client hoặc Freelancer.');
         if (password.length < 12) throw new WorkflowError(400, 'Mật khẩu phải có ít nhất 12 ký tự.');
-        if (userByEmail.get(email)) throw new WorkflowError(409, 'Email này đã được đăng ký.');
+        if ((await query(findUser, [email])).length) throw new WorkflowError(409, 'Email này đã được đăng ký.');
         const salt = randomBytes(16);
         const hash = await passwordHash(password, salt);
-        const result = db.prepare('INSERT INTO users VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO NOTHING')
-          .run(randomUUID(), name, email, body.role, salt, hash);
-        if (!result.changes) throw new WorkflowError(409, 'Email này đã được đăng ký.');
+        const result = await query(`
+          INSERT INTO users (id, name, email, role, salt, password_hash)
+          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO NOTHING RETURNING id
+        `, [randomUUID(), name, email, body.role, salt, hash]);
+        if (!result.length) throw new WorkflowError(409, 'Email này đã được đăng ký.');
         return json(res, 201, { email });
       }
-      const user = userByEmail.get(email);
+      const [user] = await query(findUser, [email]);
       const hash = await passwordHash(password, user?.salt ?? dummySalt);
       if (!timingSafeEqual(hash, user?.password_hash ?? dummyHash) || !user) {
         throw new WorkflowError(401, 'Email hoặc mật khẩu không đúng.');
       }
-      startSession(req, res, user);
+      await startSession(req, res, user);
       return json(res, 200, { user: publicAccount(user) });
     }
 
     if (method === 'POST' && path === '/api/auth/logout') {
       await readJson(req);
-      const current = token && userByToken.get(hashToken(token), Date.now());
-      if (current && req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== current.id) {
-        throw new WorkflowError(401, 'Tài khoản đang đăng nhập đã thay đổi.');
+      if (token) {
+        await transaction(async execute => {
+          const tokenHash = hashToken(token);
+          const [current] = await execute(findSession, [tokenHash, Date.now()]);
+          if (current && req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== current.id) {
+            throw new WorkflowError(401, 'Tài khoản đang đăng nhập đã thay đổi.');
+          }
+          await execute(deleteSession, [tokenHash]);
+        });
       }
-      if (token) deleteSession.run(hashToken(token));
       setSessionCookie(req, res);
       return json(res, 200, {});
     }
@@ -187,56 +192,63 @@ export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.dat
     if (!['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
-    const user = token && userByToken.get(hashToken(token), Date.now());
+    const [user] = token ? await query(findSession, [hashToken(token), Date.now()]) : [];
     if (!user || (req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== user.id)) {
       throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn hoặc tài khoản đã thay đổi.');
     }
     if (method === 'GET' && path === '/api/auth/me') return json(res, 200, { user });
-    if (method === 'GET' && path === '/api/workspace') return json(res, 200, workspace(user));
+    if (method === 'GET' && path === '/api/workspace') return json(res, 200, await workspace(user));
 
     if (method === 'POST') {
       const body = await readJson(req);
-      // Recheck after reading the body in case the session was revoked while it arrived.
-      if (!userByToken.get(hashToken(token), Date.now())) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+      // Recheck after reading the body and keep the session valid through the write.
+      const authenticatedWrite = operation => transaction(async execute => {
+        const [current] = await execute(findSession + db.sessionLock, [hashToken(token), Date.now()]);
+        if (!current) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+        return operation(execute, current);
+      });
       if (path === '/api/auth/profile') {
         const name = readName(body.name);
-        db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
+        await authenticatedWrite(execute => execute('UPDATE users SET name = ? WHERE id = ?', [name, user.id]));
         return json(res, 200, { user: { ...user, name } });
       }
       if (path === '/api/projects') {
-        const project = transaction(() => {
-          const id = db.prepare('SELECT coalesce(max(id), 0) + 1 AS id FROM projects').get().id;
-          const project = createProject(user, body, id);
-          db.prepare('INSERT INTO projects VALUES (?, ?)').run(id, JSON.stringify(project));
+        const project = await authenticatedWrite(async (execute, current) => {
+          const project = createProject(current, body, 0);
+          const [row] = await execute('INSERT INTO projects (data) VALUES (?) RETURNING id', [JSON.stringify(project)]);
+          project.id = Number(row.id);
+          await execute('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(project), row.id]);
           return project;
         });
-        return json(res, 201, { project, data: workspace(user) });
+        return json(res, 201, { project, data: await workspace(user) });
       }
       if (path === '/api/projects/action') {
         if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
-        transaction(() => {
-          const row = db.prepare('SELECT data FROM projects WHERE id = ?').get(body.projectId);
+        await authenticatedWrite(async (execute, current) => {
+          const [row] = await execute('SELECT data FROM projects WHERE id = ?' + db.projectLock, [body.projectId]);
           if (!row) throw new WorkflowError(404, 'Dự án không tồn tại.');
-          const freelancer = body.action === 'assign' ? userByEmail.get(normalizeEmail(body.email)) : undefined;
-          const result = applyProjectAction(JSON.parse(row.data), user, body, freelancer);
-          db.prepare('UPDATE projects SET data = ? WHERE id = ?').run(JSON.stringify(result.project), body.projectId);
+          const freelancerEmail = normalizeEmail(body.email);
+          const [freelancer] = body.action === 'assign' && validEmail(freelancerEmail)
+            ? await execute(findUser, [freelancerEmail]) : [];
+          const result = applyProjectAction(readProject(row), current, body, freelancer);
+          await execute('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(result.project), body.projectId]);
           if (result.transaction) {
             const tx = {
               ...result.transaction, id: `DEMO-${randomInt(100_000_000, 999_999_999)}`, projectId: body.projectId,
               project: result.project.title, time: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }),
               status: 'Mô phỏng',
             };
-            db.prepare('INSERT INTO transactions(data) VALUES (?)').run(JSON.stringify(tx));
+            await execute('INSERT INTO transactions (data) VALUES (?)', [JSON.stringify(tx)]);
           }
         });
-        return json(res, 200, workspace(user));
+        return json(res, 200, await workspace(user));
       }
     }
     throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
   }
 
   return {
-    close: () => db.close(),
+    close: db.close,
     middleware(req, res, next) {
       if (!req.url?.startsWith('/api/')) return next();
       handle(req, res).catch(error => {
