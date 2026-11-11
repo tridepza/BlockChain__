@@ -8,7 +8,7 @@
 
 Tiếp theo, xem [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](docs/02-yeu-cau-va-use-case.md) để đối chiếu đặc tả MVP. Các ca nghiệm thu trong tài liệu bao gồm nhiều bước tích hợp blockchain ngoài phạm vi mô phỏng hiện tại.
 
-Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. Backend lưu tài khoản, phiên và workspace trong PostgreSQL khi được cấu hình. Mặc định backend dùng SQLite tại `.data/escrow.sqlite`.
+Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. Backend dùng MongoDB hoặc PostgreSQL khi được cấu hình. Với bản clone mới, backend dùng SQLite tại `.data/escrow.sqlite` cho đến khi có cấu hình database khác.
 
 Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) và [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md). Giai đoạn 4 đã hoàn thành ở mức thiết kế, gồm sơ đồ dữ liệu, luồng xác minh ví và giao dịch, giao diện API/contract, quy cách hash và đối soát. Bước tiếp theo là hoàn tất môi trường local của Giai đoạn 5.
 
@@ -35,6 +35,19 @@ $env:NODE_USE_SYSTEM_CA = '1'
 npm.cmd ci --cache .npm-cache --no-audit --no-fund
 ```
 
+## Kết nối MongoDB Atlas
+
+1. Trong Atlas, vào **Connect → Drivers** của cluster và lấy URI. Cấp quyền `readWrite` trên database `freelancer_escrow` cho tài khoản kết nối và thêm IP của mỗi máy vào **Network Access**.
+2. Sao chép `.env.mongo.example` thành `.env.mongo.local` ở thư mục gốc. Điền URI vào `MONGODB_URI`. Mỗi máy giữ tệp cục bộ riêng và dùng cùng tên `MONGODB_DB` để chia sẻ dữ liệu.
+3. Trên một máy, chạy `db:migrate` để tạo collections và chỉ mục. Sau đó mỗi máy chạy `db:check` và khởi động lại website.
+
+```powershell
+npm.cmd run db:migrate
+npm.cmd run db:check
+```
+
+Khi có `MONGODB_URI`, backend chọn MongoDB trước PostgreSQL. MongoDB cần Atlas hoặc replica set để ghi trạng thái dự án và giao dịch trong cùng một transaction. Khởi tạo MongoDB tạo schema cho dữ liệu mới. Tài khoản và dự án đã có trong SQLite hoặc PostgreSQL cần được chuyển riêng nếu muốn dùng lại.
+
 ## Kết nối PostgreSQL local
 
 1. Tạo tài khoản có quyền đăng nhập `freelancer_app` và database `freelancer_escrow` với **Owner** là tài khoản đó.
@@ -47,6 +60,8 @@ npm.cmd run db:check
 ```
 
 Khởi động lại website bằng lệnh dev ở trên. PostgreSQL lưu dữ liệu mới sau khi chuyển kết nối. Dữ liệu SQLite cũ vẫn nằm ở `.data/escrow.sqlite` và có thể mở lại bằng cách đặt `ESCROW_DB=sqlite` trong cấu hình cục bộ.
+
+Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong terminal trước khi chạy các lệnh database và website bằng PostgreSQL.
 
 ## Thử các luồng
 
@@ -119,7 +134,7 @@ vite.config.ts
 5. Thiết lập môi trường và cấu trúc dự án.
 6. Mock ERC-20 và escrow contract.
 7. Unit test, kiểm thử thất bại và hành vi tấn công.
-8. Backend, tài khoản và database — đã có đăng ký, phiên và hồ sơ trên SQLite hoặc PostgreSQL local. Liên kết ví thuộc phần tích hợp tiếp theo.
+8. Backend, tài khoản và database — đã có đăng ký, phiên và hồ sơ trên SQLite, PostgreSQL hoặc MongoDB. Liên kết ví thuộc phần tích hợp tiếp theo.
 9. MetaMask và giao tiếp on-chain.
 10. Dashboard cho ba vai trò.
 11. Tích hợp, đối soát và xử lý lỗi.

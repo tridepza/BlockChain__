@@ -2,8 +2,9 @@ import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { applyProjectAction, createProject, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
-import { openPostgres, postgresConfig, postgresError } from './postgres.mjs';
+import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
+import { sqlStore } from './sql-store.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -65,32 +66,26 @@ async function readJson(req) {
 }
 
 export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.data/escrow.sqlite')) {
-  return createDatabaseApi(openSqlite(filename));
+  return createDatabaseApi(sqlStore(openSqlite(filename)));
 }
 
 export async function createConfiguredApi(root) {
-  const config = postgresConfig(root);
-  if (!config) return createApi();
-  const db = openPostgres(config);
+  const connection = configuredDatabase(root);
+  if (!connection) return createApi();
+  const { db, store, name, explainError } = connection;
+  let status;
   try {
-    if (!(await db.check()).ready) throw new Error('Chưa có đủ bảng PostgreSQL. Chạy npm.cmd run db:migrate.');
-    return createDatabaseApi(db);
+    status = await db.check();
   } catch (error) {
     await db.close();
-    throw new Error(postgresError(error));
+    throw new Error(explainError(error));
   }
+  if (status.ready) return createDatabaseApi(store);
+  await db.close();
+  throw new Error(`Database ${name} chưa được khởi tạo. Chạy npm.cmd run db:migrate.`);
 }
 
-const findUser = 'SELECT * FROM users WHERE email = ?';
-const findSession = `
-    SELECT u.id, u.name, u.email, u.role FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.token_hash = ? AND s.expires > ?
-`;
-const deleteSession = 'DELETE FROM sessions WHERE token_hash = ?';
-const readProject = row => JSON.parse(row.data);
-
-function createDatabaseApi(db) {
-  const { query, transaction } = db;
+function createDatabaseApi(store) {
   const attempts = new Map();
   const dummySalt = randomBytes(16);
   const dummyHash = randomBytes(64);
@@ -110,25 +105,15 @@ function createDatabaseApi(db) {
   async function startSession(req, res, user) {
     const previous = sessionToken(req);
     const token = randomBytes(32).toString('hex');
-    await transaction(async execute => {
-      if (previous) await execute(deleteSession, [hashToken(previous)]);
-      await execute('DELETE FROM sessions WHERE expires <= ?', [Date.now()]);
-      await execute('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)',
-        [hashToken(token), user.id, Date.now() + sessionSeconds * 1000]);
+    await store.transaction(async writes => {
+      if (previous) await writes.deleteSession(hashToken(previous));
+      await writes.insertSession(hashToken(token), user.id, Date.now() + sessionSeconds * 1000);
     });
     setSessionCookie(req, res, token);
   }
 
   async function workspace(user) {
-    const rows = await query(`
-      SELECT id, data, 0 AS kind FROM projects
-      UNION ALL
-      SELECT id, data, 1 AS kind FROM transactions
-      ORDER BY kind, id DESC
-    `);
-    const projects = rows.filter(row => row.kind === 0).map(readProject);
-    const txs = rows.filter(row => row.kind === 1).map(row => JSON.parse(row.data));
-    return visibleWorkspace({ projects, txs }, user);
+    return visibleWorkspace(await store.readWorkspace(), user);
   }
 
   async function handle(req, res) {
@@ -136,8 +121,7 @@ function createDatabaseApi(db) {
     const method = req.method;
     const token = sessionToken(req);
     if (method === 'GET' && path === '/api/projects/public') {
-      const projects = (await query('SELECT data FROM projects ORDER BY id DESC')).map(readProject)
-        .filter(p => p.status === 'Open')
+      const projects = (await store.listOpenProjects())
         .map(({ id, title, category, description, budget }) => ({ id, title, category, description, budget }));
       return json(res, 200, { projects });
     }
@@ -154,17 +138,14 @@ function createDatabaseApi(db) {
         const name = readName(body.name);
         if (!['Client', 'Freelancer'].includes(body.role)) throw new WorkflowError(400, 'Chọn vai trò Client hoặc Freelancer.');
         if (password.length < 12) throw new WorkflowError(400, 'Mật khẩu phải có ít nhất 12 ký tự.');
-        if ((await query(findUser, [email])).length) throw new WorkflowError(409, 'Email này đã được đăng ký.');
+        if (await store.getUserByEmail(email)) throw new WorkflowError(409, 'Email này đã được đăng ký.');
         const salt = randomBytes(16);
         const hash = await passwordHash(password, salt);
-        const result = await query(`
-          INSERT INTO users (id, name, email, role, salt, password_hash)
-          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO NOTHING RETURNING id
-        `, [randomUUID(), name, email, body.role, salt, hash]);
-        if (!result.length) throw new WorkflowError(409, 'Email này đã được đăng ký.');
+        const created = await store.createUser({ id: randomUUID(), name, email, role: body.role, salt, password_hash: hash });
+        if (!created) throw new WorkflowError(409, 'Email này đã được đăng ký.');
         return json(res, 201, { email });
       }
-      const [user] = await query(findUser, [email]);
+      const user = await store.getUserByEmail(email);
       const hash = await passwordHash(password, user?.salt ?? dummySalt);
       if (!timingSafeEqual(hash, user?.password_hash ?? dummyHash) || !user) {
         throw new WorkflowError(401, 'Email hoặc mật khẩu không đúng.');
@@ -176,13 +157,13 @@ function createDatabaseApi(db) {
     if (method === 'POST' && path === '/api/auth/logout') {
       await readJson(req);
       if (token) {
-        await transaction(async execute => {
+        await store.transaction(async writes => {
           const tokenHash = hashToken(token);
-          const [current] = await execute(findSession, [tokenHash, Date.now()]);
+          const current = await writes.getSessionUser(tokenHash);
           if (current && req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== current.id) {
             throw new WorkflowError(401, 'Tài khoản đang đăng nhập đã thay đổi.');
           }
-          await execute(deleteSession, [tokenHash]);
+          await writes.deleteSession(tokenHash);
         });
       }
       setSessionCookie(req, res);
@@ -192,7 +173,7 @@ function createDatabaseApi(db) {
     if (!['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
-    const [user] = token ? await query(findSession, [hashToken(token), Date.now()]) : [];
+    const user = token && await store.getSessionUser(hashToken(token));
     if (!user || (req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== user.id)) {
       throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn hoặc tài khoản đã thay đổi.');
     }
@@ -202,43 +183,37 @@ function createDatabaseApi(db) {
     if (method === 'POST') {
       const body = await readJson(req);
       // Recheck after reading the body and keep the session valid through the write.
-      const authenticatedWrite = operation => transaction(async execute => {
-        const [current] = await execute(findSession + db.sessionLock, [hashToken(token), Date.now()]);
+      const authenticatedWrite = operation => store.transaction(async writes => {
+        const current = await writes.getSessionUser(hashToken(token), true);
         if (!current) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
-        return operation(execute, current);
+        return operation(writes, current);
       });
       if (path === '/api/auth/profile') {
         const name = readName(body.name);
-        await authenticatedWrite(execute => execute('UPDATE users SET name = ? WHERE id = ?', [name, user.id]));
+        await authenticatedWrite(writes => writes.updateUserName(user.id, name));
         return json(res, 200, { user: { ...user, name } });
       }
       if (path === '/api/projects') {
-        const project = await authenticatedWrite(async (execute, current) => {
-          const project = createProject(current, body, 0);
-          const [row] = await execute('INSERT INTO projects (data) VALUES (?) RETURNING id', [JSON.stringify(project)]);
-          project.id = Number(row.id);
-          await execute('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(project), row.id]);
-          return project;
-        });
+        const project = await authenticatedWrite((writes, current) => writes.createProject(createProject(current, body, 0)));
         return json(res, 201, { project, data: await workspace(user) });
       }
       if (path === '/api/projects/action') {
         if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
-        await authenticatedWrite(async (execute, current) => {
-          const [row] = await execute('SELECT data FROM projects WHERE id = ?' + db.projectLock, [body.projectId]);
-          if (!row) throw new WorkflowError(404, 'Dự án không tồn tại.');
+        await authenticatedWrite(async (writes, current) => {
+          const project = await writes.getProject(body.projectId);
+          if (!project) throw new WorkflowError(404, 'Dự án không tồn tại.');
           const freelancerEmail = normalizeEmail(body.email);
-          const [freelancer] = body.action === 'assign' && validEmail(freelancerEmail)
-            ? await execute(findUser, [freelancerEmail]) : [];
-          const result = applyProjectAction(readProject(row), current, body, freelancer);
-          await execute('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(result.project), body.projectId]);
+          const freelancer = body.action === 'assign' && validEmail(freelancerEmail)
+            ? await writes.getUserByEmail(freelancerEmail) : undefined;
+          const result = applyProjectAction(project, current, body, freelancer);
+          await writes.saveProject(result.project);
           for (const transaction of result.transactions ?? []) {
             const tx = {
               ...transaction, id: `DEMO-${randomInt(100_000_000, 999_999_999)}`, projectId: body.projectId,
               project: result.project.title, time: new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }),
               status: 'Mô phỏng',
             };
-            await execute('INSERT INTO transactions (data) VALUES (?)', [JSON.stringify(tx)]);
+            await writes.addTransaction(tx);
           }
         });
         return json(res, 200, await workspace(user));
@@ -248,7 +223,7 @@ function createDatabaseApi(db) {
   }
 
   return {
-    close: db.close,
+    close: store.close,
     middleware(req, res, next) {
       if (!req.url?.startsWith('/api/')) return next();
       handle(req, res).catch(error => {

@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "db:check": "node server/postgres-cli.mjs check",
-    "db:migrate": "node server/postgres-cli.mjs migrate",
+    "db:check": "node server/database-cli.mjs check",
+    "db:migrate": "node server/database-cli.mjs migrate",
     "test": "node --test tests/api.test.mjs",
     "test:e2e": "playwright test",
     "compile:contracts": "hardhat compile",
@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
+    "mongodb": "7.8.0",
     "pg": "8.23.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

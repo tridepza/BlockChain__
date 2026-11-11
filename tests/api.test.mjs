@@ -217,7 +217,10 @@ test('Vite dev chặn tệp SQLite, dữ liệu xác thực cũ và cấu hình 
   const root = await mkdtemp(join(tmpdir(), 'escrow-vite-'));
   const dbPath = process.env.ESCROW_DB_PATH;
   const dbMode = process.env.ESCROW_DB;
-  const privateFiles = ['.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite', 'backup.db-wal', 'backup.sqlite3', '.env.postgres.local'];
+  const privateFiles = [
+    '.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite',
+    'backup.db-wal', 'backup.sqlite3', '.env.postgres.local', '.env.mongo.local',
+  ];
   let server;
   try {
     await mkdir(join(root, '.local-data'));

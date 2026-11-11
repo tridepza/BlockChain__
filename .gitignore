@@ -12,3 +12,4 @@ test-results/
 .env.*
 !.env.example
 !.env.postgres.example
+!.env.mongo.example
