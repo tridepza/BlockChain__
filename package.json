@@ -11,6 +11,8 @@
     "db:migrate": "node server/database-cli.mjs migrate",
     "test": "node --test tests/api.test.mjs",
     "test:e2e": "playwright test",
+    "chain:node": "hardhat node --hostname 127.0.0.1",
+    "chain:deploy": "hardhat run scripts/deploy-local.ts --network localhost",
     "compile:contracts": "hardhat compile",
     "test:contracts": "hardhat test nodejs",
     "typecheck:contracts": "tsc --project tsconfig.hardhat.json"
@@ -34,6 +36,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "hardhat": "3.21.2",
+    "solc": "0.8.30",
     "typescript": "^5.7.2",
     "viem": "2.57.16",
     "vite": "^6.0.5",

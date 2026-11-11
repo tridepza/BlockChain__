@@ -142,7 +142,7 @@ test('funded escrow requires both parties and preserves the completed milestone 
   await escrow.write.accept([offChainHash()], { account: freelancer });
   await token.write.approve([escrow.address, terms.budgetUnits]);
   await escrow.write.fund();
-  await escrow.write.start([], { account: freelancer });
+  await escrow.write.start({ account: freelancer });
   await escrow.write.submit([0n, await escrow.read.version(), hash('milestone 1')], { account: freelancer });
   await escrow.write.approveMilestone([0n, await escrow.read.version()]);
   await escrow.write.submit([1n, await escrow.read.version(), hash('milestone 2')], { account: freelancer });
@@ -169,7 +169,7 @@ test('funded escrow requires both parties and preserves the completed milestone 
   assert.equal(await escrow.read.claimable([freelancer.address]), units('30'));
   assert.equal(await token.read.balanceOf([escrow.address]), terms.budgetUnits);
   await escrow.write.withdraw();
-  await escrow.write.withdraw([], { account: freelancer });
+  await escrow.write.withdraw({ account: freelancer });
   assert.equal(await token.read.balanceOf([escrow.address]), 0n);
 });
 
@@ -188,7 +188,7 @@ test('funded cancellation uses no current ordinal and settlement hashes both par
   assert.equal(cancelDigest, consentHash(chainId, escrow.address, 0, owner.address, cancelNonce, cancelExpiry,
     cancelVersion, 2, 255, 255, units('100'), cancelReason, [], []));
 
-  await escrow.write.start([], { account: freelancer });
+  await escrow.write.start({ account: freelancer });
   await assertions.revertWithCustomError(
     escrow.write.confirmOffer([cancelNonce, cancelDigest], { account: freelancer }), escrow, 'Unauthorized',
   );

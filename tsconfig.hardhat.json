@@ -10,5 +10,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["hardhat.config.ts", "tests/contracts/**/*.ts"]
+  "include": ["hardhat.config.ts", ".hardhat/artifacts/**/*.d.ts", "scripts/**/*.ts", "tests/contracts/**/*.ts"]
 }

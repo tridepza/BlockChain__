@@ -33,9 +33,9 @@ UI có thể đọc dữ liệu công khai từ RPC mà không cần ký. API v�
 | Thành phần | Đang có trong repository | Đích thiết kế của Giai đoạn 4 |
 | --- | --- | --- |
 | Giao diện | React/Vite; demo có dữ liệu riêng trong localStorage | Giữ UI, bổ sung kết nối ví và trạng thái xác minh dữ liệu |
-| API | API Node.js trong `server/api.mjs`, chưa dùng Express | Express cho tài khoản, metadata, file và truy vấn bản chiếu |
-| Database | SQLite tại `.data/escrow.sqlite` | PostgreSQL theo ERD ở mục 2. Dữ liệu giao dịch MOCK được giữ riêng với bản chiếu blockchain |
-| Ví và contract | Chưa tích hợp nghiệp vụ escrow; chỉ có contract kiểm tra bộ công cụ | MetaMask, MockUSDC, Factory tạo một Escrow cho mỗi agreement |
+| API | API Node.js cho tài khoản và workspace mô phỏng | Express cho tài khoản, metadata, file và truy vấn bản chiếu |
+| Database | SQLite mặc định, có bộ lưu trữ PostgreSQL hoặc MongoDB khi được cấu hình | PostgreSQL theo ERD ở mục 2. Dữ liệu MOCK có phạm vi riêng với bản chiếu blockchain |
+| Ví và contract | Solidity có MockUSDC, EscrowFactory và Escrow. Script chạy kịch bản trên Hardhat local | MetaMask ký giao dịch qua website và dùng ABI đã biên dịch |
 | File và đồng bộ | Chưa có kho bằng chứng riêng và bộ đồng bộ chain theo thiết kế này | Kho file riêng, kiểm soát quyền qua API và bộ đồng bộ có đối soát |
 
 Đây là bản thiết kế, không phải thông báo đã chuyển database hoặc đã có giao dịch thật. Các giao dịch MOCK và mã `DEMO-*` hiện tại không phải receipt on-chain.
@@ -439,6 +439,20 @@ Bảng ghi tên logic và dữ liệu tối thiểu. Thứ tự tham số, kiể
 
 Trạng thái email/session chỉ quyết định quyền API. Ví đang mở, ví đã liên kết và địa chỉ có quyền trên escrow phải cùng khớp trước khi UI gửi thao tác. Nếu một giao dịch đúng quyền được thực hiện trực tiếp ngoài UI trên escrow chính thức, worker vẫn ghi nhận. Với log chưa có bản nháp file tương ứng, chỉ tạo liên kết nội dung sau khi kiểm tra hash, người gửi và phạm vi đã xác minh.
 
+### 5.4. Ánh xạ sang ABI v1
+
+Các tên ở mục 5.2 dùng cho thiết kế luồng. Khi ký hoặc giải mã log, lấy chữ ký chính xác từ ABI được sinh bởi Hardhat cho mã Solidity hiện tại. Manifest do `chain:deploy` tạo ghi `abiVersion=1` và fingerprint theo mục 7.1.
+
+| Nghiệp vụ ở mục 5.2 | Hàm, event và nguồn trường của ABI v1 |
+| --- | --- |
+| Tạo, chấp nhận và nạp | Factory gọi `createEscrow(terms, expectedTermsHash)`, đọc `EscrowCreated`. Escrow phát `TermsAccepted(termsHash)` và `Funded(amount)`. Ví nạp lấy từ transaction sender và đối chiếu `client()`. |
+| Bắt đầu, chuyển mốc, đóng và phiên bản | Dùng `StateChanged(state, closure, version)`. Xác định mốc kích hoạt từ thao tác và ordinal đã nghiệm thu. Thời điểm kích hoạt lấy từ block. Đối chiếu `current()` và deadline của milestone khi đọc snapshot. |
+| Bàn giao và yêu cầu sửa | `Submitted(milestone, evidenceHash, reviewBy)` và `RevisionRequested(milestone, reasonHash, revisionBy)`. Đếm các bản nộp/yêu cầu sửa từ log canonical theo thứ tự. `approveMilestone` và `requestRevision` bảo vệ bản đang xem bằng ordinal và `expectedVersion`, vì lần nộp mới làm tăng work version. |
+| Phân bổ và đóng trước nạp | `Allocated(milestone, outcome, toFreelancer, toClient)`. `cancelUnfunded()` phát `StateChanged` với lý do tương ứng. `expireFunding()` và `expireStart()` giữ đúng tên. |
+| Đề nghị, xác nhận và hòa giải | `OfferMade(nonce, digest, author, settlement, expiresAt, reasonHash)` định danh đề nghị. `proposeSettlement` nhận mảng phần Freelancer. Phần Client bằng số tiền mốc trừ phần đó. Tính lại state/payload hash từ dữ liệu trước thao tác, calldata và mục 7.4. Xác nhận qua `confirmOffer(nonce, digest)`. Receipt thành công, calldata, ví gọi, các log `Allocated` và `StateChanged` cùng chứng minh thao tác đóng. Khi hòa giải, `StateChanged` có closure `Settled`. |
+| Tranh chấp và phân xử | `DisputeOpened` và `EvidenceAdded(sequence, evidenceHash, author)`. Lấy ordinal bổ sung từ vụ đang mở. `resolve(toFreelancer, expectedEvidenceCount, decisionHash)` phát `Resolved(decisionHash, evidenceCount)`, `Allocated` và `StateChanged`. Phần Client của mốc tranh chấp bằng giá trị mốc trừ phần Freelancer. |
+| Rút và số dư | `Withdrawn(beneficiary, amount)` và `Transfer` từ token. Đối chiếu với `funded()`, `unallocated()`, `claimable(address)`, `withdrawn(address)` và `balanceOf(escrow)`. |
+
 ## 6. Vòng đời giao dịch và xác nhận
 
 | Trạng thái | Bằng chứng | Phản hồi UI |
@@ -552,4 +566,4 @@ Ví dụ dưới đây dùng 100 MockUSDC. Giá trị trao đổi qua API và AB
 | Xử tranh chấp 40 chia 15/25, hoàn 30 tương lai | Chỉ ghi các phân bổ của vụ và mốc tương lai. Với 30 đã rút trước đó, kết quả sau rút hết là 45/55 | FR-17–19, BR3-09–10 |
 | So hash cùng byte, thay một byte hoặc đổi thứ tự milestone | Cùng byte cho cùng hash. File hoặc điều khoản đổi làm đối chiếu thất bại | FR-07, FR-10, FR-17 |
 
-Đã xác định được luồng ký quỹ và rút từ UI tới ví, block, receipt/event, cơ sở dữ liệu và dashboard, gồm các nhánh từ chối ký, revert, RPC lỗi và reorg/reset. Các mục trên là thiết kế và ca rà soát. Chưa có migration PostgreSQL, kết nối MetaMask hay bộ đồng bộ được chạy để nghiệm thu. Giai đoạn 5 hoàn tất môi trường local. Giai đoạn 6–9 triển khai theo các giao diện và quy tắc đã chốt. Giai đoạn 11 kiểm thử đối soát và khôi phục với chain thực tế.
+Thiết kế xác định luồng ký quỹ và rút từ UI tới ví, block, receipt/event, cơ sở dữ liệu và dashboard, gồm từ chối ký, revert, RPC lỗi và reorg/reset. ABI v1 và kịch bản chạy Hardhat local cung cấp đầu vào cho các bước tích hợp. Migration theo ERD, MetaMask và bộ đồng bộ sẽ được nghiệm thu ở các giai đoạn backend, kết nối ví và kiểm thử tích hợp.

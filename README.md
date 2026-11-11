@@ -10,7 +10,7 @@ Tiếp theo, xem [Giai đoạn 2 — Yêu cầu, use case và ca nghiệm thu](d
 
 Tài khoản Client và Freelancer hỗ trợ đăng ký, đăng nhập, đăng xuất và sửa tên hiển thị. Mật khẩu được băm bằng scrypt có salt riêng. Cookie phiên HttpOnly có hiệu lực 7 ngày và được thu hồi khi đăng xuất. Backend dùng MongoDB hoặc PostgreSQL khi được cấu hình. Với bản clone mới, backend dùng SQLite tại `.data/escrow.sqlite` cho đến khi có cấu hình database khác.
 
-Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) và [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md). Giai đoạn 4 đã hoàn thành ở mức thiết kế, gồm sơ đồ dữ liệu, luồng xác minh ví và giao dịch, giao diện API/contract, quy cách hash và đối soát. Bước tiếp theo là hoàn tất môi trường local của Giai đoạn 5.
+Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/03-state-machine-va-quy-tac-tien.md) và [Giai đoạn 4 — Kiến trúc chi tiết, ERD và luồng giao dịch](docs/04-kien-truc-erd-va-transaction-flow.md). Giai đoạn 4 có sơ đồ dữ liệu, luồng xác minh ví và giao dịch, giao diện API/contract, quy cách hash và đối soát. Mã Solidity và kịch bản triển khai local thực hiện các quy tắc tiền của thiết kế này.
 
 ## Chạy website local
 
@@ -70,13 +70,41 @@ Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong 
 
 Ký quỹ, giải ngân và hoàn tiền trên website là giao dịch MOCK. Liên kết ví, giao dịch on-chain và phân xử trên workspace tài khoản nằm ngoài phần triển khai hiện tại.
 
+## Chạy hợp đồng trên Hardhat local
+
+Cài thư viện theo lockfile ở trên. Chạy node trong PowerShell và giữ cửa sổ này mở.
+
+```powershell
+npm.cmd run chain:node
+```
+
+Trong một cửa sổ PowerShell khác tại thư mục gốc, biên dịch và triển khai lên chính node đó.
+
+```powershell
+npm.cmd run compile:contracts
+npm.cmd run chain:deploy
+```
+
+Script triển khai MockUSDC, cấp token thử cho ba tài khoản Hardhat và tạo factory với `instanceKey` mới. Nó chạy một escrow mẫu với ngân sách 100 MockUSDC, nghiệm thu milestone đầu 30, rồi rút 30 về ví Freelancer. Sau khi số dư escrow còn 70 và các receipt khớp block, script ghi địa chỉ, mã nhận diện deployment, hash giao dịch và số block vào `.hardhat/local-deployment.json`.
+
+| Mục | Giá trị local |
+| --- | --- |
+| RPC | `http://127.0.0.1:8545` |
+| Chain ID | `31337` |
+| Ký hiệu phí gas | `ETH` thử nghiệm |
+| Tài khoản mẫu | `#0` Client, `#1` Freelancer, `#2` Arbitrator |
+
+Để thử từ MetaMask, thêm mạng tùy chỉnh với các giá trị trên và nhập tài khoản Hardhat thử từ terminal node. Xác nhận địa chỉ ví và số dư ETH thử nghiệm. Sau khi triển khai, dùng địa chỉ `token` trong manifest để thêm MockUSDC vào MetaMask. Khóa Hardhat chỉ dùng trên mạng local. [Hướng dẫn thêm mạng vào MetaMask](https://support.metamask.io/configure/networks/how-to-add-a-custom-network-rpc)
+
+Nhấn `Ctrl+C` ở terminal node để dừng. Mỗi lần khởi động lại node, chạy lại `chain:deploy` để tạo deployment mới và cập nhật manifest trước khi dùng địa chỉ trong ví. Chạy lại lệnh deploy khi node vẫn đang chạy sẽ tạo một bộ hợp đồng mới trên cùng node.
+
 ## Kiểm thử tự động
 
 ### Smart contract và bộ công cụ blockchain
 
 Đã cài Hardhat 3, Viem và Viem Toolbox (Node.js test runner). Phiên bản các dependency mới được cố định trong `package.json` và `package-lock.json`; kiểu Node.js dùng nhánh 24. Cấu hình dựa trên [Viem Toolbox](https://hardhat.org/docs/plugins/hardhat-toolbox-viem) và [cấu hình Hardhat](https://hardhat.org/docs/reference/configuration).
 
-`hardhat.config.ts` cố định Solidity **0.8.30**, optimizer **200 runs**, **viaIR** và EVM target **shanghai**. Mã Solidity nằm trong `contracts/`, dùng OpenZeppelin Contracts 5.6.1. Test TypeScript nằm trong `tests/contracts/`. ABI, bytecode và cache mới được sinh trong `.hardhat/`.
+`hardhat.config.ts` dùng compiler Solidity **0.8.30** từ gói `solc` đã khóa trong lockfile, optimizer **200 runs**, **viaIR** và EVM target **shanghai**. Hardhat biên dịch bằng compiler này sau khi cài thư viện. Mã Solidity dùng OpenZeppelin Contracts 5.6.1. ABI, kiểu TypeScript và bytecode được sinh trong `.hardhat/`.
 
 ```powershell
 npm.cmd ci --cache .npm-cache --no-audit --no-fund
@@ -85,7 +113,7 @@ npm.cmd run typecheck:contracts
 npm.cmd run test:contracts
 ```
 
-Lần biên dịch đầu cần Internet để Hardhat tải compiler. Test triển khai `ToolchainCheck`, `MockUSDC`, `EscrowFactory` và `Escrow` trên mạng mô phỏng tạm thời.
+Biên dịch trước khi chạy kiểm tra kiểu để sinh khai báo ABI. Test triển khai `ToolchainCheck`, `MockUSDC`, `EscrowFactory` và `Escrow` trên mạng mô phỏng tạm thời của Hardhat.
 
 `EscrowFactory` nhận địa chỉ token và `instanceKey` khác 0. Mỗi lần triển khai dùng một khóa ngẫu nhiên 32 byte mới. `createEscrow(terms, expectedTermsHash)` tính lại hash theo [quy cách Giai đoạn 4](docs/04-kien-truc-erd-va-transaction-flow.md#74-file-điều-khoản-và-đề-nghị-đồng-thuận), kiểm tra hạn tạo và chỉ tạo một lần cho mỗi cặp Client–`agreementRef`. Các hàm xử lý milestone, phân xử và đồng thuận trong `Escrow` dùng ABI của bản Solidity khôi phục. Chữ ký hàm và event thực tế nằm trong ABI mới tại `.hardhat/artifacts/`. Thư mục `artifacts/` ở gốc là đầu ra của bản cũ.
 
@@ -118,6 +146,9 @@ src/
   main.tsx
   style.css
 tests/
+contracts/
+scripts/
+  deploy-local.ts
 package.json
 package-lock.json
 index.html
@@ -131,8 +162,8 @@ vite.config.ts
 2. Yêu cầu chức năng, phi chức năng và use case — đã soạn đặc tả, chờ người học xem; chưa triển khai chức năng.
 3. State machine, quyền hạn, thời hạn và quy tắc tiền — đã hoàn thành và cải tiến tài liệu; chưa nghiệm thu triển khai on-chain.
 4. Kiến trúc chi tiết, ERD và transaction flow — đã hoàn thành thiết kế.
-5. Thiết lập môi trường và cấu trúc dự án.
-6. Mock ERC-20 và escrow contract.
+5. Thiết lập môi trường và cấu trúc dự án — đã có compiler cố định, node local và hướng dẫn thử ví.
+6. Mock ERC-20 và escrow contract — đã có mã, kịch bản deploy/seed và kiểm tra nạp, nghiệm thu, rút trên node local.
 7. Unit test, kiểm thử thất bại và hành vi tấn công.
 8. Backend, tài khoản và database — đã có đăng ký, phiên và hồ sơ trên SQLite, PostgreSQL hoặc MongoDB. Liên kết ví thuộc phần tích hợp tiếp theo.
 9. MetaMask và giao tiếp on-chain.
