@@ -81,8 +81,8 @@ async function setup(t: TestContext) {
     ]));
   }
 
-  async function create() {
-    const txHash = await factory.write.createEscrow([terms, offChainHash()]);
+  async function create(agreement = terms) {
+    const txHash = await factory.write.createEscrow([agreement, offChainHash(agreement)]);
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
     assert.equal(receipt.status, 'success');
     const events = parseEventLogs({ abi: createdAbi, logs: receipt.logs, eventName: 'EscrowCreated' });
@@ -93,7 +93,7 @@ async function setup(t: TestContext) {
     return { escrow, event, receipt };
   }
 
-  return { connection, owner, freelancer, outsider, publicClient, token, factory, terms, chainId, offChainHash, create };
+  return { connection, owner, freelancer, arbitrator, outsider, publicClient, token, factory, terms, chainId, offChainHash, create };
 }
 
 test('factory binds the Stage 4 hash to the deployment, client and reservation', async t => {
@@ -209,4 +209,96 @@ test('funded cancellation uses no current ordinal and settlement hashes both par
   assert.equal(await escrow.read.unallocated(), 0n);
   assert.equal(await escrow.read.claimable([owner.address]), units('67'));
   assert.equal(await escrow.read.claimable([freelancer.address]), units('33'));
+});
+
+test('fund requires full allowance and succeeds exactly at the funding deadline', async t => {
+  const { connection, owner, freelancer, publicClient, token, terms, offChainHash, create } = await setup(t);
+  const { escrow } = await create();
+  await escrow.write.accept([offChainHash()], { account: freelancer });
+  const insufficient = terms.budgetUnits - 1n;
+  const ownerBalance = await token.read.balanceOf([owner.address]);
+  await token.write.approve([escrow.address, insufficient]);
+  await connection.viem.assertions.revertWithCustomError(escrow.write.fund(), token, 'ERC20InsufficientAllowance');
+  assert.equal(await escrow.read.funded(), 0n);
+  assert.equal(await escrow.read.unallocated(), 0n);
+  assert.equal(await token.read.balanceOf([escrow.address]), 0n);
+  assert.equal(await token.read.balanceOf([owner.address]), ownerBalance);
+  assert.equal(await token.read.allowance([owner.address, escrow.address]), insufficient);
+
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  const fundDeadline = await escrow.read.fundDeadline();
+  const { time } = connection.networkHelpers;
+  const snapshot = await connection.networkHelpers.takeSnapshot();
+  await time.setNextBlockTimestamp(fundDeadline);
+  const tx = await escrow.write.fund();
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+  assert.equal((await publicClient.getBlock({ blockNumber: receipt.blockNumber })).timestamp, fundDeadline);
+  assert.equal(await escrow.read.funded(), terms.budgetUnits);
+
+  await snapshot.restore();
+  await time.increaseTo(fundDeadline + 1n);
+  await connection.viem.assertions.revertWithCustomError(escrow.write.fund(), escrow, 'InvalidTime');
+  assert.equal(await escrow.read.funded(), 0n);
+  await escrow.write.expireFunding({ account: freelancer });
+  assert.equal(await escrow.read.unallocated(), 0n);
+  assert.equal(await token.read.balanceOf([owner.address]), ownerBalance);
+});
+
+test('Freelancer can open a review-timeout dispute only after the review deadline', async t => {
+  const { connection, freelancer, publicClient, token, terms, offChainHash, create } = await setup(t);
+  const { escrow } = await create();
+  await escrow.write.accept([offChainHash()], { account: freelancer });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  await escrow.write.fund();
+  await escrow.write.start({ account: freelancer });
+  await escrow.write.submit([0n, await escrow.read.version(), hash('delivery')], { account: freelancer });
+
+  const [, , reviewBy] = await escrow.read.milestones([0n]);
+  const args = [0n, await escrow.read.version(), 1, hash('review timeout')] as const;
+  await connection.networkHelpers.time.increaseTo(reviewBy);
+  await connection.viem.assertions.revertWithCustomError(
+    escrow.simulate.openDispute(args, { account: freelancer.address }), escrow, 'InvalidState',
+  );
+  await connection.networkHelpers.time.setNextBlockTimestamp(reviewBy + 1n);
+  const tx = await escrow.write.openDispute(args, { account: freelancer, gas: 500_000n });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+  assert.equal(receipt.status, 'success');
+  assert.equal((await publicClient.getBlock({ blockNumber: receipt.blockNumber })).timestamp, reviewBy + 1n);
+  assert.equal(await escrow.read.unallocated(), terms.budgetUnits);
+});
+
+test('arbitration allocates the disputed milestone once and refunds future milestones', async t => {
+  const { connection, owner, freelancer, arbitrator, token, terms, offChainHash, create } = await setup(t);
+  const agreement = {
+    ...terms,
+    amounts: [units('30'), units('40'), units('30')],
+    baseDues: [...terms.baseDues, terms.baseDues[1] + 2n * 86400n],
+  };
+  const { escrow } = await create(agreement);
+  await escrow.write.accept([offChainHash(agreement)], { account: freelancer });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  await escrow.write.fund();
+  await escrow.write.start({ account: freelancer });
+  await escrow.write.submit([0n, await escrow.read.version(), hash('first delivery')], { account: freelancer });
+  await escrow.write.approveMilestone([0n, await escrow.read.version()]);
+  await escrow.write.submit([1n, await escrow.read.version(), hash('second delivery')], { account: freelancer });
+  await escrow.write.openDispute([1n, await escrow.read.version(), 0, hash('delivery dispute')]);
+  await escrow.write.addEvidence([hash('extra evidence')], { account: freelancer });
+
+  const { assertions } = connection.viem;
+  const decision = hash('arbitration decision');
+  await assertions.revertWithCustomError(escrow.write.resolve([units('15'), 0n, decision], { account: arbitrator }), escrow, 'StaleAction');
+  await assertions.revertWithCustomError(escrow.write.resolve([units('41'), 1n, decision], { account: arbitrator }), escrow, 'InvalidAmount');
+  assert.equal(await escrow.read.unallocated(), units('70'));
+
+  await escrow.write.resolve([units('15'), 1n, decision], { account: arbitrator });
+  await assertions.revertWithCustomError(escrow.write.resolve([units('15'), 1n, decision], { account: arbitrator }), escrow, 'InvalidState');
+  assert.equal(await escrow.read.unallocated(), 0n);
+  assert.equal(await escrow.read.claimable([freelancer.address]), units('45'));
+  assert.equal(await escrow.read.claimable([owner.address]), units('55'));
+  await escrow.write.withdraw({ account: freelancer });
+  await escrow.write.withdraw({ account: owner });
+  assert.equal(await escrow.read.withdrawn([freelancer.address]), units('45'));
+  assert.equal(await escrow.read.withdrawn([owner.address]), units('55'));
+  assert.equal(await token.read.balanceOf([escrow.address]), 0n);
 });

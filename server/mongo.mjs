@@ -32,6 +32,10 @@ export function mongoError(error) {
   if (error.syscall === 'querySrv' || error.syscall === 'queryTxt') {
     return 'Node.js không tra được DNS của MongoDB Atlas. Thử chuỗi mongodb:// trong mục Legacy URI String.';
   }
+  if (error.name === 'MongoServerSelectionError' && error.reason?.type === 'ReplicaSetNoPrimary' &&
+      [...error.reason.servers.values()].some(server => server.type === 'RSSecondary')) {
+    return 'Đã kết nối được node phụ của MongoDB, nhưng chưa chọn được node chính để ghi dữ liệu. Kiểm tra cluster và kết nối mạng.';
+  }
   if (error.name === 'MongoServerSelectionError' || error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
     return 'Không kết nối được MongoDB. Kiểm tra cluster, kết nối mạng và IP Access List trong Atlas.';
   }
@@ -40,7 +44,8 @@ export function mongoError(error) {
 
 export function openMongo(config) {
   const client = new MongoClient(config.uri, {
-    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 5000,
+    serverSelectionTimeoutMS: 20000,
     promoteBuffers: true,
     ignoreUndefined: true,
     ...(config.useSystemCA ? { ca: [...new Set([...getCACertificates('default'), ...getCACertificates('system')])] } : {}),

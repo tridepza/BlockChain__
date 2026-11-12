@@ -173,6 +173,7 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal(cancelled.body.projects[0].paid, 0.1);
   assert.equal(cancelled.body.projects[0].cancellation, undefined);
   assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
+  assert.ok(cancelled.body.txs.every(tx => tx.status === 'Mô phỏng' && tx.id.startsWith('DEMO-')));
   assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
 });
 
