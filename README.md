@@ -100,6 +100,10 @@ Script triển khai MockUSDC, cấp token thử cho ba tài khoản Hardhat và 
 
 Nhấn `Ctrl+C` ở terminal node để dừng. Mỗi lần khởi động lại node, chạy lại `chain:deploy` để tạo deployment mới và cập nhật manifest trước khi dùng địa chỉ trong ví. Chạy lại lệnh deploy khi node vẫn đang chạy sẽ tạo một bộ hợp đồng mới trên cùng node.
 
+### Token thử Freelance Token
+
+Khi Hardhat Local đang chạy, đặt `FESC_RECIPIENTS` thành danh sách địa chỉ ví thử cách nhau bằng dấu phẩy và chạy `npm.cmd run chain:deploy:fesc`. Lệnh tạo một token ERC-20 mới, cấp 1.000 FESC cho mỗi địa chỉ và in địa chỉ hợp đồng để nhập vào MetaMask. FESC có 18 chữ số thập phân và phí gas dùng ETH thử.
+
 ### Liên kết MetaMask với tài khoản web
 
 Nếu dùng MongoDB hoặc PostgreSQL, chạy lại `npm.cmd run db:migrate` để tạo nơi lưu địa chỉ ví và yêu cầu ký. Mở website tại `http://127.0.0.1:5173/` trong trình duyệt đã cài MetaMask Extension. Đăng nhập, vào **Ví & giao dịch → Kết nối MetaMask**, chọn ví Hardhat và ký thông điệp **Link wallet to Freelancer Escrow**. Yêu cầu ký có hiệu lực 5 phút và được dùng một lần trong phiên đã tạo yêu cầu.

@@ -13,6 +13,7 @@
     "test:e2e": "playwright test",
     "chain:node": "hardhat node --hostname 127.0.0.1",
     "chain:deploy": "hardhat run scripts/deploy-local.ts --network localhost",
+    "chain:deploy:fesc": "hardhat run scripts/deploy-fesc-local.ts --network localhost",
     "compile:contracts": "hardhat compile",
     "test:contracts": "hardhat test nodejs",
     "typecheck:contracts": "tsc --project tsconfig.hardhat.json"
