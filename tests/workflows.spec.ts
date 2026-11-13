@@ -108,11 +108,10 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
     await perform(page, 'Chọn Freelancer', { label: 'Email của Freelancer', value: workerEmail });
     await perform(page, 'Ký quỹ 100.00 MOCK');
-    await click(freelancer, 'Làm mới');
     await openProject(freelancer, title);
     await expect(freelancer.getByRole('button', { name: 'Nghiệm thu & giải ngân' })).toHaveCount(0);
     await perform(freelancer, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Bản đầu tiên' });
-    await click(page, 'Làm mới');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(page.getByText('Bản đầu tiên', { exact: true })).toBeVisible();
     const staleTab = await page.context().newPage();
     await staleTab.goto('/');

@@ -92,21 +92,31 @@ function Workspace(props: WorkspaceProps) {
   const [loading, setLoading] = useState(!demo);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const workspaceRead = useRef<{ background: boolean } | null>(null);
 
   function handleError(error: unknown) {
     if (error instanceof ApiError && error.status === 401) onExit(true);
     else setError(errorMessage(error));
   }
 
-  async function refresh() {
-    setLoading(true);
-    setError('');
+  async function refresh(background = false) {
+    if (background && workspaceRead.current) return;
+    const read = { background };
+    workspaceRead.current = read;
+    if (!background) {
+      setLoading(true);
+      setError('');
+    }
     try {
-      setData(await api<WorkspaceData>('workspace', undefined, actor.id));
+      const latest = await api<WorkspaceData>('workspace', undefined, actor.id);
+      if (workspaceRead.current === read) setData(latest);
     } catch (error) {
-      handleError(error);
+      if (workspaceRead.current === read && (!background || (error instanceof ApiError && error.status === 401))) {
+        handleError(error);
+      }
     } finally {
-      setLoading(false);
+      if (workspaceRead.current === read) workspaceRead.current = null;
+      if (!background) setLoading(false);
     }
   }
 
@@ -119,6 +129,19 @@ function Workspace(props: WorkspaceProps) {
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [demo, actor.id]);
+
+  useEffect(() => {
+    if (demo || loading || busy || dialog || page === 'profile') return;
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') void refresh(true);
+    }
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [demo, loading, busy, dialog, page, actor.id]);
 
   const { projects, txs } = demo ? visibleWorkspace(data, actor) : data;
   const privateProjects = projects.filter(project => canSeePrivate(project, actor));
@@ -135,6 +158,9 @@ function Workspace(props: WorkspaceProps) {
     setMobile(false);
     setError('');
     setNotice('');
+    if (!demo && !loading && !busy && (next === 'projects' || next === 'overview' || next === 'wallet')) {
+      void refresh(true);
+    }
   }
 
   function select(project: Project) {
@@ -149,6 +175,7 @@ function Workspace(props: WorkspaceProps) {
   }
 
   async function run(operation: () => Promise<void>) {
+    if (workspaceRead.current?.background) workspaceRead.current = null;
     setBusy(true);
     setError('');
     setNotice('');
@@ -250,7 +277,7 @@ function Workspace(props: WorkspaceProps) {
         <div className="crumb">Workspace <span>/</span> {title}</div>
         <div className="top-actions">
           {networkLabel && <span className="network"><i/> {networkLabel}</span>}
-          {!demo && <button className="icon-btn refresh-btn" aria-label="Làm mới" disabled={busy || loading} onClick={refresh}><RefreshCw size={16}/> <span>Làm mới</span></button>}
+          {!demo && <button className="icon-btn refresh-btn" aria-label="Làm mới" disabled={busy || loading} onClick={() => void refresh()}><RefreshCw size={16}/> <span>Làm mới</span></button>}
           <div className="top-avatar" aria-hidden="true">{initials}</div>
         </div>
       </header>
