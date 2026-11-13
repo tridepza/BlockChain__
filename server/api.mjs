@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { applyProjectAction, createProject, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { applyProjectAction, createProject, deliveryFileLimit, deliveryPreviewLimit, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { readDeliveryFiles, sendDeliveryFile } from './delivery.mjs';
 import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
@@ -38,7 +39,7 @@ function json(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-async function readJson(req) {
+async function readJson(req, limit = 16_384) {
   const scheme = req.socket.encrypted ? 'https' : 'http';
   const origin = `${scheme}://${req.headers.host}`;
   if ((req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') {
@@ -51,7 +52,7 @@ async function readJson(req) {
   let size = 0;
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
-    if (size > 16_384) {
+    if (size > limit) {
       req.resume();
       throw new WorkflowError(413, 'Nội dung yêu cầu quá dài.');
     }
@@ -123,6 +124,7 @@ function createDatabaseApi(store, root) {
     const path = req.url.split('?')[0];
     const method = req.method;
     const token = sessionToken(req);
+    const deliveryDownload = /^\/api\/projects\/(\d+)\/milestones\/(\d+)\/deliveries\/([\da-f-]{36})\/(preview|original)$/.exec(path);
     if (method === 'GET' && path === '/api/projects/public') {
       const projects = (await store.listOpenProjects())
         .map(({ id, title, category, description, budget }) => ({ id, title, category, description, budget }));
@@ -173,8 +175,8 @@ function createDatabaseApi(store, root) {
       return json(res, 200, {});
     }
 
-    if (!['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action',
-      '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding'].includes(path)) {
+    if (!deliveryDownload && !['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action', '/api/projects/delivery',
+      '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding', '/api/wallet/local-status'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
     const user = token && await store.getSessionUser(hashToken(token));
@@ -184,9 +186,31 @@ function createDatabaseApi(store, root) {
     if (method === 'GET' && path === '/api/auth/me') return json(res, 200, { user });
     if (method === 'GET' && path === '/api/workspace') return json(res, 200, await workspace(user));
     if (method === 'GET' && path === '/api/wallet') return json(res, 200, { wallet: await store.getWalletLink(user.id) });
+    if (method === 'GET' && deliveryDownload) {
+      const [, projectKey, milestoneId, deliveryId, kind] = deliveryDownload;
+      const projectId = Number(projectKey);
+      if (!Number.isSafeInteger(projectId)) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      const project = await store.getProject(projectId);
+      const isClient = user.role === 'Client' && user.id === project?.ownerId;
+      const isFreelancer = user.role === 'Freelancer' && user.id === project?.freelancerId;
+      if (!isClient && !isFreelancer) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      const milestone = project.milestones.find(item => item.id === Number(milestoneId));
+      const delivery = milestone?.deliveries?.find(item => item.id === deliveryId);
+      if (!delivery?.[kind]) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      if (kind === 'original' && isClient && (milestone.status !== 'Paid' || milestone.submissionVersion !== delivery.version)) {
+        throw new WorkflowError(403, 'Bản gốc chỉ mở cho phiên bản đã được giải ngân.');
+      }
+      const file = await store.getDeliveryFile(deliveryId, kind);
+      if (!file) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      return sendDeliveryFile(res, file);
+    }
 
     if (method === 'POST') {
-      const body = await readJson(req);
+      const deliveryUpload = path === '/api/projects/delivery';
+      if (deliveryUpload && user.role !== 'Freelancer') throw new WorkflowError(403, 'Chỉ Freelancer được tải tệp bàn giao.');
+      const body = await readJson(req, deliveryUpload
+        ? 4 * (Math.ceil(deliveryFileLimit / 3) + Math.ceil(deliveryPreviewLimit / 3)) + 16_384
+        : undefined);
       // Recheck after reading the body and keep the session valid through the write.
       const sessionId = hashToken(token);
       const authenticatedWrite = operation => store.transaction(async writes => {
@@ -203,6 +227,12 @@ function createDatabaseApi(store, root) {
         }
         const wallet = await walletApi.verify(body, store, authenticatedWrite, user.id, sessionId, origin);
         return json(res, 200, { wallet });
+      }
+      if (path === '/api/wallet/local-status') {
+        walletApi.getOrigin(req);
+        const wallet = await store.getWalletLink(user.id);
+        if (!wallet) throw new WorkflowError(409, 'Hãy xác minh ví trước.');
+        return json(res, 200, await walletApi.localStatus(wallet.address));
       }
       if (path === '/api/wallet/local-funding') {
         walletApi.getOrigin(req);
@@ -225,15 +255,26 @@ function createDatabaseApi(store, root) {
         const project = await authenticatedWrite((writes, current) => writes.createProject(createProject(current, body, 0)));
         return json(res, 201, { project, data: await workspace(user) });
       }
-      if (path === '/api/projects/action') {
+      if (path === '/api/projects/action' || deliveryUpload) {
         if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
+        if (deliveryUpload && body.action !== 'submit') throw new WorkflowError(400, 'Thao tác bàn giao không hợp lệ.');
         await authenticatedWrite(async (writes, current) => {
           const project = await writes.getProject(body.projectId);
           if (!project) throw new WorkflowError(404, 'Dự án không tồn tại.');
           const freelancerEmail = normalizeEmail(body.email);
           const freelancer = body.action === 'assign' && validEmail(freelancerEmail)
             ? await writes.getUserByEmail(freelancerEmail) : undefined;
-          const result = applyProjectAction(project, current, body, freelancer);
+          if (deliveryUpload && project.freelancerId !== current.id) {
+            throw new WorkflowError(403, 'Chỉ Freelancer của dự án được tải tệp bàn giao.');
+          }
+          const delivery = deliveryUpload ? readDeliveryFiles(body) : undefined;
+          const result = applyProjectAction(project, current, body, freelancer, delivery?.metadata);
+          if (delivery) {
+            const latest = result.project.milestones.find(item => item.id === body.milestoneId).deliveries.at(-1);
+            for (const [kind, file] of Object.entries(delivery.files)) {
+              if (file) await writes.saveDeliveryFile(latest.id, kind, file);
+            }
+          }
           await writes.saveProject(result.project);
           for (const transaction of result.transactions ?? []) {
             const tx = {

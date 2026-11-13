@@ -11,7 +11,7 @@ import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
   applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
-  escrowBalance, getSubmissionVersion, money, pendingCancellation, visibleWorkspace, WorkflowError,
+  deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
@@ -24,6 +24,19 @@ const navigation = [
 ] as const;
 type Page = typeof navigation[number]['id'] | 'detail';
 type Dialog = { kind: 'create' } | { kind: 'action'; projectId: number; action: ProjectAction };
+async function encodeDeliveryFile(file: File, limit: number) {
+  if (file.size > limit) throw new WorkflowError(413, `Tệp ${file.name} vượt giới hạn ${limit / (1024 * 1024)} MiB.`);
+  const data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result.slice(reader.result.indexOf(',') + 1));
+      else reject(new WorkflowError(400, 'Không đọc được tệp bàn giao.'));
+    };
+    reader.onerror = () => reject(new WorkflowError(400, 'Không đọc được tệp bàn giao.'));
+    reader.readAsDataURL(file);
+  });
+  return { name: file.name, data };
+}
 const emptyWorkspace: WorkspaceData = { projects: [], txs: [] };
 const actionLabels: Record<string, string> = {
   assign: 'Chọn Freelancer',
@@ -195,7 +208,8 @@ function Workspace(props: WorkspaceProps) {
 
   function submitDialog(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const fields = Object.fromEntries(new FormData(event.currentTarget));
+    const form = new FormData(event.currentTarget);
+    const fields = Object.fromEntries([...form].filter(([, value]) => typeof value === 'string'));
     if (!dialog) return;
     void run(async () => {
       if (dialog.kind === 'create') {
@@ -227,6 +241,16 @@ function Workspace(props: WorkspaceProps) {
             projects: latest.projects.map(p => p.id === project.id ? result.project : p),
             txs: [...txs, ...latest.txs],
           });
+        } else if (input.action === 'submit') {
+          const preview = form.get('preview');
+          const original = form.get('original');
+          if (!(preview instanceof File) || !preview.size) throw new WorkflowError(400, 'Hãy chọn bản xem trước để Client nghiệm thu.');
+          const data = {
+            ...input, projectId: dialog.projectId,
+            preview: await encodeDeliveryFile(preview, deliveryPreviewLimit),
+            original: original instanceof File && original.size ? await encodeDeliveryFile(original, deliveryFileLimit) : undefined,
+          };
+          setData(await api<WorkspaceData>('projects/delivery', data, actor.id));
         } else {
           setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
         }
@@ -406,8 +430,19 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
           <>
             {action === 'requestCancel' && <p className="hint">Đề nghị có hiệu lực 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi bên còn lại xác nhận.</p>}
             <label>{action === 'submit' ? 'Mô tả bàn giao' : 'Lý do'}<textarea name="note" required autoFocus maxLength={2000}/></label>
+            {action === 'submit' && !demo && <>
+              <label>Bản xem trước (PDF, PNG hoặc JPG, tối đa 2 MiB)
+                <input type="file" name="preview" accept=".pdf,.png,.jpg,.jpeg" required/>
+              </label>
+              <label>Bản gốc thử (tùy chọn, tối đa 10 MiB)
+                <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
+              </label>
+              <p className="hint">Client xem được bản xem trước ngay. Bản gốc thử chỉ mở sau khi milestone được giải ngân bằng MOCK mô phỏng. Hãy dùng tệp mẫu và tránh đưa mã nguồn hoặc thông tin truy cập vào bản xem trước.</p>
+            </>}
           </>
-        ) : <p className="hint">{action === 'confirmCancel' ? 'Dự án sẽ đóng và số dư chưa phân bổ sẽ được hoàn lại cho Client.' : 'Xác nhận thao tác trên dự án mô phỏng.'}</p>}
+        ) : <p className="hint">{action === 'approve' && !demo
+          ? 'Giải ngân MOCK cho milestone này và mở bản gốc của phiên bản đang nghiệm thu nếu có.'
+          : action === 'confirmCancel' ? 'Dự án sẽ đóng và số dư chưa phân bổ sẽ được hoàn lại cho Client.' : 'Xác nhận thao tác trên dự án mô phỏng.'}</p>}
         <button className="primary full" type="submit" autoFocus={!create && action !== 'assign' && !needsNote}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
       </fieldset>
     </form>
@@ -533,6 +568,27 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
           <div className="mile-content">
             <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
             {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
+            {!demo && privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
+              <summary>Lịch sử bàn giao ({m.deliveries.length})</summary>
+              <ul className="delivery-list">
+                {[...m.deliveries].reverse().map(delivery => {
+                  const url = `/api/projects/${p.id}/milestones/${m.id}/deliveries/${delivery.id}`;
+                  const canDownloadOriginal = freelancer || (owner && m.status === 'Paid' && delivery.version === m.submissionVersion);
+                  return <li key={delivery.id}>
+                    <b>Phiên bản {delivery.version}</b>
+                    {delivery.submittedAt && <time dateTime={delivery.submittedAt}> · {new Date(delivery.submittedAt).toLocaleString('vi-VN')}</time>}
+                    {delivery.version !== m.submissionVersion && <p>{delivery.note}</p>}
+                    <div className="delivery-files">
+                      {delivery.preview && <a href={url + '/preview'} download>Tải bản xem trước · {delivery.preview.name}</a>}
+                      {delivery.original && (canDownloadOriginal
+                        ? <a href={url + '/original'} download>Tải bản gốc · {delivery.original.name}</a>
+                        : <span>{delivery.version === m.submissionVersion ? 'Bản gốc đang khóa' : 'Bản gốc của phiên bản cũ đang khóa'}</span>)}
+                    </div>
+                    {delivery.original && <small className="delivery-hash">SHA-256 <code>{delivery.original.sha256}</code></small>}
+                  </li>;
+                })}
+              </ul>
+            </details>}
             {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
             {current?.id === m.id && <div className="mile-buttons">
               {freelancer && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&

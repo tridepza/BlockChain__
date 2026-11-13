@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createPublicClient, getAddress, http, isAddress, keccak256, parseAbi, recoverMessageAddress } from 'viem';
+import { createPublicClient, formatEther, getAddress, http, isAddress, keccak256, numberToHex, parseAbi, recoverMessageAddress } from 'viem';
 import { createSiweMessage } from 'viem/siwe';
 import { localChain } from '../src/local-chain.ts';
 import { WorkflowError } from '../src/workflow.ts';
@@ -43,6 +43,11 @@ export function walletLinking(root) {
       const origin = scheme + '://127.0.0.1:' + req.socket.localPort;
       if (req.headers.origin !== origin) throw new WorkflowError(403, 'Hãy mở website tại ' + origin + ' để liên kết ví.');
       return origin;
+    },
+    async localStatus(address) {
+      const deployment = await checkLocalDeployment(root, address);
+      const balance = await rpc.getBalance({ address });
+      return { eth: formatEther(balance), deploymentBlock: numberToHex(BigInt(deployment.startBlock)), deploymentBlockHash: deployment.startBlockHash };
     },
     async challenge(input, authenticatedWrite, userId, sessionId, origin) {
       if (input.chainId !== localChain.id) throw new WorkflowError(400, 'Hãy chuyển MetaMask sang Hardhat Local (31337).');

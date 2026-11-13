@@ -78,6 +78,11 @@ export function sqlStore(db) {
         return row && readData(row);
       },
       saveProject: project => query('UPDATE projects SET data = ? WHERE id = ?', [JSON.stringify(project), project.id]),
+      saveDeliveryFile: (id, kind, file) => query('INSERT INTO delivery_files VALUES (?, ?, ?)', [id, kind, JSON.stringify(file)]),
+      async getDeliveryFile(id, kind) {
+        const [row] = await query('SELECT data FROM delivery_files WHERE delivery_id = ? AND kind = ?', [id, kind]);
+        return row && readData(row);
+      },
       addTransaction: tx => query('INSERT INTO transactions (data) VALUES (?)', [JSON.stringify(tx)]),
     };
   }

@@ -163,8 +163,24 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
         return;
       }
       if (wallet) {
-        if (wallet.address !== address) setError('Hãy chọn địa chỉ ví đã xác minh trong MetaMask.');
-        else setMessage('MetaMask đang mở đúng ví và mạng Hardhat Local.');
+        if (wallet.address !== address) {
+          setError('Hãy chọn địa chỉ ví đã xác minh trong MetaMask.');
+          return;
+        }
+        step = 'Đối chiếu mạng Hardhat Local';
+        const status = await api<{ eth: string; deploymentBlock: string; deploymentBlockHash: string }>(
+          'wallet/local-status', {}, accountId,
+        );
+        const block = await provider.request({ method: 'eth_getBlockByNumber', params: [status.deploymentBlock, false] });
+        if (version.current !== requestVersion) {
+          setError('Ví hoặc mạng đã thay đổi. Hãy kiểm tra lại.');
+        } else if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== status.deploymentBlockHash) {
+          setError('RPC của MetaMask chưa khớp với Hardhat của website. Kiểm tra http://127.0.0.1:8545.');
+        } else {
+          setMessage(status.eth === '0'
+            ? 'Ví có 0 ETH thử. Bạn vẫn có thể ký thông điệp, nhưng cần ETH thử để gửi giao dịch.'
+            : `MetaMask đã kết nối đúng Hardhat Local. Số dư ví ${Number(status.eth).toFixed(4)} ETH thử.`);
+        }
         return;
       }
       step = 'Tạo yêu cầu ký';

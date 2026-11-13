@@ -10,8 +10,21 @@ export type Milestone = {
   status: MilestoneStatus;
   submission?: string;
   submissionVersion?: number;
+  deliveries?: Delivery[];
   revisionReason?: string;
 };
+
+export type Delivery = {
+  id: string;
+  version: number;
+  note: string;
+  submittedAt?: string;
+  preview?: { name: string };
+  original?: { name: string; sha256: string };
+};
+
+export const deliveryFileLimit = 10 * 1024 * 1024;
+export const deliveryPreviewLimit = 2 * 1024 * 1024;
 
 type CancellationRequest = { id: string; proposerId: string; reason: string; expiresAt: number };
 
@@ -159,7 +172,10 @@ export type ProjectAction = {
 };
 type ActionResult = { project: Project; transactions?: Pick<Tx, 'action' | 'amount'>[] };
 
-export function applyProjectAction(p: Project, actor: Account, input: ProjectAction, freelancer?: Account): ActionResult {
+export function applyProjectAction(
+  p: Project, actor: Account, input: ProjectAction, freelancer?: Account,
+  attachments?: Pick<Delivery, 'preview' | 'original'>,
+): ActionResult {
   const clientActions = ['assign', 'fund', 'approve', 'revision'];
   const ownerAction = clientActions.includes(input.action) ||
     (input.action === 'dispute' && actor.id === demoAccounts.Client.id);
@@ -221,11 +237,18 @@ export function applyProjectAction(p: Project, actor: Account, input: ProjectAct
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
         !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
+      const submittedAt = new Date().toISOString();
+      const history = milestone.deliveries ?? (milestone.submission
+        ? [{ id: crypto.randomUUID(), version: submissionVersion, note: milestone.submission }]
+        : []);
+      const delivery = { id: crypto.randomUUID(), version: submissionVersion + 1, note, submittedAt, ...attachments };
       return {
         project: {
           ...updatedProject,
           status: 'Submitted',
-          milestones: updateMilestone({ status: 'Submitted', submission: note, submissionVersion: submissionVersion + 1 }),
+          milestones: updateMilestone({
+            status: 'Submitted', submission: note, submissionVersion: delivery.version, deliveries: [...history, delivery],
+          }),
         },
       };
     case 'revision':

@@ -68,7 +68,9 @@ Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong 
 - **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt hoặc một cửa sổ thường và một cửa sổ ẩn danh để giữ hai phiên riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký rồi ký quỹ. Freelancer bấm **Làm mới** để thấy dự án và gửi bàn giao. Client có thể yêu cầu sửa hoặc nghiệm thu. Để hủy dự án đã ký quỹ, một bên chọn **Đề nghị hủy**, bên còn lại bấm **Làm mới** và xác nhận trong 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi xác nhận thành công. Tiến độ thay đổi làm đề nghị cũ hết hiệu lực.
 - **Bản demo.** Chọn **Thử bản demo** ở trang đăng nhập để đổi giữa Client, Freelancer và Arbitrator trên dữ liệu mẫu. Milestone 2 của dự án website đã có bàn giao để thử nhánh tranh chấp và phân xử. Dữ liệu demo lưu riêng trong trình duyệt. Xóa hai khóa `fe-projects` và `fe-txs` để trở về dữ liệu mẫu.
 
-Ký quỹ, giải ngân và hoàn tiền trên website là giao dịch MOCK. Liên kết ví, giao dịch on-chain và phân xử trên workspace tài khoản nằm ngoài phần triển khai hiện tại.
+Ký quỹ, giải ngân và hoàn tiền trong trang Dự án dùng MOCK mô phỏng. Trang Ví & giao dịch hỗ trợ liên kết ví và ký quỹ thử trên Hardhat Local. Bạn có thể thử phân xử trong bản demo trình duyệt.
+
+Khi gửi bàn giao trong workspace tài khoản, Freelancer đính kèm bản xem trước PDF, PNG hoặc JPEG (tối đa 2 MiB) và có thể thêm bản gốc thử ZIP, PDF, PNG, JPEG hoặc TXT (tối đa 10 MiB). Client có thể tải bản xem trước. Máy chủ lưu lịch sử và SHA-256 của tệp gốc, rồi cấp quyền tải đúng phiên bản được giải ngân trong luồng mô phỏng. Dùng tệp mẫu trong luồng này. Nếu dùng MongoDB hoặc PostgreSQL, chạy `db:migrate` để tạo nơi lưu tệp.
 
 ## Chạy hợp đồng trên Hardhat local
 

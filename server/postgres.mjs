@@ -86,7 +86,8 @@ export function openPostgres(config) {
           AND to_regclass('public.projects') IS NOT NULL
           AND to_regclass('public.transactions') IS NOT NULL
           AND to_regclass('public.wallet_links') IS NOT NULL
-          AND to_regclass('public.wallet_challenges') IS NOT NULL AS ready
+          AND to_regclass('public.wallet_challenges') IS NOT NULL
+          AND to_regclass('public.delivery_files') IS NOT NULL AS ready
       `);
       return status;
     },
@@ -94,6 +95,7 @@ export function openPostgres(config) {
       await execute('SELECT pg_advisory_xact_lock(704171249)');
       await execute(readFileSync(migration, 'utf8'));
       await execute(readFileSync(new URL('./migrations/002-wallet-links.sql', import.meta.url), 'utf8'));
+      await execute(readFileSync(new URL('./migrations/003-delivery-files.sql', import.meta.url), 'utf8'));
     }),
   };
 }

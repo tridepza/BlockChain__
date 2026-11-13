@@ -58,7 +58,8 @@ export function openMongo(config) {
   const counters = db.collection('counters');
   const walletLinks = db.collection('wallet_links');
   const walletChallenges = db.collection('wallet_challenges');
-  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges];
+  const deliveryFiles = db.collection('delivery_files');
+  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges, deliveryFiles];
   const projectCounter = { _id: 'projects' };
   const withoutStorageId = { projection: { _id: 0 } };
 
@@ -122,6 +123,8 @@ export function openMongo(config) {
       },
       getProject: id => projects.findOne({ _id: id }, { ...options, ...withoutStorageId }),
       saveProject: project => projects.replaceOne({ _id: project.id }, { ...project, _id: project.id }, options),
+      saveDeliveryFile: (id, kind, file) => deliveryFiles.insertOne({ _id: `${id}:${kind}`, ...file }, options),
+      getDeliveryFile: (id, kind) => deliveryFiles.findOne({ _id: `${id}:${kind}` }, { ...options, ...withoutStorageId }),
       addTransaction: tx => transactions.insertOne({ ...tx }, options),
     };
   }

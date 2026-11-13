@@ -36,6 +36,21 @@ async function perform(page: Page, action: string, field?: { label: string; valu
   await expect(dialog).toBeHidden();
 }
 
+async function deliver(page: Page, note: string, original: string) {
+  await click(page, 'Gửi bàn giao');
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Mô tả bàn giao').fill(note);
+  await dialog.getByLabel(/Bản xem trước/).setInputFiles({
+    name: 'xem-truoc.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/X6UAAAAASUVORK5CYII=', 'base64'),
+  });
+  await dialog.getByLabel(/Bản gốc thử/).setInputFiles({
+    name: 'ban-goc.txt', mimeType: 'text/plain', buffer: Buffer.from(original),
+  });
+  await dialog.getByRole('button', { name: 'Xác nhận', exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
 test('đăng ký, đăng nhập, tải lại, cập nhật hồ sơ và đăng xuất trên màn hình nhỏ', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
@@ -110,9 +125,17 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await perform(page, 'Ký quỹ 100.00 MOCK');
     await openProject(freelancer, title);
     await expect(freelancer.getByRole('button', { name: 'Nghiệm thu & giải ngân' })).toHaveCount(0);
-    await perform(freelancer, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Bản đầu tiên' });
+    await deliver(freelancer, 'Bản đầu tiên', 'Nội dung bản một');
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(page.getByText('Bản đầu tiên', { exact: true })).toBeVisible();
+    const preview = page.getByRole('link', { name: /Tải bản xem trước/ });
+    const previewUrl = (await preview.getAttribute('href'))!;
+    const originalV1 = previewUrl.replace(/preview$/, 'original');
+    expect((await page.request.get(previewUrl)).status()).toBe(200);
+    expect((await page.request.get(originalV1)).status()).toBe(403);
+    expect((await guest.request.get(previewUrl)).status()).toBe(401);
+    expect(await (await freelancer.request.get(originalV1)).text()).toBe('Nội dung bản một');
+    await expect(page.getByText('Bản gốc đang khóa', { exact: true })).toBeVisible();
     const staleTab = await page.context().newPage();
     await staleTab.goto('/');
     await openProject(staleTab, title);
@@ -120,14 +143,23 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await perform(page, 'Yêu cầu sửa', { label: 'Lý do', value: 'Bổ sung bản mobile' });
     await click(freelancer, 'Làm mới');
     await expect(freelancer.getByText('Yêu cầu sửa: Bổ sung bản mobile')).toBeVisible();
-    await perform(freelancer, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Đã bổ sung bản mobile' });
+    await deliver(freelancer, 'Đã bổ sung bản mobile', 'Nội dung bản hai');
     await staleTab.getByRole('dialog').getByRole('button', { name: 'Xác nhận', exact: true }).click();
     await expect(staleTab.getByRole('dialog').getByRole('alert')).toContainText('Bản bàn giao đã thay đổi.');
     await staleTab.close();
     await click(page, 'Làm mới');
+    const previewV2 = page.getByRole('link', { name: /Tải bản xem trước/ }).first();
+    const originalV2 = (await previewV2.getAttribute('href'))!.replace(/preview$/, 'original');
+    expect((await page.request.get(originalV2)).status()).toBe(403);
     await perform(page, 'Nghiệm thu & giải ngân');
     await expect(page.getByText('Completed', { exact: true })).toBeVisible();
     await expect(page.getByText('Còn ký quỹ: 0.00 MOCK · Đã trả: 100.00 MOCK')).toBeVisible();
+    expect((await page.request.get(originalV1)).status()).toBe(403);
+    const paidDownload = await page.request.get(originalV2);
+    expect(paidDownload.status()).toBe(200);
+    expect(paidDownload.headers()['content-disposition']).toContain('attachment');
+    expect(await paidDownload.text()).toBe('Nội dung bản hai');
+    await expect(page.getByRole('link', { name: /Tải bản gốc/ })).toHaveCount(1);
     await click(page, 'Ví & giao dịch');
     await expect(page.getByRole('row')).toHaveCount(3);
     await expect(page.getByRole('row', { name: /Giải ngân milestone 1.*100.00 MOCK/ })).toBeVisible();
