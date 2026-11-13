@@ -98,6 +98,14 @@ Script triển khai MockUSDC, cấp token thử cho ba tài khoản Hardhat và 
 
 Nhấn `Ctrl+C` ở terminal node để dừng. Mỗi lần khởi động lại node, chạy lại `chain:deploy` để tạo deployment mới và cập nhật manifest trước khi dùng địa chỉ trong ví. Chạy lại lệnh deploy khi node vẫn đang chạy sẽ tạo một bộ hợp đồng mới trên cùng node.
 
+### Liên kết MetaMask với tài khoản web
+
+Nếu dùng MongoDB hoặc PostgreSQL, chạy lại `npm.cmd run db:migrate` để tạo nơi lưu địa chỉ ví và yêu cầu ký. Mở website tại `http://127.0.0.1:5173/` trong trình duyệt đã cài MetaMask Extension. Đăng nhập, vào **Ví & giao dịch → Kết nối MetaMask**, chọn ví Hardhat và ký thông điệp **Link wallet to Freelancer Escrow**. Yêu cầu ký có hiệu lực 5 phút và được dùng một lần trong phiên đã tạo yêu cầu.
+
+Mỗi tài khoản liên kết một địa chỉ ví. Sau khi liên kết, **Kiểm tra ví đang mở** giúp bạn kiểm tra tài khoản và mạng đang chọn trong MetaMask. Ký thông điệp xác minh địa chỉ không tốn gas.
+
+Trong **Ví & giao dịch**, tài khoản Client đã xác minh ví có thể thử ký quỹ 100 MockUSDC trên Hardhat Local. Ví cần MockUSDC thử và ETH thử để trả gas. Bấm **Đọc lại trạng thái**, xác nhận tạo escrow trong MetaMask, rồi bấm **Đọc lại trạng thái** sau mỗi giao dịch. Ví Freelancer thử của Hardhat chấp nhận hợp đồng khi bạn bấm nút tương ứng. Client lần lượt ký cấp quyền và ký quỹ trong MetaMask. Website xác nhận ký quỹ từ receipt `fund` và log chuyển token. Bài thử dùng một escrow riêng cho mỗi ví Client trên mỗi deployment. Trang **Dự án** tiếp tục dùng giao dịch mô phỏng.
+
 ## Kiểm thử tự động
 
 ### Smart contract và bộ công cụ blockchain

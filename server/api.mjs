@@ -5,6 +5,8 @@ import { applyProjectAction, createProject, visibleWorkspace, WorkflowError } fr
 import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
+import { walletLinking } from './wallet.mjs';
+import { localFunding } from './local-funding.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -65,13 +67,13 @@ async function readJson(req) {
   return data;
 }
 
-export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.data/escrow.sqlite')) {
-  return createDatabaseApi(sqlStore(openSqlite(filename)));
+export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.data/escrow.sqlite'), root = process.cwd()) {
+  return createDatabaseApi(sqlStore(openSqlite(filename)), root);
 }
 
 export async function createConfiguredApi(root) {
   const connection = configuredDatabase(root);
-  if (!connection) return createApi();
+  if (!connection) return createApi(undefined, root);
   const { db, store, name, explainError } = connection;
   let status;
   try {
@@ -80,12 +82,13 @@ export async function createConfiguredApi(root) {
     await db.close();
     throw new Error(explainError(error));
   }
-  if (status.ready) return createDatabaseApi(store);
+  if (status.ready) return createDatabaseApi(store, root);
   await db.close();
   throw new Error(`Database ${name} chưa được khởi tạo. Chạy npm.cmd run db:migrate.`);
 }
 
-function createDatabaseApi(store) {
+function createDatabaseApi(store, root) {
+  const walletApi = walletLinking(root);
   const attempts = new Map();
   const dummySalt = randomBytes(16);
   const dummyHash = randomBytes(64);
@@ -170,7 +173,8 @@ function createDatabaseApi(store) {
       return json(res, 200, {});
     }
 
-    if (!['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action'].includes(path)) {
+    if (!['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action',
+      '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
     const user = token && await store.getSessionUser(hashToken(token));
@@ -179,15 +183,39 @@ function createDatabaseApi(store) {
     }
     if (method === 'GET' && path === '/api/auth/me') return json(res, 200, { user });
     if (method === 'GET' && path === '/api/workspace') return json(res, 200, await workspace(user));
+    if (method === 'GET' && path === '/api/wallet') return json(res, 200, { wallet: await store.getWalletLink(user.id) });
 
     if (method === 'POST') {
       const body = await readJson(req);
       // Recheck after reading the body and keep the session valid through the write.
+      const sessionId = hashToken(token);
       const authenticatedWrite = operation => store.transaction(async writes => {
-        const current = await writes.getSessionUser(hashToken(token), true);
+        const current = await writes.getSessionUser(sessionId, true);
         if (!current) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
         return operation(writes, current);
       });
+      if (path === '/api/wallet/challenges' || path === '/api/wallet/verify') {
+        const origin = walletApi.getOrigin(req);
+        limitAttempts(req, path);
+        if (path.endsWith('/challenges')) {
+          const result = await walletApi.challenge(body, authenticatedWrite, user.id, sessionId, origin);
+          return json(res, 201, result);
+        }
+        const wallet = await walletApi.verify(body, store, authenticatedWrite, user.id, sessionId, origin);
+        return json(res, 200, { wallet });
+      }
+      if (path === '/api/wallet/local-funding') {
+        walletApi.getOrigin(req);
+        if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+          throw new WorkflowError(403, 'Bài thử Hardhat chỉ chạy trên máy này.');
+        }
+        if (user.role !== 'Client') throw new WorkflowError(403, 'Bài thử ký quỹ dành cho tài khoản Client.');
+        if (body.action !== undefined && !['create', 'accept', 'reset', 'approve', 'fund'].includes(body.action)) {
+          throw new WorkflowError(400, 'Thao tác thử không hợp lệ.');
+        }
+        const wallet = await store.getWalletLink(user.id);
+        return json(res, 200, await localFunding(root, wallet, body.action));
+      }
       if (path === '/api/auth/profile') {
         const name = readName(body.name);
         await authenticatedWrite(writes => writes.updateUserName(user.id, name));

@@ -28,6 +28,30 @@ export function sqlStore(db) {
         await query('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)', [tokenHash, userId, expires]);
       },
       updateUserName: (id, name) => query('UPDATE users SET name = ? WHERE id = ?', [name, id]),
+      async getWalletLink(userId) {
+        const [row] = await query('SELECT data FROM wallet_links WHERE user_id = ?', [userId]);
+        return row ? readData(row) : null;
+      },
+      async insertWalletLink(userId, wallet) {
+        const rows = await query('INSERT INTO wallet_links VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING user_id',
+          [userId, wallet.address, JSON.stringify(wallet)]);
+        return rows.length > 0;
+      },
+      async createWalletChallenge(challenge) {
+        await query('DELETE FROM wallet_challenges WHERE expires <= ?', [Date.now()]);
+        await query('INSERT INTO wallet_challenges VALUES (?, ?, ?, ?, ?)',
+          [challenge.id, challenge.userId, challenge.sessionId, challenge.expires, JSON.stringify(challenge)]);
+      },
+      async getWalletChallenge(id, userId, sessionId) {
+        const [row] = await query('SELECT data FROM wallet_challenges WHERE id = ? AND user_id = ? AND session_id = ?',
+          [id, userId, sessionId]);
+        return row ? readData(row) : null;
+      },
+      async consumeWalletChallenge(id, userId, sessionId, now) {
+        const rows = await query('DELETE FROM wallet_challenges WHERE id = ? AND user_id = ? AND session_id = ? AND expires > ? RETURNING id',
+          [id, userId, sessionId, now]);
+        return rows.length > 0;
+      },
       async listOpenProjects() {
         return (await query('SELECT data FROM projects ORDER BY id DESC')).map(readData).filter(p => p.status === 'Open');
       },

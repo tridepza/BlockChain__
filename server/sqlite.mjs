@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -19,6 +19,7 @@ export function openSqlite(filename) {
     CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, data TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY, data TEXT NOT NULL) STRICT;
   `);
+  db.exec(readFileSync(new URL('./migrations/002-wallet-links.sql', import.meta.url), 'utf8'));
 
   // Keep all access to this connection queued while an async transaction is open.
   let pending = Promise.resolve();

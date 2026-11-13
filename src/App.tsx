@@ -5,6 +5,8 @@ import {
   Menu, Plus, RefreshCw, Scale, Search, Settings, ShieldCheck, Wallet, X,
 } from 'lucide-react';
 import Auth from './Auth';
+import WalletLink, { readLocalFunding, readWalletLink } from './WalletLink';
+import type { FundingStatus } from './WalletLink';
 import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
@@ -125,6 +127,8 @@ function Workspace(props: WorkspaceProps) {
   const filtered = projects.filter(project => project.title.toLocaleLowerCase('vi').includes(search.trim().toLocaleLowerCase('vi')));
   const title = navigation.find(item => item.id === page)?.label ?? 'Chi tiết dự án';
   const initials = actor.name.split(/\s+/).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase();
+  const networkLabel = demo ? 'Demo trình duyệt' : page === 'projects' || page === 'detail'
+    ? 'Dự án mô phỏng' : page === 'overview' || page === 'wallet' ? 'Hardhat Local' : null;
 
   function navigate(next: Page) {
     setPage(next);
@@ -235,7 +239,7 @@ function Workspace(props: WorkspaceProps) {
           </button>)}
       </nav>
       <div className="side-bottom">
-        <div className="help-card"><ShieldCheck size={19}/><b>Môi trường mô phỏng</b><p>Thử ký quỹ, bàn giao và giải ngân bằng token MOCK.</p></div>
+        {demo && <div className="help-card"><ShieldCheck size={19}/><b>Môi trường mô phỏng</b><p>Thử ký quỹ, bàn giao và giải ngân bằng token MOCK.</p></div>}
         <div className="profile"><div className="avatar">{initials}</div><div className="profile-text"><b>{actor.name}</b><small>{actor.role}</small></div></div>
         <button className="nav-item logout" disabled={busy} onClick={exit}><LogOut size={17}/>{demo ? 'Thoát demo' : 'Đăng xuất'}</button>
       </div>
@@ -245,7 +249,7 @@ function Workspace(props: WorkspaceProps) {
         <button className="hamburger" aria-label="Mở menu" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu/></button>
         <div className="crumb">Workspace <span>/</span> {title}</div>
         <div className="top-actions">
-          <span className="network"><i/> {demo ? 'Demo trình duyệt' : 'Mô phỏng ký quỹ'}</span>
+          {networkLabel && <span className="network"><i/> {networkLabel}</span>}
           {!demo && <button className="icon-btn refresh-btn" aria-label="Làm mới" disabled={busy || loading} onClick={refresh}><RefreshCw size={16}/> <span>Làm mới</span></button>}
           <div className="top-avatar" aria-hidden="true">{initials}</div>
         </div>
@@ -267,29 +271,37 @@ function Workspace(props: WorkspaceProps) {
         {!loading && page === 'overview' && <>
           <div className="stats">
             <Stat icon={<FolderKanban/>} label="Dự án của bạn đang hoạt động" value={privateProjects.filter(p => !['Completed', 'Cancelled'].includes(p.status)).length}/>
-            <Stat icon={<Wallet/>} label="Tiền đang ký quỹ" value={money(privateProjects.reduce((total, p) => total + escrowBalance(p), 0))}/>
-            <Stat icon={<ArrowUpRight/>} label="Đã giải ngân" value={money(privateProjects.reduce((total, p) => total + p.paid, 0))}/>
+            {demo ? <Stat icon={<Wallet/>} label="Tiền đang ký quỹ" value={money(privateProjects.reduce((total, p) => total + escrowBalance(p), 0))}/> :
+              actor.role === 'Client' ? <HardhatFundingStat accountId={actor.id}/> :
+                <Stat icon={<FileText/>} label="Milestone đang thực hiện" value={privateProjects.filter(p => currentMilestone(p)?.status === 'In progress').length}/>}
+            {demo ? <Stat icon={<ArrowUpRight/>} label="Đã giải ngân" value={money(privateProjects.reduce((total, p) => total + p.paid, 0))}/> :
+              <Stat icon={<FileText/>} label="Milestone chờ nghiệm thu" value={privateProjects.filter(p => currentMilestone(p)?.status === 'Submitted').length}/>}
             {demo ? <Stat icon={<Scale/>} label="Tranh chấp đang mở" value={disputes.length}/> :
               <Stat icon={<CheckCircle2/>} label="Dự án đã hoàn tất" value={privateProjects.filter(p => p.status === 'Completed').length}/>}
           </div>
           <div className="grid-main">
             <section className="panel">
-              <div className="panel-head"><div><h3>Dự án gần đây</h3><p>Các hợp đồng và công việc mới nhất</p></div>
+              <div className="panel-head"><div><h3>Dự án gần đây</h3><p>{demo ? 'Các hợp đồng và công việc mới nhất' : 'Theo dõi tiến độ dự án mô phỏng'}</p></div>
                 <button className="text-btn" onClick={() => navigate('projects')}>Xem tất cả <ArrowUpRight size={15}/></button>
               </div>
               <ProjectTable projects={projects.slice(0, 4)} onSelect={select}/>
             </section>
             <section className="panel balance-panel">
-              <div className="panel-head"><div><h3>Ví ký quỹ</h3><p>Giao dịch bằng token MOCK</p></div><div className="coin">M</div></div>
-              <div className="balance">{txs.length}<small>giao dịch mô phỏng</small></div>
-              <div className="balance-note"><ShieldCheck size={15}/> Môi trường thử nghiệm</div>
-              <button className="primary full" onClick={() => navigate('wallet')}>Xem giao dịch <ArrowUpRight size={16}/></button>
+              {demo ? <>
+                <div className="panel-head"><div><h3>Ví ký quỹ</h3><p>Giao dịch bằng token MOCK</p></div><div className="coin">M</div></div>
+                <div className="balance">{txs.length}<small>giao dịch mô phỏng</small></div>
+                <div className="balance-note"><ShieldCheck size={15}/> Môi trường thử nghiệm</div>
+              </> : <div className="panel-head">
+                <div><h3>Ví MetaMask</h3><p>{actor.role === 'Client' ? 'Xem số dư ví, hợp đồng và giao dịch Hardhat.' : 'Xác minh địa chỉ ví trên Hardhat Local.'}</p></div>
+                <span className="coin"><Wallet size={16}/></span>
+              </div>}
+              <button className="primary full" onClick={() => navigate('wallet')}>{demo ? 'Xem giao dịch' : 'Mở ví & giao dịch'} <ArrowUpRight size={16}/></button>
             </section>
           </div>
-          <section className="panel"><div className="panel-head"><div><h3>Hoạt động gần đây</h3><p>Lịch sử giao dịch của các dự án bạn tham gia</p></div></div><TxTable txs={txs.slice(0, 4)}/></section>
+          {demo && <section className="panel"><div className="panel-head"><div><h3>Hoạt động gần đây</h3><p>Lịch sử giao dịch của các dự án bạn tham gia</p></div></div><TxTable txs={txs.slice(0, 4)}/></section>}
         </>}
         {!loading && page === 'projects' && <section className="panel">
-          <div className="panel-head"><div><h3>Quản lý dự án</h3><p>Theo dõi milestone và hợp đồng.</p></div>
+          <div className="panel-head"><div><h3>Quản lý dự án</h3><p>Ký quỹ và nghiệm thu milestone bằng ngân sách MOCK mô phỏng.</p></div>
             {actor.role === 'Client' && <button className="primary" onClick={() => openDialog({ kind: 'create' })}><Plus size={16}/> Tạo dự án</button>}
           </div>
           <label className="searchbar"><Search size={17}/><input aria-label="Tìm kiếm dự án" placeholder="Tìm kiếm dự án…" value={search} onChange={e => setSearch(e.target.value)}/></label>
@@ -299,8 +311,9 @@ function Workspace(props: WorkspaceProps) {
           <ProjectDetail key={current.id} project={current} actor={actor} demo={!!demo}
             onAction={action => openDialog({ kind: 'action', projectId: current.id, action })} onBack={() => navigate('projects')}/> :
           <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/><button className="back" onClick={() => navigate('projects')}>← Quay lại dự án</button></div>)}
-        {!loading && page === 'wallet' && <section className="panel">
-          <div className="panel-head"><div><h3>Lịch sử giao dịch</h3><p>Các giao dịch ký quỹ và thanh toán mô phỏng.</p></div><span className="pill blue">MOCK</span></div>
+        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id} isClient={actor.role === 'Client'}/>}
+        {!loading && page === 'wallet' && (demo || txs.length > 0) && <section className="panel">
+          <div className="panel-head"><h3>Giao dịch dự án mô phỏng</h3><span className="pill blue">MOCK</span></div>
           <TxTable txs={txs}/>
         </section>}
         {!loading && page === 'disputes' && <section className="panel">
@@ -374,8 +387,35 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
   </dialog>;
 }
 
-function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: string | number }) {
-  return <div className="stat"><span className="stat-icon">{icon}</span><div className="stat-value">{value}</div><b>{label}</b></div>;
+function HardhatFundingStat({ accountId }: { accountId: string }) {
+  const [status, setStatus] = useState<FundingStatus | 'loading' | 'unlinked' | 'unavailable'>('loading');
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      const { wallet } = await readWalletLink(accountId);
+      if (!active) return;
+      const funding = wallet ? await readLocalFunding(accountId) : 'unlinked';
+      if (active) setStatus(funding);
+    }
+    void load().catch(() => { if (active) setStatus('unavailable'); });
+    return () => { active = false; };
+  }, [accountId]);
+
+  if (typeof status === 'string') {
+    const notes = {
+      loading: 'Đang đọc số dư…',
+      unlinked: 'Liên kết ví trong Ví & giao dịch',
+      unavailable: 'Chưa đọc được số dư Hardhat',
+    };
+    return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value="—" note={notes[status]}/>;
+  }
+  return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value={`${status.escrowBalance ?? '0'} MockUSDC`}
+    note={status.receipt ? `Nạp ký quỹ ở block ${status.receipt.block}` : 'Chưa có giao dịch nạp ký quỹ'}/>;
+}
+
+function Stat({ icon, label, value, note }: { icon: ReactNode; label: string; value: string | number; note?: string }) {
+  return <div className="stat"><span className="stat-icon">{icon}</span><div className="stat-value">{value}</div><b>{label}</b>{note && <small>{note}</small>}</div>;
 }
 
 function Empty({ text }: { text: string }) {
@@ -437,7 +477,7 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
         <div><div className="eyebrow">{p.category} · #{p.id}</div><h2>{p.title}</h2><p>{p.description}</p>
           <div className="detail-meta"><Status value={p.status}/><span>Client: {p.client}</span><span>Freelancer: {p.freelancer || 'Đang tuyển'}</span></div>
         </div>
-        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG</small><b>{money(p.budget)}</b>
+        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG MÔ PHỎNG</small><b>{money(p.budget)}</b>
           {privateProject && <small>Còn ký quỹ: {money(escrowBalance(p))} · Đã trả: {money(p.paid)}</small>}
         </div>
       </div>

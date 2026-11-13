@@ -56,7 +56,9 @@ export function openMongo(config) {
   const projects = db.collection('projects');
   const transactions = db.collection('transactions');
   const counters = db.collection('counters');
-  const collections = [users, sessions, projects, transactions, counters];
+  const walletLinks = db.collection('wallet_links');
+  const walletChallenges = db.collection('wallet_challenges');
+  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges];
   const projectCounter = { _id: 'projects' };
   const withoutStorageId = { projection: { _id: 0 } };
 
@@ -86,6 +88,24 @@ export function openMongo(config) {
       insertSession: (tokenHash, userId, expires) =>
         sessions.insertOne({ _id: tokenHash, userId, expiresAt: new Date(expires) }, options),
       updateUserName: (id, name) => users.updateOne({ _id: id }, { $set: { name } }, options),
+      getWalletLink: userId => walletLinks.findOne({ _id: userId }, { ...options, ...withoutStorageId }),
+      async insertWalletLink(userId, wallet) {
+        try {
+          await walletLinks.insertOne({ _id: userId, ...wallet }, options);
+          return true;
+        } catch (error) {
+          if (error.code === 11000) return false;
+          throw error;
+        }
+      },
+      createWalletChallenge: challenge => walletChallenges.insertOne({
+        ...challenge, _id: challenge.id, expiresAt: new Date(challenge.expires),
+      }, options),
+      getWalletChallenge: (id, userId, sessionId) => walletChallenges.findOne({ _id: id, userId, sessionId }, options),
+      async consumeWalletChallenge(id, userId, sessionId, now) {
+        const result = await walletChallenges.deleteOne({ _id: id, userId, sessionId, expiresAt: { $gt: new Date(now) } }, options);
+        return result.deletedCount === 1;
+      },
       listOpenProjects: () => projects.find({ status: 'Open' }, { ...options, ...withoutStorageId }).sort({ _id: -1 }).toArray(),
       async readWorkspace() {
         // Both reads use the same snapshot, including when an escrow update writes to both collections.
@@ -137,6 +157,8 @@ export function openMongo(config) {
       }
       await users.createIndex({ email: 1 }, { unique: true });
       await sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+      await walletLinks.createIndex({ address: 1 }, { unique: true });
+      await walletChallenges.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
       const latest = await projects.findOne({}, { sort: { _id: -1 }, projection: { _id: 1 } });
       const highestProjectId = latest?._id ?? 0;
       if (!Number.isSafeInteger(highestProjectId) || highestProjectId < 0) {
@@ -151,8 +173,12 @@ export function openMongo(config) {
       if (ready) {
         const emailIndexes = await users.indexes();
         const sessionIndexes = await sessions.indexes();
+        const walletIndexes = await walletLinks.indexes();
+        const challengeIndexes = await walletChallenges.indexes();
         ready = emailIndexes.some(index => index.name === 'email_1' && index.unique === true)
           && sessionIndexes.some(index => index.name === 'expiresAt_1' && index.expireAfterSeconds === 0)
+          && walletIndexes.some(index => index.name === 'address_1' && index.unique === true)
+          && challengeIndexes.some(index => index.name === 'expiresAt_1' && index.expireAfterSeconds === 0)
           && Boolean(await counters.findOne(projectCounter));
       }
       return { database: db.databaseName, ready };
