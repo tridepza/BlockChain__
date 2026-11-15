@@ -101,6 +101,7 @@ contract Escrow is ReentrancyGuard {
     event OfferMade(uint256 indexed nonce, bytes32 digest, address indexed author, bool settlement, uint64 expiresAt, bytes32 reasonHash);
     event Resolved(bytes32 decisionHash, uint256 evidenceCount);
     event Withdrawn(address indexed beneficiary, uint256 amount);
+    event MilestonePaid(uint256 indexed milestone, bytes32 evidenceHash, uint256 amount);
 
     error Unauthorized();
     error InvalidState();
@@ -221,6 +222,17 @@ contract Escrow is ReentrancyGuard {
     }
 
     function approveMilestone(uint256 index, uint256 expectedVersion) external only(client) {
+        approve(index, expectedVersion);
+    }
+
+    function approveAndPayMilestone(uint256 index, uint256 expectedVersion) external only(client) nonReentrant {
+        approve(index, expectedVersion);
+        Milestone storage item = milestones[index];
+        pay(freelancer, item.amount);
+        emit MilestonePaid(index, item.submissionHash, item.amount);
+    }
+
+    function approve(uint256 index, uint256 expectedVersion) private {
         Milestone storage item = activeMilestone(index, expectedVersion);
         if (item.stage != Stage.Submitted) revert InvalidState();
         allocate(index, item.amount, Outcome.Approved);
@@ -300,12 +312,15 @@ contract Escrow is ReentrancyGuard {
     }
 
     function withdraw() external participant nonReentrant {
-        uint256 amount = claimable[msg.sender];
+        pay(msg.sender, claimable[msg.sender]);
+    }
+
+    function pay(address beneficiary, uint256 amount) private {
         if (amount == 0) revert InvalidAmount();
-        claimable[msg.sender] = 0;
-        withdrawn[msg.sender] += amount;
-        token.safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
+        claimable[beneficiary] -= amount;
+        withdrawn[beneficiary] += amount;
+        token.safeTransfer(beneficiary, amount);
+        emit Withdrawn(beneficiary, amount);
     }
 
     function activeMilestone(uint256 index, uint256 expectedVersion) private view returns (Milestone storage) {

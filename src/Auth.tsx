@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { ArrowRight, Eye, EyeOff, FolderKanban, ShieldCheck, Wallet } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { api, errorMessage } from './api';
 import type { Account, Project } from './workflow';
 import { money } from './workflow';
+import { categoryLabel } from './ui-labels';
 
-type PublicProject = Pick<Project, 'id' | 'title' | 'category' | 'description' | 'budget'>;
+type PublicProject = Pick<Project, 'id' | 'title' | 'category' | 'description' | 'budget' | 'currency'>;
 type Mode = 'login' | 'register' | 'projects';
 
 export default function Auth({ onLogin, onDemo, initialMessage }: {
@@ -72,25 +73,19 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
   return (
     <main className="auth-shell">
       <section className="auth-intro" aria-label="Giới thiệu">
-        <div className="brand"><div className="brandmark"><ShieldCheck size={22}/></div><div><b>FreelanceEscrow</b><small>WORK WITH TRUST</small></div></div>
+        <div className="brand"><span className="brandmark"><ShieldCheck size={22}/></span><b>FreelanceEscrow</b></div>
         <div className="auth-intro-body">
-          <span className="auth-kicker">WORKSPACE KÝ QUỸ</span>
-          <h1>Cùng làm việc.<br/>Rõ từng milestone.</h1>
-          <p>Quản lý hợp đồng freelance, theo dõi bàn giao và thử quy trình ký quỹ trong một workspace.</p>
-          <ul>
-            <li><FolderKanban size={18}/> Quản lý tiến độ dự án</li>
-            <li><Wallet size={18}/> Theo dõi dòng tiền MOCK</li>
-          </ul>
+          <span className="auth-kicker">Môi trường thử nghiệm</span>
+          <p className="auth-tagline">Ký quỹ theo tiến độ dự án.</p>
+          <p>Từ lúc chọn Freelancer đến khi nghiệm thu và thanh toán từng mốc.</p>
         </div>
-        <small className="auth-caption">FreelanceEscrow · Môi trường thử nghiệm</small>
       </section>
       <section className="auth-content" aria-labelledby="auth-title">
         <div className="auth-card">
-          <div className="eyebrow">TÀI KHOẢN</div>
-          <h2 id="auth-title">{mode === 'projects' ? 'Dự án đang mở' : register ? 'Tạo tài khoản' : 'Đăng nhập'}</h2>
+          <h1 id="auth-title">{mode === 'projects' ? 'Dự án đang mở' : register ? 'Tạo tài khoản' : 'Đăng nhập'}</h1>
           <p>{mode === 'projects' ? 'Khám phá các dự án đang tìm Freelancer.' : register
             ? 'Chọn vai trò phù hợp để bắt đầu.'
-            : 'Mở workspace bằng email và mật khẩu của bạn.'}</p>
+            : 'Dùng email và mật khẩu để vào không gian làm việc.'}</p>
           {message && <p className="form-message" role="status">{message}</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
           {mode === 'projects' ? (
@@ -98,8 +93,8 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
               {busy && <p>Đang tải dự án…</p>}
               {!busy && !error && !projects.length && <p>Hiện chưa có dự án công khai.</p>}
               {projects.map(project => <article key={project.id}>
-                <small>{project.category} · {money(project.budget)}</small>
-                <h3>{project.title}</h3>
+                <small>{categoryLabel(project.category)} · {money(project.budget, project.currency)}</small>
+                <h2>{project.title}</h2>
                 <p>{project.description}</p>
               </article>)}
               <button className="secondary full" disabled={busy} onClick={() => switchMode('login')}>Quay lại đăng nhập</button>
@@ -127,6 +122,7 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
                 <button className="secondary" disabled={busy} onClick={browseProjects}>Xem dự án công khai</button>
                 <button className="secondary" disabled={busy} onClick={onDemo}>Thử bản demo</button>
               </div>
+              <a href="/explorer" className="auth-explorer">Giao dịch FESC công khai</a>
             </>
           )}
         </div>

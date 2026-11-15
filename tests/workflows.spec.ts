@@ -74,7 +74,7 @@ test('đăng ký, đăng nhập, tải lại, cập nhật hồ sơ và đăng x
   await expect(page.getByRole('alert')).toHaveText('Email hoặc mật khẩu không đúng.');
   await login(page);
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Chào Tài, sẵn sàng làm việc?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Chào Tài' })).toBeVisible();
   await expect(page.getByLabel('Vai trò demo')).toHaveCount(0);
   await click(page, 'Mở menu');
   await click(page, 'Hồ sơ');
@@ -82,7 +82,7 @@ test('đăng ký, đăng nhập, tải lại, cập nhật hồ sơ và đăng x
   await click(page, 'Lưu hồ sơ');
   await expect(page.getByRole('status')).toHaveText('Đã cập nhật hồ sơ.');
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Chào Tên, sẵn sàng làm việc?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Chào Tên' })).toBeVisible();
   await click(page, 'Mở menu');
   await click(page, 'Đăng xuất');
   await expect(page.getByRole('heading', { name: 'Đăng nhập' })).toBeVisible();
@@ -110,6 +110,8 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     const dialog = page.getByRole('dialog');
     await dialog.getByLabel('Tên dự án').fill(title);
     await dialog.getByLabel('Mô tả').fill('Phát triển website thử nghiệm');
+    await dialog.getByLabel('Đơn vị ngân sách').selectOption('MOCK');
+    await dialog.getByLabel('Đơn vị ngân sách').selectOption('MOCK');
     await dialog.getByLabel('Ngân sách (MOCK)').fill('100');
     await dialog.getByLabel('Tên milestone', { exact: false }).fill('Bàn giao website');
     await dialog.getByLabel('Số tiền từng milestone', { exact: false }).fill('90');
@@ -121,6 +123,7 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await guest.goto('/');
     await click(guest, 'Xem dự án công khai');
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
+    await expect(guest.getByText(/100\.00 MOCK/)).toBeVisible();
     await perform(page, 'Chọn Freelancer', { label: 'Email của Freelancer', value: workerEmail });
     await expect(page.getByText('Số dư 0.00 MOCK. Cần 100.00 MOCK để ký quỹ dự án.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Ký quỹ 100.00 MOCK', exact: true })).toHaveCount(0);
@@ -157,7 +160,7 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     const originalV2 = (await previewV2.getAttribute('href'))!.replace(/preview$/, 'original');
     expect((await page.request.get(originalV2)).status()).toBe(403);
     await perform(page, 'Nghiệm thu & giải ngân');
-    await expect(page.getByText('Completed', { exact: true })).toBeVisible();
+    await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
     await expect(page.getByText('Còn ký quỹ: 0.00 MOCK · Đã trả: 100.00 MOCK')).toBeVisible();
     expect((await page.request.get(originalV1)).status()).toBe(403);
     const paidDownload = await page.request.get(originalV2);
@@ -192,7 +195,7 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await page.getByLabel('Vai trò demo').selectOption('Freelancer');
   await openProject(page, title);
   await expect(page.getByRole('button', { name: 'Gửi bàn giao' })).toHaveCount(0);
-  await expect(page.getByText('Refunded', { exact: true })).toHaveCount(2);
+  await expect(page.getByText('Đã hoàn tiền', { exact: true })).toHaveCount(2);
   await click(page, 'Ví & giao dịch');
   await expect(page.getByRole('row', { name: /Phân xử: hoàn tiền.*40.00 MOCK/ })).toBeVisible();
   await expect(page.getByRole('row', { name: /Hoàn tiền các milestone còn lại.*30.00 MOCK/ })).toBeVisible();
@@ -201,5 +204,5 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await page.reload();
   await click(page, 'Thử bản demo');
   await openProject(page, title);
-  await expect(page.getByText('Completed', { exact: true })).toBeVisible();
+  await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
 });

@@ -1,19 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import {
-  ArrowUpRight, BriefcaseBusiness, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut,
-  Menu, Plus, RefreshCw, Scale, Search, Settings, ShieldCheck, Wallet, X,
+  ArrowLeft, ArrowRight, BriefcaseBusiness, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut,
+  Globe2, Menu, Plus, RefreshCw, Scale, Search, Settings, ShieldCheck, Wallet, X,
 } from 'lucide-react';
 import Auth from './Auth';
-import WalletLink, { readLocalFunding, readWalletLink } from './WalletLink';
-import type { FundingStatus } from './WalletLink';
+import WalletLink from './WalletLink';
+import ProjectFesc from './ProjectFesc';
+import Explorer from './Explorer';
+import { categoryLabel } from './ui-labels';
 import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
   applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
   cents, deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, mockGrantCents, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
-import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
+import type { Account, Currency, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
 const navigation = [
   { id: 'overview', label: 'Tổng quan', Icon: LayoutDashboard },
@@ -23,6 +25,13 @@ const navigation = [
   { id: 'profile', label: 'Hồ sơ', Icon: Settings },
 ] as const;
 type Page = typeof navigation[number]['id'] | 'detail';
+const pageDescription = {
+  overview: 'Theo dõi những dự án bạn tham gia và các mốc đang chờ nghiệm thu.',
+  projects: 'Ký quỹ, theo dõi bàn giao và thanh toán theo từng mốc.',
+  wallet: 'Quản lý ví và xem lịch sử thanh toán của các dự án.',
+  disputes: 'Xem các dự án đang chờ phân xử trong bản demo.',
+  profile: 'Quản lý tên hiển thị và xem thông tin tài khoản.',
+};
 type Dialog = { kind: 'create' } | { kind: 'action'; projectId: number; action: ProjectAction };
 async function encodeDeliveryFile(file: File, limit: number) {
   if (file.size > limit) throw new WorkflowError(413, `Tệp ${file.name} vượt giới hạn ${limit / (1024 * 1024)} MiB.`);
@@ -52,6 +61,11 @@ const actionLabels: Record<string, string> = {
 };
 
 export default function App() {
+  if (['/explorer', '/explorer/'].includes(window.location.pathname)) return <Explorer/>;
+  return <SessionApp/>;
+}
+
+function SessionApp() {
   const [user, setUser] = useState<Account | null>(null);
   const [demo, setDemo] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -103,21 +117,25 @@ function Workspace(props: WorkspaceProps) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(!demo);
+  const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const workspaceRead = useRef<{ background: boolean } | null>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const menuClose = useRef<HTMLButtonElement>(null);
 
-  function handleError(error: unknown) {
+  const handleError = useCallback((error: unknown) => {
     if (error instanceof ApiError && error.status === 401) onExit(true);
     else setError(errorMessage(error));
-  }
+  }, [onExit]);
 
-  async function refresh(background = false) {
+  const refresh = useCallback(async (background = false) => {
     if (background && workspaceRead.current) return;
     const read = { background };
     workspaceRead.current = read;
     if (!background) {
-      setLoading(true);
+      setRefreshing(true);
       setError('');
     }
     try {
@@ -129,9 +147,15 @@ function Workspace(props: WorkspaceProps) {
       }
     } finally {
       if (workspaceRead.current === read) workspaceRead.current = null;
-      if (!background) setLoading(false);
+      if (!background) setRefreshing(false);
     }
-  }
+  }, [actor.id, handleError]);
+
+  const refreshFescWorkspace = useCallback(() => {
+    // A workspace request that began before reconciliation can carry the previous state.
+    workspaceRead.current = null;
+    void refresh(true);
+  }, [refresh]);
 
   useEffect(() => {
     if (demo) return;
@@ -160,17 +184,45 @@ function Workspace(props: WorkspaceProps) {
   const privateProjects = projects.filter(project => canSeePrivate(project, actor));
   const current = projects.find(project => project.id === activeId);
   const disputes = privateProjects.filter(project => project.status === 'Disputed');
-  const filtered = projects.filter(project => project.title.toLocaleLowerCase('vi').includes(search.trim().toLocaleLowerCase('vi')));
+  const query = search.trim().toLocaleLowerCase('vi');
+  const filtered = projects.filter(project => project.title.toLocaleLowerCase('vi').includes(query));
   const title = navigation.find(item => item.id === page)?.label ?? 'Chi tiết dự án';
-  const initials = actor.name.split(/\s+/).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase();
-  const networkLabel = demo ? 'Demo trình duyệt' : page === 'projects' || page === 'detail'
-    ? 'Dự án mô phỏng' : page === 'overview' || page === 'wallet' ? 'Hardhat Local' : null;
+  const initials = actor.name.trim().split(/\s+/).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase();
+  const activePage = page === 'detail' ? 'projects' : page;
+  const canCreate = actor.role === 'Client' && (page === 'overview' || page === 'projects');
+  const canRefresh = !demo && page !== 'profile';
+
+  useEffect(() => {
+    if (!mobile) return;
+    const main = mainRef.current;
+    const compact = window.matchMedia('(max-width: 790px)');
+    const previousOverflow = document.body.style.overflow;
+    if (main) main.inert = true;
+    document.body.style.overflow = 'hidden';
+    menuClose.current?.focus();
+    function closeMenu(event: KeyboardEvent) {
+      if (event.key === 'Escape') setMobile(false);
+    }
+    function fitMenu(event: MediaQueryListEvent) {
+      if (!event.matches) setMobile(false);
+    }
+    window.addEventListener('keydown', closeMenu);
+    compact.addEventListener('change', fitMenu);
+    return () => {
+      window.removeEventListener('keydown', closeMenu);
+      compact.removeEventListener('change', fitMenu);
+      if (main) main.inert = false;
+      document.body.style.overflow = previousOverflow;
+      if (compact.matches) menuTrigger.current?.focus({ preventScroll: true });
+    };
+  }, [mobile]);
 
   function navigate(next: Page) {
     setPage(next);
     setMobile(false);
     setError('');
     setNotice('');
+    window.scrollTo(0, 0);
     if (!demo && !loading && !busy && (next === 'projects' || next === 'overview' || next === 'wallet')) {
       void refresh(true);
     }
@@ -188,7 +240,7 @@ function Workspace(props: WorkspaceProps) {
   }
 
   async function run(operation: () => Promise<void>) {
-    if (workspaceRead.current?.background) workspaceRead.current = null;
+    workspaceRead.current = null;
     setBusy(true);
     setError('');
     setNotice('');
@@ -254,7 +306,10 @@ function Workspace(props: WorkspaceProps) {
         } else {
           setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
         }
-        setNotice(`Đã thực hiện: ${actionLabels[dialog.action.action]}.`);
+        const project = data.projects.find(project => project.id === dialog.projectId);
+        setNotice(project?.currency === 'FESC' && input.action === 'submit'
+          ? 'Đã lưu tệp. Hãy xác nhận bàn giao trong MetaMask.'
+          : `Đã thực hiện ${actionLabels[dialog.action.action]}.`);
       }
       setDialog(null);
     });
@@ -280,92 +335,73 @@ function Workspace(props: WorkspaceProps) {
   }
 
   return <div className="app">
-    <aside className={mobile ? 'sidebar show' : 'sidebar'}>
-      <div className="brand"><div className="brandmark"><ShieldCheck size={22}/></div><div><b>FreelanceEscrow</b><small>WORK WITH TRUST</small></div><button className="mobile-close" aria-label="Đóng menu" onClick={() => setMobile(false)}><X/></button></div>
-      <nav aria-label="Workspace">
-        <div className="workspace-label">WORKSPACE</div>
+    {mobile && <div className="menu-scrim" aria-hidden="true" onClick={() => setMobile(false)}/>}
+    <aside id="workspace-menu" className={mobile ? 'sidebar show' : 'sidebar'}>
+      <div className="brand"><span className="brandmark"><ShieldCheck size={21}/></span><b>FreelanceEscrow</b><button ref={menuClose} className="mobile-close icon-btn" aria-label="Đóng menu" onClick={() => setMobile(false)}><X size={20}/></button></div>
+      <nav aria-label="Không gian làm việc">
         {navigation.filter(item => demo ? item.id !== 'profile' : item.id !== 'disputes').map(({ id, label, Icon }) =>
-          <button key={id} className={`nav-item ${page === id ? 'selected' : ''}`} aria-current={page === id ? 'page' : undefined} disabled={busy} onClick={() => navigate(id)}>
+          <button key={id} className={`nav-item ${activePage === id ? 'selected' : ''}`} aria-current={activePage === id ? 'page' : undefined} disabled={busy} onClick={() => navigate(id)}>
             <Icon size={18}/>{label}{id === 'disputes' && disputes.length > 0 && <span className="count">{disputes.length}</span>}
           </button>)}
+        {!demo && <a href="/explorer" className="nav-item explorer-link"><Globe2 size={18}/> Giao dịch công khai</a>}
       </nav>
       <div className="side-bottom">
-        {demo && <div className="help-card"><ShieldCheck size={19}/><b>Môi trường mô phỏng</b><p>Thử ký quỹ, bàn giao và giải ngân bằng token MOCK.</p></div>}
         <div className="profile"><div className="avatar">{initials}</div><div className="profile-text"><b>{actor.name}</b><small>{actor.role}</small></div></div>
         <button className="nav-item logout" disabled={busy} onClick={exit}><LogOut size={17}/>{demo ? 'Thoát demo' : 'Đăng xuất'}</button>
       </div>
     </aside>
-    <main className="main">
-      <header className="topbar">
-        <button className="hamburger" aria-label="Mở menu" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu/></button>
-        <div className="crumb">Workspace <span>/</span> {title}</div>
-        <div className="top-actions">
-          {networkLabel && <span className="network"><i/> {networkLabel}</span>}
-          {!demo && <button className="icon-btn refresh-btn" aria-label="Làm mới" disabled={busy || loading} onClick={() => void refresh()}><RefreshCw size={16}/> <span>Làm mới</span></button>}
-          <div className="top-avatar" aria-hidden="true">{initials}</div>
-        </div>
+    <main className="main" ref={mainRef}>
+      <header className="mobile-bar">
+        <button ref={menuTrigger} className="icon-btn" aria-label="Mở menu" aria-controls="workspace-menu" aria-expanded={mobile} onClick={() => setMobile(true)}><Menu size={21}/></button>
+        <b>FreelanceEscrow</b>
       </header>
       <div className="content">
-        <div className="welcome">
-          <div><div className="eyebrow">{demo ? 'WORKSPACE DEMO' : 'WORKSPACE TÀI KHOẢN'}</div>
-            <h1>{page === 'overview' ? `Chào ${actor.name.split(' ')[0]}, sẵn sàng làm việc?` : title}</h1>
-            <p>Theo dõi dự án, dòng tiền ký quỹ và tiến độ hợp đồng của bạn.</p>
+        <div className="page-header">
+          <div>{page === 'detail'
+            ? <button className="back" onClick={() => navigate('projects')}><ArrowLeft size={16}/> Quay lại dự án</button>
+            : <><h1>{page === 'overview' ? `Chào ${actor.name.trim().split(/\s+/)[0]}` : title}</h1><p>{pageDescription[page]}</p></>}
           </div>
-          {demo ? <label className="role-select">Vai trò demo
+          <div className="page-actions">
+            {demo && <label className="role-select">Vai trò demo
             <select value={role} disabled={busy} onChange={e => { setRole(e.target.value as Role); setSearch(''); navigate('overview'); }}>
               <option>Client</option><option>Freelancer</option><option>Arbitrator</option>
             </select>
-          </label> : <span className="role-badge">{actor.role}</span>}
+            </label>}
+            {canRefresh && <button className="secondary" disabled={busy || loading || refreshing} onClick={() => void refresh()}><RefreshCw size={16}/> {refreshing ? 'Đang làm mới…' : 'Làm mới'}</button>}
+            {canCreate && <button className="primary" disabled={busy || loading} onClick={() => openDialog({ kind: 'create' })}><Plus size={17}/> Tạo dự án</button>}
+          </div>
         </div>
         {error && !dialog && <p className="form-error" role="alert">{error}</p>}
         {loading && <p role="status">Đang tải workspace…</p>}
         {!loading && page === 'overview' && <>
           <div className="stats">
-            <Stat icon={<FolderKanban/>} label="Dự án của bạn đang hoạt động" value={privateProjects.filter(p => !['Completed', 'Cancelled'].includes(p.status)).length}/>
-            {demo ? <Stat icon={<Wallet/>} label="Tiền đang ký quỹ" value={money(privateProjects.reduce((total, p) => total + escrowBalance(p), 0))}/> :
-              actor.role === 'Client' ? <HardhatFundingStat accountId={actor.id}/> :
-                <Stat icon={<FileText/>} label="Milestone đang thực hiện" value={privateProjects.filter(p => currentMilestone(p)?.status === 'In progress').length}/>}
-            {demo ? <Stat icon={<ArrowUpRight/>} label="Đã giải ngân" value={money(privateProjects.reduce((total, p) => total + p.paid, 0))}/> :
-              <Stat icon={<FileText/>} label="Milestone chờ nghiệm thu" value={privateProjects.filter(p => currentMilestone(p)?.status === 'Submitted').length}/>}
-            {demo ? <Stat icon={<Scale/>} label="Tranh chấp đang mở" value={disputes.length}/> :
-              <Stat icon={<CheckCircle2/>} label="Dự án đã hoàn tất" value={privateProjects.filter(p => p.status === 'Completed').length}/>}
+            <Stat icon={<FolderKanban size={19}/>} label="Dự án đang hoạt động" value={privateProjects.filter(p => !['Completed', 'Cancelled'].includes(p.status)).length}/>
+            <Stat icon={<FileText size={19}/>} label="Mốc chờ nghiệm thu" value={privateProjects.filter(p => currentMilestone(p)?.status === 'Submitted').length}/>
+            <Stat icon={<CheckCircle2 size={19}/>} label="Dự án đã hoàn tất" value={privateProjects.filter(p => p.status === 'Completed').length}/>
           </div>
-          <div className="grid-main">
-            <section className="panel">
-              <div className="panel-head"><div><h3>Dự án gần đây</h3><p>{demo ? 'Các hợp đồng và công việc mới nhất' : 'Theo dõi tiến độ dự án mô phỏng'}</p></div>
-                <button className="text-btn" onClick={() => navigate('projects')}>Xem tất cả <ArrowUpRight size={15}/></button>
-              </div>
-              <ProjectTable projects={projects.slice(0, 4)} onSelect={select}/>
-            </section>
-            <section className="panel balance-panel">
-              {demo ? <>
-                <div className="panel-head"><div><h3>Ví ký quỹ</h3><p>Giao dịch bằng token MOCK</p></div><div className="coin">M</div></div>
-                <div className="balance">{txs.length}<small>giao dịch mô phỏng</small></div>
-                <div className="balance-note"><ShieldCheck size={15}/> Môi trường thử nghiệm</div>
-              </> : <div className="panel-head">
-                <div><h3>Ví MetaMask</h3><p>{actor.role === 'Client' ? 'Xem số dư ví, hợp đồng và giao dịch Hardhat.' : 'Xác minh địa chỉ ví trên Hardhat Local.'}</p></div>
-                <span className="coin"><Wallet size={16}/></span>
-              </div>}
-              <button className="primary full" onClick={() => navigate('wallet')}>{demo ? 'Xem giao dịch' : 'Mở ví & giao dịch'} <ArrowUpRight size={16}/></button>
-            </section>
-          </div>
-          {demo && <section className="panel"><div className="panel-head"><div><h3>Hoạt động gần đây</h3><p>Lịch sử giao dịch của các dự án bạn tham gia</p></div></div><TxTable txs={txs.slice(0, 4)}/></section>}
+          <section className="panel">
+            <div className="panel-head"><h2>Dự án của bạn</h2>
+              <button className="text-btn" onClick={() => navigate('projects')}>Xem tất cả <ArrowRight size={16}/></button>
+            </div>
+            <ProjectList projects={privateProjects.slice(0, 4)} onSelect={select} empty="Bạn chưa tham gia dự án nào."/>
+          </section>
         </>}
         {!loading && page === 'projects' && <section className="panel">
-          <div className="panel-head"><div><h3>Quản lý dự án</h3><p>Ký quỹ và nghiệm thu milestone bằng ngân sách MOCK mô phỏng.</p></div>
-            {actor.role === 'Client' && <button className="primary" onClick={() => openDialog({ kind: 'create' })}><Plus size={16}/> Tạo dự án</button>}
+          <div className="panel-head project-toolbar">
+            <h2>Danh sách <span className="result-count">{filtered.length}</span></h2>
+            <label className="searchbar"><Search size={18}/><input type="search" aria-label="Tìm kiếm dự án" placeholder="Tìm theo tên dự án…" value={search} onChange={e => setSearch(e.target.value)}/></label>
           </div>
-          <label className="searchbar"><Search size={17}/><input aria-label="Tìm kiếm dự án" placeholder="Tìm kiếm dự án…" value={search} onChange={e => setSearch(e.target.value)}/></label>
-          <ProjectTable projects={filtered} onSelect={select}/>
+          <ProjectList projects={filtered} onSelect={select} empty={query ? 'Không tìm thấy dự án phù hợp.' : 'Chưa có dự án nào.'}/>
         </section>}
         {!loading && page === 'detail' && (current ?
           <ProjectDetail key={current.id} project={current} actor={actor} demo={!!demo}
             mockCents={mockWallet?.cents ?? 0} onOpenWallet={() => navigate('wallet')}
-            onAction={action => openDialog({ kind: 'action', projectId: current.id, action })} onBack={() => navigate('projects')}/> :
-          <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/><button className="back" onClick={() => navigate('projects')}>← Quay lại dự án</button></div>)}
-        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id} isClient={actor.role === 'Client'}/>}
-        {!loading && page === 'wallet' && !demo && mockWallet && <section className="panel">
-          <div className="panel-head"><div><h3>Số dư MOCK mô phỏng</h3><p>Dùng cho các dự án mô phỏng trên web.</p></div></div>
+            onFescChanged={refreshFescWorkspace}
+            onAction={action => openDialog({ kind: 'action', projectId: current.id, action })}/> :
+          <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/></div>)}
+        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id} isClient={actor.role === 'Client'}>
+          {mockWallet && <section className="panel wallet-card">
+          <div className="panel-head"><div><h2>Số dư MOCK</h2><p>Dành cho dự án mô phỏng, không cần MetaMask.</p></div><span className="stat-icon"><Wallet size={19}/></span></div>
           <div className="balance">{money(mockWallet.cents / 100)}</div>
           {actor.role === 'Client' && !mockWallet.claimed && <button className="primary" disabled={busy}
             onClick={() => void run(async () => {
@@ -373,19 +409,20 @@ function Workspace(props: WorkspaceProps) {
               setNotice('Đã nhận ngân sách MOCK thử.');
             })}>Nhận {money(mockGrantCents / 100)} thử</button>}
         </section>}
-        {!loading && page === 'wallet' && (demo || txs.length > 0) && <section className="panel">
-          <div className="panel-head"><h3>Giao dịch dự án mô phỏng</h3><span className="pill blue">MOCK</span></div>
+        </WalletLink>}
+        {!loading && page === 'wallet' && <section className="panel">
+          <div className="panel-head"><h2>Lịch sử giao dịch</h2></div>
           <TxTable txs={txs}/>
         </section>}
         {!loading && page === 'disputes' && <section className="panel">
-          <div className="panel-head"><div><h3>Trung tâm tranh chấp</h3><p>Các vụ tranh chấp của dự án bạn tham gia.</p></div></div>
+          <div className="panel-head"><h2>Vụ việc đang mở</h2></div>
           {!disputes.length ? <Empty text="Hiện chưa có tranh chấp nào."/> : disputes.map(project => <div className="dispute-card" key={project.id}>
             <div><b>{project.title}</b><p>{project.disputeReason}</p><small>{project.client} · {project.freelancer}</small></div>
             <button className="secondary" onClick={() => select(project)}>Xem tranh chấp</button>
           </div>)}
         </section>}
         {page === 'profile' && <section className="panel profile-panel">
-          <div className="panel-head"><div><h3>Thông tin tài khoản</h3><p>Cập nhật tên hiển thị trong workspace.</p></div></div>
+          <div className="panel-head"><h2>Thông tin tài khoản</h2></div>
           <form className="auth-form" onSubmit={saveProfile}>
             <fieldset disabled={busy}>
               <label>Họ và tên<input name="name" autoComplete="name" defaultValue={actor.name} required minLength={2} maxLength={80}/></label>
@@ -397,17 +434,20 @@ function Workspace(props: WorkspaceProps) {
         </section>}
       </div>
     </main>
-    {dialog && <WorkspaceDialog dialog={dialog} demo={!!demo} busy={busy} error={error} onSubmit={submitDialog} onClose={() => { setError(''); setDialog(null); }}/>}
+    {dialog && <WorkspaceDialog dialog={dialog} demo={!!demo} busy={busy} error={error}
+      currency={dialog.kind === 'action' ? data.projects.find(project => project.id === dialog.projectId)?.currency : undefined}
+      onSubmit={submitDialog} onClose={() => { setError(''); setDialog(null); }}/>}
     {notice && <div className="toast" role="status"><CheckCircle2 size={18}/>{notice}<button aria-label="Đóng thông báo" onClick={() => setNotice('')}><X size={16}/></button></div>}
   </div>;
 }
 
-function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
-  dialog: Dialog; demo: boolean; busy: boolean; error: string;
+function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClose }: {
+  dialog: Dialog; demo: boolean; currency?: Currency; busy: boolean; error: string;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void; onClose: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const create = dialog.kind === 'create';
+  const [budgetCurrency, setBudgetCurrency] = useState<Currency>(demo ? 'MOCK' : 'FESC');
   const action = create ? '' : dialog.action.action;
   const title = create ? 'Tạo dự án mới' : actionLabels[action];
   const needsNote = ['submit', 'revision', 'dispute', 'requestCancel'].includes(action);
@@ -428,12 +468,16 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
       <fieldset disabled={busy}>
         {create ? <>
           <label>Tên dự án<input name="title" required autoFocus maxLength={120} placeholder="VD: Xây dựng website bán hàng"/></label>
-          <label>Danh mục<select name="category">{categories.map(category => <option key={category}>{category}</option>)}</select></label>
+          <label>Danh mục<select name="category">{categories.map(category => <option key={category} value={category}>{categoryLabel(category)}</option>)}</select></label>
           <label>Mô tả<textarea name="description" required maxLength={2000} placeholder="Mô tả phạm vi công việc…"/></label>
-          <label>Ngân sách (MOCK)<input name="budget" type="number" min="0.01" step="0.01" required placeholder="100"/></label>
+          {!demo && <label>Đơn vị ngân sách<select name="currency" value={budgetCurrency}
+            onChange={event => setBudgetCurrency(event.target.value === 'MOCK' ? 'MOCK' : 'FESC')}>
+            <option value="FESC">FESC · Hardhat Local</option><option value="MOCK">MOCK · Mô phỏng</option>
+          </select></label>}
+          <label>Ngân sách ({budgetCurrency})<input name="budget" type="number" min="0.01" step="0.01" required placeholder="100"/></label>
           <label>Tên milestone, cách nhau bằng dấu phẩy<input name="milestones" required maxLength={800} placeholder="Thiết kế, Frontend, Backend"/></label>
           <label>Số tiền từng milestone, cách nhau bằng dấu phẩy<input name="amounts" required maxLength={120} placeholder="30,40,30"/></label>
-          <p className="hint">Ví dụ ngân sách 100 MOCK chia thành 3 milestone có số tiền 30, 40 và 30.</p>
+          <p className="hint">Ví dụ ngân sách 100 {budgetCurrency} chia thành 3 milestone có số tiền 30, 40 và 30.</p>
         </> : action === 'assign' && !demo ? (
           <label>Email của Freelancer<input name="email" type="email" required autoFocus maxLength={254}/></label>
         ) : needsNote ? (
@@ -447,7 +491,8 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
               <label>Bản gốc thử (tùy chọn, tối đa 10 MiB)
                 <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
               </label>
-              <p className="hint">Client xem được bản xem trước ngay. Bản gốc thử chỉ mở sau khi milestone được giải ngân bằng MOCK mô phỏng. Hãy dùng tệp mẫu và tránh đưa mã nguồn hoặc thông tin truy cập vào bản xem trước.</p>
+              <p className="hint">Client xem được bản xem trước ngay. Bản gốc thử mở sau khi milestone được giải ngân bằng {currency ?? 'MOCK'}.
+                {currency === 'FESC' && ' Sau khi lưu tệp, xác nhận bàn giao trong MetaMask.'}</p>
             </>}
           </>
         ) : <p className="hint">{action === 'approve' && !demo
@@ -459,84 +504,72 @@ function WorkspaceDialog({ dialog, demo, busy, error, onSubmit, onClose }: {
   </dialog>;
 }
 
-function HardhatFundingStat({ accountId }: { accountId: string }) {
-  const [status, setStatus] = useState<FundingStatus | 'loading' | 'unlinked' | 'unavailable'>('loading');
-
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      const { wallet } = await readWalletLink(accountId);
-      if (!active) return;
-      const funding = wallet ? await readLocalFunding(accountId) : 'unlinked';
-      if (active) setStatus(funding);
-    }
-    void load().catch(() => { if (active) setStatus('unavailable'); });
-    return () => { active = false; };
-  }, [accountId]);
-
-  if (typeof status === 'string') {
-    const notes = {
-      loading: 'Đang đọc số dư…',
-      unlinked: 'Liên kết ví trong Ví & giao dịch',
-      unavailable: 'Chưa đọc được số dư Hardhat',
-    };
-    return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value="—" note={notes[status]}/>;
-  }
-  return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value={`${status.escrowBalance ?? '0'} ${status.currency}`}
-    note={status.receipt ? `Nạp ký quỹ ở block ${status.receipt.block}` : 'Chưa có giao dịch nạp ký quỹ'}/>;
-}
-
-function Stat({ icon, label, value, note }: { icon: ReactNode; label: string; value: string | number; note?: string }) {
-  return <div className="stat"><span className="stat-icon">{icon}</span><div className="stat-value">{value}</div><b>{label}</b>{note && <small>{note}</small>}</div>;
+function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: number }) {
+  return <div className="stat"><span className="stat-icon">{icon}</span><div className="stat-value">{value}</div><b>{label}</b></div>;
 }
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderKanban size={28}/><p>{text}</p></div>;
 }
 
-function Status({ value }: { value: string }) {
-  const color = ['Completed', 'Paid'].includes(value) ? 'green' : ['Disputed', 'Cancelled'].includes(value) ? 'red' :
-    ['Funded', 'In progress', 'Submitted'].includes(value) ? 'blue' : 'yellow';
-  return <span className={`pill ${color}`}>{value}</span>;
+const statusLabels: Record<Project['status'] | Project['milestones'][number]['status'], [string, string]> = {
+  Open: ['Đang tìm Freelancer', 'neutral'],
+  'Proposal sent': ['Đã chọn Freelancer', 'blue'],
+  Funded: ['Đã ký quỹ', 'blue'],
+  'In progress': ['Đang thực hiện', 'blue'],
+  Submitted: ['Chờ nghiệm thu', 'yellow'],
+  'Revision requested': ['Cần chỉnh sửa', 'yellow'],
+  Disputed: ['Đang tranh chấp', 'red'],
+  Completed: ['Đã hoàn tất', 'green'],
+  Cancelled: ['Đã hủy', 'red'],
+  Pending: ['Chưa bắt đầu', 'neutral'],
+  Paid: ['Đã giải ngân', 'green'],
+  Refunded: ['Đã hoàn tiền', 'neutral'],
+};
+
+function Status({ value }: { value: Project['status'] | Project['milestones'][number]['status'] }) {
+  const [label, color] = statusLabels[value];
+  return <span className={`pill ${color}`}>{label}</span>;
 }
 
-function ProjectTable({ projects, onSelect }: { projects: Project[]; onSelect: (project: Project) => void }) {
-  if (!projects.length) return <Empty text="Không tìm thấy dự án phù hợp."/>;
-  return <div className="table-wrap"><table>
-    <thead><tr><th>TÊN DỰ ÁN</th><th>NGÂN SÁCH</th><th>TRẠNG THÁI</th><th>TIẾN ĐỘ</th></tr></thead>
-    <tbody>{projects.map(p => {
+function ProjectList({ projects, onSelect, empty }: { projects: Project[]; onSelect: (project: Project) => void; empty: string }) {
+  if (!projects.length) return <Empty text={empty}/>;
+  return <ul className="project-list">{projects.map(p => {
       const progress = Math.round(p.paid / p.budget * 100);
-      return <tr key={p.id}>
-        <td><button className="project-name" onClick={() => onSelect(p)}>
-          <span className="project-icon"><BriefcaseBusiness size={17}/></span>
-          <span><b>{p.title}</b><small>{p.category} · {p.client}</small></span><ArrowUpRight size={14}/>
-        </button></td>
-        <td><b>{money(p.budget)}</b></td><td><Status value={p.status}/></td>
-        <td><div className="progress" aria-hidden="true"><i style={{ width: `${progress}%` }}/></div><small>{progress}% đã thanh toán</small></td>
-      </tr>;
-    })}</tbody>
-  </table></div>;
+      return <li key={p.id}><button className="project-row" onClick={() => onSelect(p)}>
+        <span className="project-name">
+          <span className="project-icon"><BriefcaseBusiness size={19}/></span>
+          <span><b>{p.title}</b><small>{categoryLabel(p.category)} · {p.client}</small></span>
+        </span>
+        <span className="project-money"><b>{money(p.budget, p.currency)}</b><small>{progress}% đã thanh toán</small></span>
+        <Status value={p.status}/>
+        <ArrowRight className="project-arrow" size={18}/>
+      </button></li>;
+    })}</ul>;
 }
 
 function TxTable({ txs }: { txs: Tx[] }) {
   if (!txs.length) return <Empty text="Chưa có giao dịch."/>;
-  return <div className="table-wrap"><table>
-    <thead><tr><th>HÀNH ĐỘNG</th><th>DỰ ÁN</th><th>SỐ TIỀN</th><th>MÃ MÔ PHỎNG</th><th>TRẠNG THÁI</th></tr></thead>
-    <tbody>{txs.map(tx => <tr key={tx.id}><td><b>{tx.action}</b><small>{tx.time}</small></td><td>{tx.project}</td><td>{money(tx.amount)}</td><td><code>{tx.id}</code></td><td><Status value={tx.status}/></td></tr>)}</tbody>
+  return <div className="table-wrap" tabIndex={0} role="region" aria-label="Bảng giao dịch"><table>
+    <thead><tr><th scope="col">Hành động</th><th scope="col">Dự án</th><th scope="col">Số tiền</th><th scope="col">Mã giao dịch</th><th scope="col">Trạng thái</th></tr></thead>
+    <tbody>{txs.map(tx => <tr key={tx.id}><td><b>{tx.action}</b><small>{tx.time}</small></td><td>{tx.project}</td><td>{money(tx.amount, tx.currency)}</td>
+      <td>{tx.currency === 'FESC' && /^0x[0-9a-f]{64}$/i.test(tx.id)
+        ? <a href={`/explorer?q=${tx.id}`}><code>{tx.id}</code></a> : <code>{tx.id}</code>}</td>
+      <td><span className={`pill ${tx.status === 'Đã xác nhận' ? 'green' : 'neutral'}`}>{tx.status}</span></td></tr>)}</tbody>
   </table></div>;
 }
 
-function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAction, onBack }: {
-  project: Project; actor: Account; demo: boolean; onAction: (action: ProjectAction) => void; onBack: () => void;
-  mockCents: number; onOpenWallet: () => void;
+function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFescChanged, onAction }: {
+  project: Project; actor: Account; demo: boolean; onAction: (action: ProjectAction) => void;
+  mockCents: number; onOpenWallet: () => void; onFescChanged: () => void;
 }) {
-  const [tab, setTab] = useState('milestones');
   const owner = actor.id === p.ownerId && actor.role === 'Client';
   const freelancer = actor.id === p.freelancerId && actor.role === 'Freelancer';
   const arbitrator = demo && actor.role === 'Arbitrator';
   const privateProject = canSeePrivate(p, actor);
   const current = currentMilestone(p);
-  const canCancel = (owner || freelancer) && canRequestCancellation(p);
+  const fesc = !demo && p.currency === 'FESC';
+  const canCancel = !fesc && (owner || freelancer) && canRequestCancellation(p);
   const cancellation = canCancel ? pendingCancellation(p) : undefined;
 
   function actionButton(action: ProjectAction, label = actionLabels[action.action], style = 'primary') {
@@ -544,19 +577,18 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAct
   }
 
   return <>
-    <button className="back" onClick={onBack}>← Quay lại dự án</button>
     <section className="panel detail-panel">
       <div className="detail-head">
-        <div><div className="eyebrow">{p.category} · #{p.id}</div><h2>{p.title}</h2><p>{p.description}</p>
+        <div><div className="eyebrow">{categoryLabel(p.category)} · {fesc ? 'Hardhat Local' : 'Mô phỏng'}</div><h1>{p.title}</h1><p>{p.description}</p>
           <div className="detail-meta"><Status value={p.status}/><span>Client: {p.client}</span><span>Freelancer: {p.freelancer || 'Đang tuyển'}</span></div>
         </div>
-        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG MÔ PHỎNG</small><b>{money(p.budget)}</b>
-          {privateProject && <small>Còn ký quỹ: {money(escrowBalance(p))} · Đã trả: {money(p.paid)}</small>}
+        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG</small><b>{money(p.budget, p.currency)}</b>
+          {privateProject && !fesc && <small>Còn ký quỹ: {money(escrowBalance(p))} · Đã trả: {money(p.paid)}</small>}
         </div>
       </div>
       <div className="detail-actions">
         {owner && p.status === 'Open' && actionButton({ action: 'assign' }, demo ? 'Chọn Freelancer demo' : undefined)}
-        {owner && p.status === 'Proposal sent' && (demo || mockCents >= cents(p.budget)
+        {!fesc && owner && p.status === 'Proposal sent' && (demo || mockCents >= cents(p.budget)
           ? actionButton({ action: 'fund' }, `Ký quỹ ${money(p.budget)}`)
           : <div>
             <p className="hint">Số dư {money(mockCents / 100)}. Cần {money(p.budget)} để ký quỹ dự án.</p>
@@ -568,21 +600,24 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAct
           {actionLabels.confirmCancel}
         </button>}
       </div>
+      {fesc && privateProject && p.freelancerId && <ProjectFesc project={p} accountId={actor.id} onWallet={onOpenWallet}
+        onDelivery={() => { if (current) onAction({ action: 'submit', milestoneId: current.id }); }} onChanged={onFescChanged}/>}
       {cancellation && <div className="hint">
         <b>{cancellation.proposerId === actor.id ? 'Đang chờ bên còn lại đồng ý hủy' : 'Bên còn lại đề nghị hủy'}</b>
         <p>{cancellation.reason}</p>
         <small>Hết hạn lúc {new Date(cancellation.expiresAt).toLocaleString('vi-VN')}</small>
       </div>}
-      <div className="tabs">
-        <button className={tab === 'milestones' ? 'active' : ''} onClick={() => setTab('milestones')}>Milestone</button>
-        <button className={tab === 'terms' ? 'active' : ''} onClick={() => setTab('terms')}>Điều khoản</button>
-      </div>
-      {tab === 'milestones' ? <div className="milestones">{p.milestones.map(m => {
+      <section className="milestones" aria-labelledby="milestone-title">
+        <h2 id="milestone-title">Các mốc thực hiện <span className="result-count">{p.milestones.length}</span></h2>
+        {p.milestones.map(m => {
         const review = { milestoneId: m.id, submissionVersion: getSubmissionVersion(m) };
         return <div className="milestone" key={m.id}>
           <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
           <div className="mile-content">
-            <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
+            <div className="mile-heading">
+              <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
+              <b className="mile-amount">{money(m.amount, p.currency)}</b>
+            </div>
             {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
             {!demo && privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
               <summary>Lịch sử bàn giao ({m.deliveries.length})</summary>
@@ -600,13 +635,16 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAct
                         ? <a href={url + '/original'} download>Tải bản gốc · {delivery.original.name}</a>
                         : <span>{delivery.version === m.submissionVersion ? 'Bản gốc đang khóa' : 'Bản gốc của phiên bản cũ đang khóa'}</span>)}
                     </div>
-                    {delivery.original && <small className="delivery-hash">SHA-256 <code>{delivery.original.sha256}</code></small>}
+                     {delivery.original && <details className="delivery-hash">
+                       <summary>Mã kiểm tra tệp</summary>
+                       <small>SHA-256 <code>{delivery.original.sha256}</code></small>
+                     </details>}
                   </li>;
                 })}
               </ul>
             </details>}
             {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
-            {current?.id === m.id && <div className="mile-buttons">
+            {!fesc && current?.id === m.id && <div className="mile-buttons">
               {freelancer && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
                 ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton({ action: 'submit', milestoneId: m.id }, undefined, 'primary small')}
               {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
@@ -620,15 +658,14 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAct
               </>}
             </div>}
           </div>
-          <div className="mile-amount">{money(m.amount)}</div>
         </div>;
-      })}</div> : <div className="terms">
-        <div><small>NGÂN SÁCH</small><b>{money(p.budget)}</b></div>
-        <div><small>THỜI GIAN TẠO</small><b>{p.created}</b></div>
-        <div><small>QUY TẮC</small><b>Thực hiện milestone theo thứ tự</b></div>
-        {privateProject && p.decision && <div><small>QUYẾT ĐỊNH PHÂN XỬ</small><b>{p.decision}</b></div>}
-        <p>Thao tác trên dự án cập nhật số dư và trạng thái mô phỏng của workspace.</p>
-      </div>}
+      })}</section>
+      {privateProject && p.decision && <p className="hint"><b>Quyết định phân xử:</b> {p.decision}</p>}
+      <details className="project-terms">
+        <summary>Điều khoản và thông tin dự án</summary>
+        <p>Mã dự án: #{p.id} · Ngày tạo: {p.created}</p>
+        <p>Thực hiện và nghiệm thu các mốc theo thứ tự. {fesc ? 'Client xác nhận giải ngân FESC trong MetaMask.' : 'Thanh toán bằng số dư MOCK mô phỏng.'}</p>
+      </details>
     </section>
   </>;
 }

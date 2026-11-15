@@ -1,13 +1,14 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { applyProjectAction, cents, createProject, deliveryFileLimit, deliveryPreviewLimit, mockGrantCents, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { applyProjectAction, canSeePrivate, cents, createProject, deliveryFileLimit, deliveryPreviewLimit, mockGrantCents, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
 import { readDeliveryFiles, sendDeliveryFile } from './delivery.mjs';
 import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
 import { walletLinking } from './wallet.mjs';
 import { localFunding } from './local-funding.mjs';
+import { fescActions, fescWalletBalance, projectFesc, publicFescTransfers } from './project-fesc.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -134,8 +135,12 @@ function createDatabaseApi(store, root) {
     const deliveryDownload = /^\/api\/projects\/(\d+)\/milestones\/(\d+)\/deliveries\/([\da-f-]{36})\/(preview|original)$/.exec(path);
     if (method === 'GET' && path === '/api/projects/public') {
       const projects = (await store.listOpenProjects())
-        .map(({ id, title, category, description, budget }) => ({ id, title, category, description, budget }));
+        .map(({ id, title, category, description, budget, currency }) => ({ id, title, category, description, budget, currency: currency ?? 'MOCK' }));
       return json(res, 200, { projects });
+    }
+    if (method === 'GET' && path === '/api/explorer/transfers') {
+      const params = new URLSearchParams(req.url.slice(path.length + 1));
+      return json(res, 200, await publicFescTransfers(root, params));
     }
 
     if (method === 'POST' && ['/api/auth/register', '/api/auth/login'].includes(path)) {
@@ -184,7 +189,7 @@ function createDatabaseApi(store, root) {
 
     if (!deliveryDownload && !['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action', '/api/projects/delivery',
       '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding', '/api/wallet/local-status',
-      '/api/wallet/mock-claim'].includes(path)) {
+      '/api/wallet/mock-claim', '/api/wallet/fesc-balance', '/api/projects/fesc'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
     const user = token && await store.getSessionUser(hashToken(token));
@@ -242,6 +247,22 @@ function createDatabaseApi(store, root) {
         if (!wallet) throw new WorkflowError(409, 'Hãy xác minh ví trước.');
         return json(res, 200, await walletApi.localStatus(wallet.address));
       }
+      if (path === '/api/wallet/fesc-balance') {
+        walletApi.getOrigin(req);
+        return json(res, 200, await fescWalletBalance(root, await store.getWalletLink(user.id)));
+      }
+      if (path === '/api/projects/fesc') {
+        walletApi.getOrigin(req);
+        if (!Number.isSafeInteger(body.projectId) || (body.action !== undefined && !fescActions.includes(body.action))) {
+          throw new WorkflowError(400, 'Yêu cầu dự án FESC không hợp lệ.');
+        }
+        const result = await authenticatedWrite(async (writes, current) => {
+          const project = await writes.getProject(body.projectId);
+          if (!project) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
+          return projectFesc(root, writes, project, current, body);
+        });
+        return json(res, 200, result);
+      }
       if (path === '/api/wallet/mock-claim') {
         if (user.role !== 'Client') throw new WorkflowError(403, 'Chỉ Client nhận ngân sách MOCK thử.');
         await authenticatedWrite(async (writes, current) => {
@@ -278,7 +299,7 @@ function createDatabaseApi(store, root) {
         if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
         if (deliveryUpload && body.action !== 'submit') throw new WorkflowError(400, 'Thao tác bàn giao không hợp lệ.');
         await authenticatedWrite(async (writes, current) => {
-          const project = await writes.getProject(body.projectId);
+          let project = await writes.getProject(body.projectId);
           if (!project) throw new WorkflowError(404, 'Dự án không tồn tại.');
           const freelancerEmail = normalizeEmail(body.email);
           const freelancer = body.action === 'assign' && validEmail(freelancerEmail)
@@ -287,6 +308,14 @@ function createDatabaseApi(store, root) {
             throw new WorkflowError(403, 'Chỉ Freelancer của dự án được tải tệp bàn giao.');
           }
           const delivery = deliveryUpload ? readDeliveryFiles(body) : undefined;
+          if (project.currency === 'FESC' && body.action !== 'assign') {
+            if (!canSeePrivate(project, current)) throw new WorkflowError(403, 'Bạn không có quyền thực hiện thao tác này.');
+            if (!delivery) throw new WorkflowError(409, 'Thao tác FESC cần thực hiện từ mục Ký quỹ FESC trong dự án.');
+            if ((await projectFesc(root, writes, project, current)).step !== 'upload') {
+              throw new WorkflowError(409, 'Milestone FESC chưa sẵn sàng nhận bàn giao.');
+            }
+            project = await writes.getProject(body.projectId);
+          }
           const result = applyProjectAction(project, current, body, freelancer, delivery?.metadata);
           if (body.action === 'fund' && !await writes.debitMock(current.id, cents(project.budget))) {
             throw new WorkflowError(409, 'Số dư MOCK không đủ để ký quỹ dự án.');

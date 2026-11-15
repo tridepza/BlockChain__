@@ -265,6 +265,40 @@ test('FESC escrow requires a funded wallet even with full allowance', async t =>
   assert.equal(await token.read.balanceOf([owner.address]), 0n);
 });
 
+test('Client approval pays the submitted FESC milestone directly and exactly once', async t => {
+  const { connection, owner, freelancer, outsider, publicClient, token, terms, offChainHash, create } = await setup(t, 'FESC');
+  const { escrow } = await create();
+  const asFreelancer = { account: freelancer };
+  await escrow.write.accept([offChainHash()], asFreelancer);
+  await token.write.transfer([owner.address, terms.budgetUnits], { account: outsider });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  await escrow.write.fund();
+  await escrow.write.start(asFreelancer);
+  const submit = async (index: bigint, label: string) => {
+    await escrow.write.submit([index, await escrow.read.version(), hash(label)], asFreelancer);
+    return escrow.read.version();
+  };
+  const version = await submit(0n, 'first FESC delivery');
+  await connection.viem.assertions.revertWithCustomError(
+    escrow.write.approveAndPayMilestone([0n, version], asFreelancer), escrow, 'Unauthorized',
+  );
+  const tx = await escrow.write.approveAndPayMilestone([0n, version]);
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+  const [payment] = parseEventLogs({ abi: escrow.abi, eventName: 'MilestonePaid', logs: receipt.logs });
+  assert.deepEqual(payment.args, { milestone: 0n, evidenceHash: hash('first FESC delivery'), amount: terms.amounts[0] });
+  assert.equal(await token.read.balanceOf([freelancer.address]), terms.amounts[0]);
+  assert.equal(await token.read.balanceOf([escrow.address]), terms.amounts[1]);
+  assert.equal(await escrow.read.claimable([freelancer.address]), 0n);
+  await connection.viem.assertions.revertWithCustomError(
+    escrow.write.approveAndPayMilestone([0n, version]), escrow, 'StaleAction',
+  );
+  await escrow.write.approveAndPayMilestone([1n, await submit(1n, 'second FESC delivery')]);
+  assert.equal(await token.read.balanceOf([freelancer.address]), terms.budgetUnits);
+  assert.equal(await escrow.read.withdrawn([freelancer.address]), terms.budgetUnits);
+  assert.equal(await token.read.balanceOf([escrow.address]), 0n);
+  assert.equal(await escrow.read.state(), 5);
+});
+
 test('Freelancer can open a review-timeout dispute only after the review deadline', async t => {
   const { connection, freelancer, publicClient, token, terms, offChainHash, create } = await setup(t);
   const { escrow } = await create();

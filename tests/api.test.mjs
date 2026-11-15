@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { createServer as createViteServer, preview, resolveConfig } from 'vite';
+import { createPublicClient, createWalletClient, http, keccak256, parseUnits, toHex } from 'viem';
+import { hardhat } from 'viem/chains';
+import { mnemonicToAccount } from 'viem/accounts';
 import { createApi } from '../server/api.mjs';
 
 const password = 'mật-khẩu-test-2026';
@@ -17,12 +20,14 @@ const input = {
   budget: '0.30', milestones: 'Một, Hai', amounts: '0.10, 0.20',
 };
 
-async function listen(filename) {
-  const api = createApi(filename);
+async function listen(filename, root) {
+  const api = createApi(filename, root);
   const server = createServer((req, res) => api.middleware(req, res, () => res.writeHead(404).end()));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const baseURL = `http://127.0.0.1:${server.address().port}/api/`;
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const baseURL = origin + '/api/';
   return {
+    origin,
     close: async () => {
       await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       await api.close();
@@ -37,6 +42,158 @@ async function listen(filename) {
     },
   };
 }
+
+test('FESC project pays two confirmed deliveries to the linked Freelancer wallet', {
+  skip: process.env.ESCROW_TEST_FESC !== '1' && 'Run with a local Hardhat node and ESCROW_TEST_FESC=1',
+}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-fesc-test-'));
+  const metadata = join(root, '.hardhat');
+  const manifest = join(metadata, 'local-fesc-deployment.json');
+  const app = await listen(':memory:', root);
+  t.after(async () => {
+    await app.close();
+    await unlink(manifest).catch(() => {});
+    await rmdir(metadata).catch(() => {});
+    await rmdir(root);
+  });
+  const transport = http('http://127.0.0.1:8545', { timeout: 3000, retryCount: 0 });
+  const rpc = createPublicClient({ chain: hardhat, transport });
+  assert.equal(await rpc.getChainId(), 31337);
+  assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat/i);
+  const testWallet = addressIndex => createWalletClient({ chain: hardhat, transport,
+    account: mnemonicToAccount('test test test test test test test test test test test junk', { addressIndex }) });
+  const owner = testWallet(16), freelancer = testWallet(17), arbitrator = testWallet(18);
+  const artifact = path => readFile('.hardhat/artifacts/contracts/' + path + '.json', 'utf8').then(JSON.parse);
+  const coin = await artifact('FreelanceToken.sol/FreelanceToken');
+  const factory = await artifact('Escrow.sol/EscrowFactory');
+  const confirm = async hash => {
+    const receipt = await rpc.waitForTransactionReceipt({ hash });
+    assert.equal(receipt.status, 'success');
+    return receipt;
+  };
+  const deploy = (artifact, args) => owner.deployContract({ abi: artifact.abi, bytecode: artifact.bytecode, args }).then(confirm);
+  const tokenReceipt = await deploy(coin, [[owner.account.address]]);
+  const token = tokenReceipt.contractAddress;
+  const instanceKey = keccak256(toHex(root));
+  const factoryReceipt = await deploy(factory, [token, instanceKey]);
+  await mkdir(metadata);
+  await writeFile(manifest, JSON.stringify({
+    chainId: 31337, projectPayments: 1, instanceKey, token, tokenCodeHash: keccak256(await rpc.getCode({ address: token })),
+    factory: factoryReceipt.contractAddress, factoryCodeHash: keccak256(await rpc.getCode({ address: factoryReceipt.contractAddress })),
+    startBlock: factoryReceipt.blockNumber.toString(), startBlockHash: factoryReceipt.blockHash,
+    accounts: { arbitrator: arbitrator.account.address },
+  }));
+  async function post(path, data, cookie, status = 200) {
+    const result = await app.request(path, { data, cookie, headers: { Origin: app.origin } });
+    assert.equal(result.status, status, `${path} ${data.action ?? ''}: ${JSON.stringify(result.body)}`);
+    return result;
+  }
+  async function login(account, wallet) {
+    await post('auth/register', account, undefined, 201);
+    const login = await post('auth/login', account);
+    const cookie = login.cookie.split(';')[0];
+    if (wallet) {
+      const { body } = await post('wallet/challenges', { address: wallet.account.address, chainId: 31337 }, cookie, 201);
+      const signature = await wallet.signMessage({ message: body.message });
+      await post('wallet/verify', { challengeId: body.challengeId, signature }, cookie);
+    }
+    return cookie;
+  }
+  const clientCookie = await login(client, owner);
+  const freelancerCookie = await login(worker, freelancer);
+  const outsiderCookie = await login(outsider);
+  const { body: { project } } = await post('projects', { ...input, currency: 'FESC' }, clientCookie, 201);
+  const projectId = project.id;
+  const state = cookie => post('projects/fesc', { projectId }, cookie).then(result => result.body);
+  const action = (action, cookie, data = {}, status = 200) => post('projects/fesc', { projectId, action, ...data }, cookie, status);
+  async function execute(step, cookie, wallet, data) {
+    const { body: tx } = await action(step, cookie, data);
+    assert.equal(tx.from.toLowerCase(), wallet.account.address.toLowerCase());
+    return confirm(await wallet.sendTransaction({ to: tx.to, data: tx.data }));
+  }
+  await post('projects/action', { projectId, action: 'assign', email: worker.email }, clientCookie);
+  await post('projects/fesc', { projectId }, outsiderCookie, 404);
+  await post('projects/action', { projectId, action: 'fund' }, clientCookie, 409);
+  await execute('create', clientCookie, owner);
+  const { escrow } = await state(clientCookie);
+  assert.equal((await state(freelancerCookie)).step, 'accept');
+  await execute('accept', freelancerCookie, freelancer);
+  await execute('allow', clientCookie, owner);
+  const funding = await execute('fund', clientCookie, owner);
+  const fundingQuery = 'explorer/transfers?q=' + funding.transactionHash;
+  const publicFunding = await app.request(fundingQuery);
+  assert.equal(publicFunding.status, 200);
+  assert.deepEqual(await app.request(fundingQuery, { cookie: outsiderCookie }), publicFunding);
+  const [deposit] = publicFunding.body.transfers;
+  assert.deepEqual(Object.keys(deposit).sort(), ['amount', 'block', 'from', 'hash', 'logIndex', 'time', 'to']);
+  assert.equal(deposit.from.toLowerCase(), owner.account.address.toLowerCase());
+  assert.equal(deposit.to.toLowerCase(), escrow.toLowerCase());
+  assert.equal(deposit.amount, '0.3');
+  assert.equal((await state(clientCookie)).held, '0.3');
+  assert.equal((await state(clientCookie)).balance, '999.7');
+  await execute('start', freelancerCookie, freelancer);
+
+  for (const [milestoneId, total] of [[1, '0.1'], [2, '0.3']]) {
+    assert.equal((await state(freelancerCookie)).step, 'upload');
+    const { body } = await post('projects/delivery', { projectId, action: 'submit', milestoneId, note: 'Bản bàn giao',
+      preview: { name: 'preview.pdf', data: Buffer.from('%PDF-test preview').toString('base64') },
+      original: { name: 'original.txt', data: Buffer.from('original data').toString('base64') },
+    }, freelancerCookie);
+    const delivery = body.projects[0].milestones[milestoneId - 1].deliveries[0];
+    const original = `projects/${projectId}/milestones/${milestoneId}/deliveries/${delivery.id}/original`;
+    assert.equal((await app.request(original, { cookie: clientCookie })).status, 403);
+    const review = { milestoneId, submissionVersion: 1 };
+    await action('approve', clientCookie, review, 409);
+    await execute('submit', freelancerCookie, freelancer, review);
+    assert.equal((await state(clientCookie)).step, 'approve');
+    await action('approve', freelancerCookie, review, 409);
+    await action('approve', clientCookie, { ...review, submissionVersion: 0 }, 409);
+    await action('approve', clientCookie, { ...review, milestoneId: 3 - milestoneId }, 409);
+    await execute('approve', clientCookie, owner, review);
+    await Promise.all([state(clientCookie), state(freelancerCookie)]);
+    assert.equal((await state(freelancerCookie)).balance, total);
+    const response = await fetch(`${app.origin}/api/${original}`, { headers: { Cookie: clientCookie } });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'original data');
+  }
+
+  assert.equal((await state(clientCookie)).step, 'complete');
+  assert.equal((await state(clientCookie)).held, '0');
+  const { body: workspace } = await app.request('workspace', { cookie: freelancerCookie });
+  assert.equal(workspace.projects[0].paid, 0.3);
+  assert.deepEqual(workspace.txs.map(tx => tx.currency), ['FESC', 'FESC', 'FESC']);
+  assert.equal(workspace.mockWallet.cents, 0);
+  assert.equal((await post('wallet/fesc-balance', {}, freelancerCookie)).body.balance, '0.3');
+  assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [escrow] }), 0n);
+  assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [freelancer.account.address] }), parseUnits('0.3', 18));
+
+  const outgoing = await confirm(await freelancer.writeContract({ address: token, abi: coin.abi,
+    functionName: 'transfer', args: [owner.account.address, 1n] }));
+  const walletQuery = 'explorer/transfers?q=' + freelancer.account.address;
+  const publicWallet = (await app.request(walletQuery)).body;
+  const [direct, ...payouts] = publicWallet.transfers;
+  assert.equal(direct.hash, outgoing.transactionHash);
+  assert.equal(direct.from.toLowerCase(), freelancer.account.address.toLowerCase());
+  assert.equal(direct.to.toLowerCase(), owner.account.address.toLowerCase());
+  assert.equal(direct.amount, '0.000000000000000001');
+  assert.deepEqual(payouts.map(row => row.amount), ['0.2', '0.1']);
+  assert.ok(payouts.every(row => row.from.toLowerCase() === escrow.toLowerCase() &&
+    row.to.toLowerCase() === freelancer.account.address.toLowerCase()));
+  assert.deepEqual((await app.request('explorer/transfers?q=0x' + '0'.repeat(64))).body.transfers, []);
+  assert.equal((await app.request('explorer/transfers?q=khong-hop-le')).status, 400);
+
+  for (let index = 0; index < 18; index++) {
+    await confirm(await owner.writeContract({ address: token, abi: coin.abi,
+      functionName: 'transfer', args: [freelancer.account.address, 1n] }));
+  }
+  const firstPage = (await app.request('explorer/transfers')).body;
+  assert.equal(firstPage.transfers.length, 20);
+  assert.ok(firstPage.next);
+  const secondPage = (await app.request('explorer/transfers?before=' + encodeURIComponent(firstPage.next))).body;
+  assert.equal(secondPage.transfers.length, 2);
+  assert.equal(secondPage.next, null);
+  assert.equal(new Set([...firstPage.transfers, ...secondPage.transfers].map(row => row.hash)).size, 22);
+});
 
 test('tài khoản và session được lưu bền vững, cookie cũ bị thu hồi', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'escrow-api-'));

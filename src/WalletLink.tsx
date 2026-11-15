@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { Wallet } from 'lucide-react';
 import { getAddress, isAddress, numberToHex, stringToHex } from 'viem';
 import { api, ApiError, errorMessage } from './api';
 import { localChain } from './local-chain';
 
 type Wallet = { address: string; chainId: number; verifiedAt: string };
 type Currency = 'FESC' | 'MockUSDC';
-export type FundingStatus = {
+type FundingStatus = {
   escrow: string | null;
   token: string;
   currency: Currency;
@@ -17,12 +19,16 @@ export type FundingStatus = {
   receipt: { hash: string; block: string } | null;
 };
 
-export function readWalletLink(accountId: string) {
+function readWalletLink(accountId: string) {
   return api<{ wallet: Wallet | null }>('wallet', undefined, accountId);
 }
 
-export function readLocalFunding(accountId: string, currency: Currency = 'FESC') {
+function readLocalFunding(accountId: string, currency: Currency) {
   return api<FundingStatus>('wallet/local-funding', { currency }, accountId);
+}
+
+function readFescBalance(accountId: string) {
+  return api<{ balance: string; token: string }>('wallet/fesc-balance', {}, accountId);
 }
 
 const fundingLabels = {
@@ -54,7 +60,7 @@ function providerCode(error: unknown) {
   if (typeof error === 'object' && error !== null && 'code' in error) return error.code;
 }
 
-function walletError(reason: unknown, step: string) {
+export function walletError(reason: unknown, step: string) {
   if (reason instanceof ApiError) return reason.message;
   const code = providerCode(reason);
   switch (code) {
@@ -80,18 +86,54 @@ function walletError(reason: unknown, step: string) {
   }
 }
 
-export default function WalletLink({ accountId, isClient }: { accountId: string; isClient: boolean }) {
+export type LocalTransaction = { from: string; to: string; data: string; deploymentBlock: string; deploymentBlockHash: string };
+
+export async function sendLocalTransaction(transaction: LocalTransaction) {
+  const provider = metaMask();
+  if (!provider) throw new Error('Hãy mở website trong trình duyệt đã cài MetaMask Extension.');
+  const correctWallet = async () => firstAddress(await provider.request({ method: 'eth_accounts' })) === transaction.from &&
+    await provider.request({ method: 'eth_chainId' }) === numberToHex(localChain.id);
+  if (!await correctWallet()) throw new Error('Chọn ví đã xác minh và mạng Hardhat Local (31337) trong MetaMask.');
+  const block = await provider.request({ method: 'eth_getBlockByNumber', params: [transaction.deploymentBlock, false] });
+  if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== transaction.deploymentBlockHash) {
+    throw new Error('MetaMask cần kết nối với RPC Hardhat Local http://127.0.0.1:8545.');
+  }
+  if (!await correctWallet()) throw new Error('Ví hoặc mạng đã thay đổi. Hãy kiểm tra và thử lại.');
+  const hash = await provider.request({ method: 'eth_sendTransaction', params: [{
+    from: transaction.from.toLowerCase(), to: transaction.to, data: transaction.data, value: '0x0',
+  }] });
+  if (typeof hash !== 'string' || !/^0x[\da-f]{64}$/i.test(hash)) throw new Error('MetaMask chưa trả về mã giao dịch hợp lệ.');
+  return {
+    hash,
+    async confirmed() {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const receipt = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+        if (receipt && typeof receipt === 'object' && 'status' in receipt) {
+          if (receipt.status !== '0x1') throw new Error('Giao dịch đã bị hoàn tác trên Hardhat.');
+          return true;
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 500));
+      }
+      return false;
+    },
+  };
+}
+
+export default function WalletLink({ accountId, isClient, children }: { accountId: string; isClient: boolean; children?: ReactNode }) {
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [showFunding, setShowFunding] = useState(false);
   const [funding, setFunding] = useState<FundingStatus | null>(null);
   const [currency, setCurrency] = useState<Currency>('FESC');
   const [fundingLoading, setFundingLoading] = useState(false);
   const [fundingMessage, setFundingMessage] = useState('');
   const [fundingError, setFundingError] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
+  const [fesc, setFesc] = useState<Awaited<ReturnType<typeof readFescBalance>> | null>(null);
+  const [fescError, setFescError] = useState('');
   const version = useRef(0);
   const linkedWallet = useRef<Wallet | null>(null);
   const chainId = numberToHex(localChain.id);
@@ -125,15 +167,25 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
   }, [accountId]);
 
   useEffect(() => {
-    if (!wallet || !isClient) return;
+    if (!wallet) return;
+    let active = true;
+    readFescBalance(accountId).then(result => {
+      if (active) { setFesc(result); setFescError(''); }
+    }).catch(error => { if (active) { setFesc(null); setFescError(errorMessage(error)); } });
+    return () => { active = false; };
+  }, [accountId, wallet]);
+
+  useEffect(() => {
+    if (!wallet || !isClient || !showFunding) return;
     let active = true;
     setFundingLoading(true);
+    setFundingError('');
     readLocalFunding(accountId, currency)
       .then(status => { if (active) setFunding(status); })
       .catch(reason => { if (active) setFundingError(errorMessage(reason)); })
       .finally(() => { if (active) setFundingLoading(false); });
     return () => { active = false; };
-  }, [accountId, isClient, wallet, currency]);
+  }, [accountId, isClient, wallet, currency, showFunding]);
 
   async function connect() {
     setError('');
@@ -290,24 +342,39 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
   }
 
   return <>
-    <section className="panel">
-      <div className="panel-head"><div>
-        <h3>Ví MetaMask</h3>
-        <p>Liên kết tài khoản bằng chữ ký trên Hardhat Local (31337).</p>
-      </div></div>
-      {wallet && <p className="hint">Ví đã xác minh <code style={{ overflowWrap: 'anywhere' }}>{wallet.address}</code></p>}
-      <button type="button" className="primary" disabled={busy || !ready} onClick={() => void connect()}>
-        {busy ? 'Đang chờ MetaMask…' : wallet ? 'Kiểm tra ví đang mở' : 'Kết nối MetaMask'}
-      </button>
-      {message && <p className="hint" role="status">{message}</p>}
-      {error && <p className="hint" role="alert">{error}</p>}
-    </section>
-    {wallet && isClient && <section className="panel">
-      <div className="panel-head"><div>
-        <h3>Ký quỹ Hardhat Local</h3>
-        <p>Hợp đồng thử với ngân sách 100 {currency}.</p>
-      </div></div>
-      <label>Token ký quỹ <select value={currency} disabled={busy || fundingLoading || !!submitted} onChange={event => {
+    <div className="wallet-grid">
+      <section className="panel wallet-card">
+        <div className="panel-head"><div>
+          <h2>Ví MetaMask</h2>
+          <p>Dùng cho dự án FESC trên Hardhat Local.</p>
+        </div><span className="stat-icon"><Wallet size={19}/></span></div>
+        {wallet && <>
+          {fesc ? <div className="balance">{fesc.balance} FESC</div> :
+            !fescError && <p className="muted" role="status">Đang đọc số dư FESC…</p>}
+          <details className="technical-details">
+            <summary>Địa chỉ ví và token</summary>
+            <p>Ví đã xác minh <code>{wallet.address}</code></p>
+            {fesc && <p>Token FESC <code>{fesc.token}</code></p>}
+          </details>
+        </>}
+        <div className="button-row">
+          <button type="button" className={wallet ? 'secondary' : 'primary'} disabled={busy || !ready} onClick={() => void connect()}>
+            {busy ? 'Đang chờ MetaMask…' : wallet ? 'Kiểm tra ví đang mở' : 'Kết nối MetaMask'}
+          </button>
+          {wallet && <button className="secondary" type="button" onClick={() => {
+            void readFescBalance(accountId).then(result => { setFesc(result); setFescError(''); })
+              .catch(error => { setFesc(null); setFescError(errorMessage(error)); });
+          }}>Làm mới số dư FESC</button>}
+        </div>
+        {message && <p className="hint" role="status">{message}</p>}
+        {(error || fescError) && <p className="form-error" role="alert">{error || fescError}</p>}
+      </section>
+      {children}
+    </div>
+    {wallet && isClient && <details className="panel wallet-test" onToggle={event => setShowFunding(event.currentTarget.open)}>
+      <summary>Bài thử ký quỹ Hardhat độc lập</summary>
+      <p className="muted">Hợp đồng thử 100 {currency}, không gắn với dự án.</p>
+      <label className="role-select wallet-currency">Token ký quỹ <select value={currency} disabled={busy || fundingLoading || !!submitted} onChange={event => {
         setFunding(null);
         setFundingError('');
         setFundingMessage('');
@@ -321,10 +388,13 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
         {funding.escrowBalance != null &&
           <div className="balance">{funding.escrowBalance} {funding.currency}<small>Đang giữ trong hợp đồng</small></div>}
         <p className="hint">Số dư ví {funding.balance} {funding.currency} và {Number(funding.eth).toFixed(4)} ETH thử</p>
-        <p className="hint">Địa chỉ token <code style={{ overflowWrap: 'anywhere' }}>{funding.token}</code></p>
-        {funding.escrow && <p className="hint">Escrow <code style={{ overflowWrap: 'anywhere' }}>{funding.escrow}</code></p>}
+        <details className="technical-details">
+          <summary>Địa chỉ hợp đồng</summary>
+          <p>Token <code>{funding.token}</code></p>
+          {funding.escrow && <p>Escrow <code>{funding.escrow}</code></p>}
+        </details>
         {funding.receipt && <p className="hint" role="status">
-          Đã ký quỹ 100 {funding.currency} tại block {funding.receipt.block}. Giao dịch <code style={{ overflowWrap: 'anywhere' }}>{funding.receipt.hash}</code>
+          Đã ký quỹ 100 {funding.currency} tại block {funding.receipt.block}. Giao dịch <code className="chain-address">{funding.receipt.hash}</code>
         </p>}
         {funding.step === 'closed' && <p className="hint">Escrow thử đã đóng.</p>}
         {funding.step === 'accept' && <p className="hint">Tài khoản Hardhat thử sẽ thực hiện bước chấp nhận của Freelancer.</p>}
@@ -332,16 +402,15 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
           <p className="hint" role="status">Cần đủ 100 {funding.currency} trong ví trước khi ký quỹ.</p>}
       </>}
       {fundingMessage && <p className="hint" role="status">{fundingMessage}</p>}
-      {fundingError && <p className="hint" role="alert">{fundingError}</p>}
-      <button className="secondary" type="button" disabled={busy || fundingLoading} onClick={() => void runFunding()}>Đọc lại trạng thái</button>
-      {' '}
+      {fundingError && <p className="form-error" role="alert">{fundingError}</p>}
+      <div className="button-row"><button className="secondary" type="button" disabled={busy || fundingLoading} onClick={() => void runFunding()}>Đọc lại trạng thái</button>
       {funding && funding.step !== 'funded' && funding.step !== 'closed' &&
         <button className="primary" type="button" disabled={busy || fundingLoading || !!submitted ||
           (funding.step !== 'accept' && Number(funding.eth) === 0) ||
           (['approve', 'fund'].includes(funding.step) && !funding.enoughToken)}
           onClick={() => void runFunding(funding.step as keyof typeof fundingLabels)}>
           {fundingLabels[funding.step]}
-        </button>}
-    </section>}
+        </button>}</div>
+    </details>}
   </>;
 }

@@ -67,12 +67,12 @@ Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong 
 
 ## Thử các luồng
 
-- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt hoặc một cửa sổ thường và một cửa sổ ẩn danh để giữ hai phiên riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký rồi ký quỹ. Freelancer bấm **Làm mới** để thấy dự án và gửi bàn giao. Client có thể yêu cầu sửa hoặc nghiệm thu. Để hủy dự án đã ký quỹ, một bên chọn **Đề nghị hủy**, bên còn lại bấm **Làm mới** và xác nhận trong 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi xác nhận thành công. Tiến độ thay đổi làm đề nghị cũ hết hiệu lực.
+- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt để giữ hai phiên và hai tài khoản MetaMask riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký và chọn đơn vị ngân sách. Mặc định là **FESC** trên Hardhat Local.
 - **Bản demo.** Chọn **Thử bản demo** ở trang đăng nhập để đổi giữa Client, Freelancer và Arbitrator trên dữ liệu mẫu. Milestone 2 của dự án website đã có bàn giao để thử nhánh tranh chấp và phân xử. Dữ liệu demo lưu riêng trong trình duyệt. Xóa hai khóa `fe-projects` và `fe-txs` để trở về dữ liệu mẫu.
 
-Ký quỹ, giải ngân và hoàn tiền trong trang Dự án dùng số dư MOCK mô phỏng. Tài khoản bắt đầu với số dư 0. Client có thể nhận ngân sách 1.000 MOCK một lần ở **Ví & giao dịch**. API trừ số dư khi ký quỹ, cộng số đã giải ngân cho Freelancer và trả phần được hoàn về Client. Trang Ví & giao dịch có thêm luồng ký quỹ thử FESC và MockUSDC trên Hardhat Local. Bạn có thể thử phân xử trong bản demo trình duyệt.
+Dự án dùng **MOCK** có số dư mô phỏng riêng. Client có thể nhận ngân sách 1.000 MOCK một lần ở **Ví & giao dịch**. Luồng MOCK hỗ trợ yêu cầu sửa và đề nghị hủy có xác nhận trong 72 giờ. Bạn có thể thử phân xử trong bản demo trình duyệt.
 
-Khi gửi bàn giao trong workspace tài khoản, Freelancer đính kèm bản xem trước PDF, PNG hoặc JPEG (tối đa 2 MiB) và có thể thêm bản gốc thử ZIP, PDF, PNG, JPEG hoặc TXT (tối đa 10 MiB). Client có thể tải bản xem trước. Máy chủ lưu lịch sử và SHA-256 của tệp gốc, rồi cấp quyền tải đúng phiên bản được giải ngân trong luồng mô phỏng. Dùng tệp mẫu trong luồng này. Nếu dùng MongoDB hoặc PostgreSQL, chạy `db:migrate` để tạo nơi lưu tệp.
+Khi gửi bàn giao, Freelancer đính kèm bản xem trước PDF, PNG hoặc JPEG (tối đa 2 MiB) và có thể thêm bản gốc thử ZIP, PDF, PNG, JPEG hoặc TXT (tối đa 10 MiB). Client có thể tải bản xem trước và chỉ tải được bản gốc của phiên bản đã giải ngân. Nếu dùng MongoDB hoặc PostgreSQL, chạy `db:migrate` để tạo nơi lưu tệp.
 
 ## Chạy hợp đồng trên Hardhat local
 
@@ -117,7 +117,27 @@ Remove-Item Env:FESC_TOKEN_ONLY
 
 Lệnh triển khai hợp đồng ERC-20 và cấp **1.000 FESC** cho mỗi ví chỉ định. Trong MetaMask, chọn đúng ví và mạng **Hardhat Local**, mở **Manage tokens → Add custom token**, dán địa chỉ hợp đồng trên dòng `FESC 0x…`, rồi xác nhận nhập. Nếu MetaMask yêu cầu, nhập ký hiệu `FESC` và số chữ số thập phân `18`. FESC ở đây chỉ tồn tại trên chuỗi thử local. Khi khởi động node với chain trống, triển khai lại và dùng địa chỉ hợp đồng vừa in. [Hướng dẫn thêm token của MetaMask](https://support.metamask.io/manage-crypto/tokens/how-to-display-tokens-in-metamask)
 
-Để thử luồng ký quỹ trên website, chạy `npm.cmd run chain:deploy` để cấu hình liên kết ví, rồi chạy `npm.cmd run chain:deploy:fesc` với `FESC_RECIPIENTS` đã đặt và chế độ mặc định. Lệnh triển khai FESC cùng factory ký quỹ và ghi `.hardhat/local-fesc-deployment.json`.
+### Ký quỹ và giải ngân FESC theo dự án
+
+1. Chạy `npm.cmd run chain:node` nếu Hardhat chưa chạy. Dùng tài khoản Hardhat `#0` làm ví Client và `#1` làm ví Freelancer để cả hai có ETH thử trả gas.
+2. Trên PowerShell, đặt `FESC_RECIPIENTS` thành địa chỉ của Client và triển khai FESC cùng factory. Chạy lại bước này nếu bạn đang dùng factory FESC cũ. Mỗi dự án đã tạo hợp đồng tiếp tục dùng token và factory được ghi lúc tạo.
+
+   ```powershell
+   $env:FESC_RECIPIENTS = '0xDIA_CHI_VI_CLIENT'
+   Remove-Item Env:FESC_TOKEN_ONLY -ErrorAction SilentlyContinue
+   npm.cmd run chain:deploy:fesc
+   npm.cmd run dev
+   ```
+
+3. Mở `http://127.0.0.1:5173/` trong từng hồ sơ trình duyệt. Đăng nhập hai tài khoản web và liên kết đúng ví trong **Ví & giao dịch → Kết nối MetaMask**.
+4. **Client** vào **Dự án → Tạo dự án**, chọn **FESC**, nhập ngân sách và các milestone, rồi chọn Freelancer theo email. Trong chi tiết dự án, bấm **Tạo hợp đồng FESC** và ký trong MetaMask.
+5. **Freelancer** mở dự án, bấm **Làm mới FESC** nếu cần, rồi ký **Chấp nhận hợp đồng FESC**. **Client** đọc lại trạng thái, ký **Cấp quyền ký quỹ FESC** và **Ký quỹ FESC**. Số tiền nằm trong hợp đồng.
+6. **Freelancer** ký **Bắt đầu milestone**, bấm **Gửi bàn giao** để lưu tệp, rồi ký **Xác nhận bàn giao trong MetaMask**.
+7. **Client** làm mới trạng thái, kiểm tra bản xem trước và ký **Nghiệm thu & giải ngân FESC**. Hợp đồng chuyển đúng số tiền milestone vào ví Freelancer ngay trong giao dịch. Lặp lại bước bàn giao và nghiệm thu cho các milestone còn lại.
+
+Mục **Ký quỹ FESC** hiển thị số dư của bên đang đăng nhập, số token trong hợp đồng và số đã chuyển cho Freelancer. **Ví & giao dịch** hiển thị số dư FESC và mã giao dịch ký quỹ, giải ngân. Dùng địa chỉ token trong dự án để nhập đúng đồng FESC vào MetaMask.
+
+Nếu khởi động Hardhat với chuỗi trống, triển khai lại và tạo dự án FESC mới để thử luồng mới.
 
 ### Liên kết MetaMask với tài khoản web
 
@@ -125,7 +145,7 @@ Nếu dùng MongoDB hoặc PostgreSQL, chạy lại `npm.cmd run db:migrate` đ�
 
 Mỗi tài khoản liên kết một địa chỉ ví. Sau khi liên kết, **Kiểm tra ví đang mở** giúp bạn kiểm tra tài khoản và mạng đang chọn trong MetaMask. Ký thông điệp xác minh địa chỉ không tốn gas.
 
-Trong **Ví & giao dịch**, Client đã xác minh ví có thể thử ký quỹ 100 FESC hoặc chọn MockUSDC. Ví cần đủ token đã chọn và ETH thử trả gas. Bấm **Đọc lại trạng thái**, xác nhận tạo escrow trong MetaMask, rồi bấm **Đọc lại trạng thái** sau mỗi giao dịch. Ví Freelancer thử của Hardhat chấp nhận hợp đồng khi bạn bấm nút tương ứng. Client lần lượt ký cấp quyền và ký quỹ trong MetaMask. Website xác nhận ký quỹ từ receipt `fund` và log chuyển token. Bài thử dùng một escrow riêng cho mỗi ví Client trên mỗi deployment. Trang **Dự án** dùng số dư MOCK mô phỏng.
+Mục **Bài thử ký quỹ Hardhat độc lập** trong **Ví & giao dịch** vẫn có bài thử nạp 100 FESC hoặc MockUSDC. Để bàn giao và giải ngân, mở hợp đồng trong chi tiết dự án FESC.
 
 ## Kiểm thử tự động
 
@@ -143,6 +163,8 @@ npm.cmd run test:contracts
 ```
 
 Biên dịch trước khi chạy kiểm tra kiểu để sinh khai báo ABI. Test triển khai `ToolchainCheck`, `MockUSDC`, `EscrowFactory` và `Escrow` trên mạng mô phỏng tạm thời của Hardhat.
+
+Để chạy cả bài kiểm thử FESC qua API, giữ node Hardhat Local chạy, đặt `$env:ESCROW_TEST_FESC = '1'`, rồi chạy `npm.cmd test`. Bài kiểm thử tạo hợp đồng và cơ sở dữ liệu thử riêng.
 
 `EscrowFactory` nhận địa chỉ token và `instanceKey` khác 0. Mỗi lần triển khai dùng một khóa ngẫu nhiên 32 byte mới. `createEscrow(terms, expectedTermsHash)` tính lại hash theo [quy cách Giai đoạn 4](docs/04-kien-truc-erd-va-transaction-flow.md#74-file-điều-khoản-và-đề-nghị-đồng-thuận), kiểm tra hạn tạo và chỉ tạo một lần cho mỗi cặp Client–`agreementRef`. Các hàm xử lý milestone, phân xử và đồng thuận trong `Escrow` dùng ABI của bản Solidity khôi phục. Chữ ký hàm và event thực tế nằm trong ABI mới tại `.hardhat/artifacts/`. Thư mục `artifacts/` ở gốc là đầu ra của bản cũ.
 

@@ -12,11 +12,11 @@ const factoryAbi = parseAbi(['function instanceKey() view returns (bytes32)']);
 const rpc = createPublicClient({ transport: http(localChain.rpcUrl, { timeout: 2500, retryCount: 0 }) });
 const expired = () => new WorkflowError(409, 'Yêu cầu ký đã hết hạn, đã dùng hoặc thuộc phiên khác. Hãy kết nối lại.');
 
-export async function checkLocalDeployment(root, address, currency = 'MockUSDC') {
+export async function checkLocalDeployment(root, address, currency = 'MockUSDC', pinned) {
   let deployment;
   try {
     const manifest = currency === 'FESC' ? 'local-fesc-deployment.json' : 'local-deployment.json';
-    deployment = JSON.parse(await readFile(resolve(root, '.hardhat', manifest), 'utf8'));
+    deployment = pinned ?? JSON.parse(await readFile(resolve(root, '.hardhat', manifest), 'utf8'));
     const [chainId, startBlock, factoryCode, instanceKey] = await Promise.all([
       rpc.getChainId(),
       rpc.getBlock({ blockNumber: BigInt(deployment.startBlock) }),
@@ -39,6 +39,19 @@ export async function checkLocalDeployment(root, address, currency = 'MockUSDC')
 }
 
 export function walletLinking(root) {
+  async function walletDeployment(address, expected) {
+    for (const currency of ['FESC', 'MockUSDC']) {
+      try {
+        const deployment = await checkLocalDeployment(root, address, currency);
+        if (!expected || deployment.instanceKey === expected) return deployment;
+      } catch (error) {
+        if (error.status !== 503) throw error;
+      }
+    }
+    if (expected) throw expired();
+    throw new WorkflowError(503, 'Chưa có triển khai Hardhat Local hợp lệ. Hãy chạy chain:deploy:fesc.');
+  }
+
   return {
     getOrigin(req) {
       const scheme = req.socket.encrypted ? 'https' : 'http';
@@ -47,7 +60,7 @@ export function walletLinking(root) {
       return origin;
     },
     async localStatus(address) {
-      const deployment = await checkLocalDeployment(root, address);
+      const deployment = await walletDeployment(address);
       const balance = await rpc.getBalance({ address });
       return { eth: formatEther(balance), deploymentBlock: numberToHex(BigInt(deployment.startBlock)), deploymentBlockHash: deployment.startBlockHash };
     },
@@ -55,7 +68,7 @@ export function walletLinking(root) {
       if (input.chainId !== localChain.id) throw new WorkflowError(400, 'Hãy chuyển MetaMask sang Hardhat Local (31337).');
       if (typeof input.address !== 'string' || !isAddress(input.address)) throw new WorkflowError(400, 'Địa chỉ ví không hợp lệ.');
       const address = getAddress(input.address);
-      const { instanceKey: deployment } = await checkLocalDeployment(root, address);
+      const { instanceKey: deployment } = await walletDeployment(address);
       const url = new URL(origin);
       const issuedAt = new Date();
       const expiresAt = new Date(issuedAt.getTime() + challengeLifetime);
@@ -88,7 +101,7 @@ export function walletLinking(root) {
         throw new WorkflowError(400, 'Chữ ký ví không hợp lệ.');
       }
       if (signer !== challenge.address) throw new WorkflowError(400, 'Chữ ký không khớp địa chỉ ví.');
-      if ((await checkLocalDeployment(root, challenge.address)).instanceKey !== challenge.deployment) throw expired();
+      await walletDeployment(challenge.address, challenge.deployment);
       return authenticatedWrite(async writes => {
         if (!await writes.consumeWalletChallenge(challenge.id, userId, sessionId, Date.now())) throw expired();
         const current = await writes.getWalletLink(userId);

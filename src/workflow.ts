@@ -1,4 +1,5 @@
 export type Role = 'Client' | 'Freelancer' | 'Arbitrator';
+export type Currency = 'MOCK' | 'FESC';
 export type Account = { id: string; name: string; email: string; role: Role };
 type Status = 'Open' | 'Proposal sent' | 'Funded' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Completed' | 'Cancelled';
 type MilestoneStatus = 'Pending' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Paid' | 'Refunded';
@@ -19,7 +20,7 @@ export type Delivery = {
   version: number;
   note: string;
   submittedAt?: string;
-  preview?: { name: string };
+  preview?: { name: string; sha256?: string };
   original?: { name: string; sha256: string };
 };
 
@@ -38,6 +39,7 @@ export type Project = {
   ownerId: string;
   freelancerId?: string;
   budget: number;
+  currency?: Currency;
   status: Status;
   milestones: Milestone[];
   funded: number;
@@ -56,12 +58,13 @@ export type Tx = {
   project: string;
   time: string;
   status: string;
+  currency?: Currency;
 };
 
 export type MockBalance = { cents: number; claimed: boolean };
 export type WorkspaceData = { projects: Project[]; txs: Tx[]; mockWallet?: MockBalance };
 export const mockGrantCents = 100_000;
-export const money = (amount: number) => `${amount.toFixed(2)} MOCK`;
+export const money = (amount: number, currency: Currency = 'MOCK') => `${amount.toFixed(2)} ${currency}`;
 export const categories = ['Web Development', 'UI/UX Design', 'Data Analytics', 'Mobile App'];
 export const demoAccounts: Record<Role, Account> = {
   Client: { id: 'demo-client', name: 'An Nguyen', email: '', role: 'Client' },
@@ -118,9 +121,9 @@ export function visibleWorkspace(data: WorkspaceData, actor: Account): Workspace
     projects: data.projects.flatMap(p => {
       if (ids.has(p.id)) return [p];
       if (actor.role !== 'Freelancer' || p.status !== 'Open') return [];
-      const { id, title, category, description, client, budget, status, created } = p;
+      const { id, title, category, description, client, budget, currency, status, created } = p;
       const milestones = p.milestones.map(({ id, title, amount, status }) => ({ id, title, amount, status }));
-      return [{ id, title, category, description, client, budget, status, created, milestones,
+      return [{ id, title, category, description, client, budget, currency, status, created, milestones,
         ownerId: '', freelancer: '', funded: 0, paid: 0 }];
     }),
     txs: data.txs.filter(t => t.projectId === undefined
@@ -140,6 +143,9 @@ function readCents(value: unknown) {
 
 export function createProject(actor: Account, input: Record<string, unknown>, id: number): Project {
   if (actor.role !== 'Client') throw new WorkflowError(403, 'Chỉ Client được tạo dự án.');
+  if (input.currency !== undefined && input.currency !== 'MOCK' && input.currency !== 'FESC') {
+    throw new WorkflowError(400, 'Đơn vị ngân sách không hợp lệ.');
+  }
   const title = text(input.title, 120);
   const description = text(input.description, 2000);
   const category = text(input.category, 40);
@@ -158,7 +164,7 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   }
   return {
     id, title, category, description, client: actor.name, ownerId: actor.id, freelancer: '',
-    budget: budget / 100, status: 'Open', funded: 0, paid: 0,
+    budget: budget / 100, currency: input.currency, status: 'Open', funded: 0, paid: 0,
     created: new Date().toISOString().slice(0, 10),
     milestones: names.map((name, index) => ({ id: index + 1, title: name, amount: amounts[index] / 100, status: 'Pending' })),
   };

@@ -55,6 +55,7 @@ try {
     await mkdir(output, { recursive: true });
     await writeFile(new URL('local-fesc-deployment.json', output), JSON.stringify({
       chainId: 31337,
+      projectPayments: 1,
       instanceKey,
       token: token.address,
       tokenCodeHash: keccak256(tokenCode),

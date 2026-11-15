@@ -47,7 +47,7 @@ export function readDeliveryFiles(body) {
   return {
     files: { preview, original },
     metadata: {
-      preview: { name: preview.name },
+      preview: { name: preview.name, sha256: preview.sha256 },
       ...(original && { original: { name: original.name, sha256: original.sha256 } }),
     },
   };
