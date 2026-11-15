@@ -69,7 +69,7 @@ export function walletError(reason: unknown, step: string) {
     case -32002:
       return 'MetaMask còn một yêu cầu đang chờ. Mở tiện ích để ký hoặc hủy yêu cầu đó rồi thử lại.';
     case 4100:
-      return 'MetaMask chưa cấp quyền cho tài khoản này. Mở khóa ví, chọn tài khoản và kết nối lại.';
+      return 'MetaMask chưa cho trang gửi giao dịch trên Hardhat Local (4100). Trong MetaMask, ngắt kết nối riêng trang này rồi kết nối lại với đúng ví trên Hardhat Local.';
     case 4200:
     case -32601:
       return 'MetaMask không hỗ trợ thao tác này cho tài khoản đang chọn. Hãy chọn tài khoản Ethereum thông thường.';
@@ -88,20 +88,35 @@ export function walletError(reason: unknown, step: string) {
 
 export type LocalTransaction = { from: string; to: string; data: string; deploymentBlock: string; deploymentBlockHash: string };
 
-export async function sendLocalTransaction(transaction: LocalTransaction) {
+const permissionNotice = 'MetaMask cần cấp lại quyền cho Hardhat Local. Hãy xác nhận quyền rồi kiểm tra giao dịch trong tiện ích.';
+
+export async function sendLocalTransaction(transaction: LocalTransaction, onPermissionRequest: (message: string) => void) {
   const provider = metaMask();
   if (!provider) throw new Error('Hãy mở website trong trình duyệt đã cài MetaMask Extension.');
-  const correctWallet = async () => firstAddress(await provider.request({ method: 'eth_accounts' })) === transaction.from &&
-    await provider.request({ method: 'eth_chainId' }) === numberToHex(localChain.id);
-  if (!await correctWallet()) throw new Error('Chọn ví đã xác minh và mạng Hardhat Local (31337) trong MetaMask.');
-  const block = await provider.request({ method: 'eth_getBlockByNumber', params: [transaction.deploymentBlock, false] });
-  if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== transaction.deploymentBlockHash) {
-    throw new Error('MetaMask cần kết nối với RPC Hardhat Local http://127.0.0.1:8545.');
+  const chainId = numberToHex(localChain.id);
+  const correctWallet = async () => firstAddress(await provider.request({ method: 'eth_accounts' })) === getAddress(transaction.from) &&
+    await provider.request({ method: 'eth_chainId' }) === chainId;
+  const send = async () => {
+    if (!await correctWallet()) throw new Error('Chọn ví đã xác minh và mạng Hardhat Local (31337) trong MetaMask.');
+    const block = await provider.request({ method: 'eth_getBlockByNumber', params: [transaction.deploymentBlock, false] });
+    if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== transaction.deploymentBlockHash) {
+      throw new Error('MetaMask cần kết nối với RPC Hardhat Local http://127.0.0.1:8545.');
+    }
+    if (!await correctWallet()) throw new Error('Ví hoặc mạng đã thay đổi. Hãy kiểm tra và thử lại.');
+    return provider.request({ method: 'eth_sendTransaction', params: [{
+      from: transaction.from.toLowerCase(), to: transaction.to, data: transaction.data, value: '0x0',
+    }] });
+  };
+  let hash;
+  try {
+    hash = await send();
+  } catch (reason) {
+    // MetaMask can expose the account while its permission to send on Hardhat is missing.
+    if (providerCode(reason) !== 4100 || !await correctWallet()) throw reason;
+    onPermissionRequest(permissionNotice);
+    await provider.request({ method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] });
+    hash = await send();
   }
-  if (!await correctWallet()) throw new Error('Ví hoặc mạng đã thay đổi. Hãy kiểm tra và thử lại.');
-  const hash = await provider.request({ method: 'eth_sendTransaction', params: [{
-    from: transaction.from.toLowerCase(), to: transaction.to, data: transaction.data, value: '0x0',
-  }] });
   if (typeof hash !== 'string' || !/^0x[\da-f]{64}$/i.test(hash)) throw new Error('MetaMask chưa trả về mã giao dịch hợp lệ.');
   return {
     hash,
@@ -313,24 +328,14 @@ export default function WalletLink({ accountId, isClient, children }: { accountI
         await provider.request({ method: 'eth_chainId' }) === chainId;
       if (!await correctWallet()) throw new Error('Hãy chọn ví đã xác minh và mạng Hardhat Local trong MetaMask.');
       const versionBeforeRequest = version.current;
-      const request = await api<{ to: string; data: string; deploymentBlock: string; deploymentBlockHash: string }>(
+      const request = await api<Omit<LocalTransaction, 'from'>>(
         'wallet/local-funding', { action, currency }, accountId,
       );
-      const block = await provider.request({ method: 'eth_getBlockByNumber', params: [request.deploymentBlock, false] });
-      if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== request.deploymentBlockHash) {
-        throw new Error('RPC trong MetaMask chưa khớp với Hardhat của website. Kiểm tra mạng Hardhat Local.');
-      }
       if (!await correctWallet() || version.current !== versionBeforeRequest) {
         throw new Error('Ví hoặc mạng đã thay đổi. Hãy kiểm tra lại trước khi gửi.');
       }
       setFundingMessage('Xem thông tin giao dịch và xác nhận trong MetaMask.');
-      const hash = await provider.request({
-        method: 'eth_sendTransaction',
-        params: [{ to: request.to, data: request.data, from: wallet.address.toLowerCase(), value: '0x0' }],
-      });
-      if (typeof hash !== 'string' || !/^0x[\da-f]{64}$/i.test(hash)) {
-        throw new Error('MetaMask chưa trả về mã giao dịch hợp lệ.');
-      }
+      const { hash } = await sendLocalTransaction({ ...request, from: wallet.address }, setFundingMessage);
       setSubmitted(hash);
       setFundingMessage('Đã gửi giao dịch. Bấm Đọc lại trạng thái để kiểm tra receipt.');
     } catch (reason) {

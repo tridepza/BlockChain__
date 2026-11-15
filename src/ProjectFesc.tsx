@@ -77,7 +77,7 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
         projectId: id, action, milestoneId: status?.milestoneId, submissionVersion: status?.submissionVersion,
       }, accountId);
       setNotice('Mở MetaMask để kiểm tra và xác nhận giao dịch.');
-      const result = await sendLocalTransaction(tx);
+      const result = await sendLocalTransaction(tx, setNotice);
       setSubmitted(result.hash);
       setNotice(await result.confirmed() ? 'Hardhat đã xác nhận giao dịch.' : 'Đang chờ Hardhat ghi nhận giao dịch.');
     } catch (reason) {

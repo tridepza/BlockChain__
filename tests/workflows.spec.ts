@@ -93,6 +93,71 @@ test('đăng ký, đăng nhập, tải lại, cập nhật hồ sơ và đăng x
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
 
+test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ chối gửi giao dịch', async ({ page }) => {
+  const from = '0x1000000000000000000000000000000000000001';
+  const to = '0x2000000000000000000000000000000000000002';
+  const block = '0x' + 'a'.repeat(64);
+  const hash = '0x' + 'b'.repeat(64);
+  const walletCalls: { method: string; params: unknown }[] = [];
+  let confirmed = false;
+  await page.exposeFunction('recordWalletCall', (method: string, params: unknown) => {
+    walletCalls.push({ method, params });
+    if (method === 'eth_accounts') return [from];
+    if (method === 'eth_chainId') return '0x7a69';
+    if (method === 'eth_getBlockByNumber') return { hash: block };
+    if (method === 'wallet_requestPermissions') return [];
+    if (method === 'eth_getTransactionReceipt') { confirmed = true; return { status: '0x1' }; }
+  });
+  await page.addInitScript(() => {
+    let permitted = false;
+    const { recordWalletCall } = window as unknown as { recordWalletCall: (method: string, params: unknown) => Promise<unknown> };
+    Object.defineProperty(window, 'ethereum', { value: {
+      isMetaMask: true,
+      async request({ method, params }: { method: string; params?: unknown[] }) {
+        const result = await recordWalletCall(method, params);
+        if (method === 'wallet_requestPermissions') permitted = true;
+        if (method === 'eth_sendTransaction') {
+          if (!permitted) throw Object.assign(new Error('Unauthorized on this network'), { code: 4100 });
+          return '0x' + 'b'.repeat(64);
+        }
+        return result;
+      },
+    } });
+  });
+  const freelancer = { name: 'Freelancer FESC', email: 'permissions-worker@example.test', password, role: 'Freelancer' };
+  expect((await page.request.post('/api/auth/register', { data: freelancer })).status()).toBe(201);
+  await register(page, 'Client FESC', 'permissions-client@example.test', 'Client');
+  await login(page);
+  const title = 'Kiểm thử quyền Hardhat';
+  const creation = await page.request.post('/api/projects', { data: {
+    title, currency: 'FESC', description: 'Dự án thử', category: 'Web Development', budget: '20', milestones: 'Bàn giao', amounts: '20',
+  } });
+  expect(creation.status()).toBe(201);
+  const { project } = await creation.json();
+  expect((await page.request.post('/api/projects/action', { data: {
+    projectId: project.id, action: 'assign', email: freelancer.email,
+  } })).status()).toBe(200);
+  await page.route('**/api/projects/fesc', async route => {
+    const { action } = route.request().postDataJSON();
+    if (action === 'create') {
+      await route.fulfill({ json: { from, to, data: '0x1234', deploymentBlock: '0x1', deploymentBlockHash: block } });
+      return;
+    }
+    await route.fulfill({ json: { step: confirmed ? 'waiting' : 'create', message: 'Hợp đồng thử', balance: '1000', gas: '0.1',
+      projectStatus: 'Proposal sent', paid: 0 } });
+  });
+  await openProject(page, title);
+  await click(page, 'Tạo hợp đồng FESC');
+  await expect(page.getByText('Hardhat đã xác nhận giao dịch.')).toBeVisible();
+  const actions = walletCalls.filter(call => ['eth_getBlockByNumber', 'eth_sendTransaction', 'wallet_requestPermissions'].includes(call.method));
+  expect(actions.map(call => call.method)).toEqual([
+    'eth_getBlockByNumber', 'eth_sendTransaction', 'wallet_requestPermissions', 'eth_getBlockByNumber', 'eth_sendTransaction',
+  ]);
+  expect(actions[2].params).toEqual([{ eth_accounts: {} }]);
+  expect(actions[4].params).toEqual([{ from, to, data: '0x1234', value: '0x0' }]);
+  await expect(page.getByText(hash)).toBeVisible();
+});
+
 test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao lại và giải ngân', async ({ page, browser, baseURL }) => {
   const freelancerContext = await browser.newContext({ baseURL });
   const guestContext = await browser.newContext({ baseURL });
