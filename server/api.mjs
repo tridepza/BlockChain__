@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { applyProjectAction, createProject, deliveryFileLimit, deliveryPreviewLimit, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { applyProjectAction, cents, createProject, deliveryFileLimit, deliveryPreviewLimit, mockGrantCents, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
 import { readDeliveryFiles, sendDeliveryFile } from './delivery.mjs';
 import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
@@ -74,7 +74,10 @@ export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.dat
 
 export async function createConfiguredApi(root) {
   const connection = configuredDatabase(root);
-  if (!connection) return createApi(undefined, root);
+  if (!connection) {
+    console.info('Escrow database: SQLite local.');
+    return createApi(undefined, root);
+  }
   const { db, store, name, explainError } = connection;
   let status;
   try {
@@ -83,7 +86,10 @@ export async function createConfiguredApi(root) {
     await db.close();
     throw new Error(explainError(error));
   }
-  if (status.ready) return createDatabaseApi(store, root);
+  if (status.ready) {
+    console.info(`Escrow database: ${name} / ${status.database}.`);
+    return createDatabaseApi(store, root);
+  }
   await db.close();
   throw new Error(`Database ${name} chưa được khởi tạo. Chạy npm.cmd run db:migrate.`);
 }
@@ -117,7 +123,8 @@ function createDatabaseApi(store, root) {
   }
 
   async function workspace(user) {
-    return visibleWorkspace(await store.readWorkspace(), user);
+    const data = visibleWorkspace(await store.readWorkspace(), user);
+    return { ...data, mockWallet: await store.getMockBalance(user.id) };
   }
 
   async function handle(req, res) {
@@ -176,7 +183,8 @@ function createDatabaseApi(store, root) {
     }
 
     if (!deliveryDownload && !['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action', '/api/projects/delivery',
-      '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding', '/api/wallet/local-status'].includes(path)) {
+      '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding', '/api/wallet/local-status',
+      '/api/wallet/mock-claim'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
     const user = token && await store.getSessionUser(hashToken(token));
@@ -234,6 +242,15 @@ function createDatabaseApi(store, root) {
         if (!wallet) throw new WorkflowError(409, 'Hãy xác minh ví trước.');
         return json(res, 200, await walletApi.localStatus(wallet.address));
       }
+      if (path === '/api/wallet/mock-claim') {
+        if (user.role !== 'Client') throw new WorkflowError(403, 'Chỉ Client nhận ngân sách MOCK thử.');
+        await authenticatedWrite(async (writes, current) => {
+          if (!await writes.claimMock(current.id, mockGrantCents)) {
+            throw new WorkflowError(409, 'Tài khoản đã nhận ngân sách MOCK thử.');
+          }
+        });
+        return json(res, 200, await workspace(user));
+      }
       if (path === '/api/wallet/local-funding') {
         walletApi.getOrigin(req);
         if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
@@ -244,7 +261,9 @@ function createDatabaseApi(store, root) {
           throw new WorkflowError(400, 'Thao tác thử không hợp lệ.');
         }
         const wallet = await store.getWalletLink(user.id);
-        return json(res, 200, await localFunding(root, wallet, body.action));
+        const currency = body.currency ?? 'FESC';
+        if (!['FESC', 'MockUSDC'].includes(currency)) throw new WorkflowError(400, 'Token ký quỹ không được hỗ trợ.');
+        return json(res, 200, await localFunding(root, wallet, body.action, currency));
       }
       if (path === '/api/auth/profile') {
         const name = readName(body.name);
@@ -269,6 +288,16 @@ function createDatabaseApi(store, root) {
           }
           const delivery = deliveryUpload ? readDeliveryFiles(body) : undefined;
           const result = applyProjectAction(project, current, body, freelancer, delivery?.metadata);
+          if (body.action === 'fund' && !await writes.debitMock(current.id, cents(project.budget))) {
+            throw new WorkflowError(409, 'Số dư MOCK không đủ để ký quỹ dự án.');
+          }
+          if (body.action === 'approve') {
+            await writes.creditMock(project.freelancerId, cents(result.project.paid) - cents(project.paid));
+          }
+          if (body.action === 'confirmCancel') {
+            const refund = cents(result.transactions[0].amount);
+            if (refund > 0) await writes.creditMock(project.ownerId, refund);
+          }
           if (delivery) {
             const latest = result.project.milestones.find(item => item.id === body.milestoneId).deliveries.at(-1);
             for (const [kind, file] of Object.entries(delivery.files)) {

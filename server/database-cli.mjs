@@ -9,7 +9,10 @@ try {
   const status = await db.check();
   const account = status.username ? `, tài khoản ${status.username}` : '';
   console.log(`Kết nối ${name} thành công. Database ${status.database}${account}.`);
-  if (status.ready) console.log('Dữ liệu tài khoản, phiên, dự án và giao dịch đã sẵn sàng.');
+  if (status.ready) {
+    console.log('Dữ liệu tài khoản, phiên, dự án và giao dịch đã sẵn sàng.');
+    if (db.countUsers) console.log(`Số tài khoản ứng dụng trong users: ${await db.countUsers()}.`);
+  }
   else {
     console.error('Database chưa được khởi tạo. Chạy npm.cmd run db:migrate.');
     process.exitCode = 1;

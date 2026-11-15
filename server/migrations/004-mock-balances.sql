@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS mock_balances (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  cents BIGINT NOT NULL CHECK (cents >= 0),
+  claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1))
+);

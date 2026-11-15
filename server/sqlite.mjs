@@ -21,6 +21,7 @@ export function openSqlite(filename) {
   `);
   db.exec(readFileSync(new URL('./migrations/002-wallet-links.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./migrations/003-delivery-files.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./migrations/004-mock-balances.sql', import.meta.url), 'utf8'));
 
   // Keep all access to this connection queued while an async transaction is open.
   let pending = Promise.resolve();

@@ -59,7 +59,8 @@ export function openMongo(config) {
   const walletLinks = db.collection('wallet_links');
   const walletChallenges = db.collection('wallet_challenges');
   const deliveryFiles = db.collection('delivery_files');
-  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges, deliveryFiles];
+  const mockBalances = db.collection('mock_balances');
+  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges, deliveryFiles, mockBalances];
   const projectCounter = { _id: 'projects' };
   const withoutStorageId = { projection: { _id: 0 } };
 
@@ -67,6 +68,8 @@ export function openMongo(config) {
     const options = { session };
     return {
       getUserByEmail: email => users.findOne({ email }, { ...options, ...withoutStorageId }),
+      getUserById: id => users.findOne({ _id: id }, { ...options, projection: { _id: 1 } }),
+      countUsers: () => users.countDocuments({}, options),
       async createUser(user) {
         try {
           await users.insertOne({ ...user, _id: user.id }, options);
@@ -89,6 +92,21 @@ export function openMongo(config) {
       insertSession: (tokenHash, userId, expires) =>
         sessions.insertOne({ _id: tokenHash, userId, expiresAt: new Date(expires) }, options),
       updateUserName: (id, name) => users.updateOne({ _id: id }, { $set: { name } }, options),
+      async getMockBalance(id) {
+        const row = await mockBalances.findOne({ _id: id }, options);
+        return { cents: row?.cents ?? 0, claimed: row?.claimed === true };
+      },
+      async claimMock(id, cents) {
+        await mockBalances.updateOne({ _id: id }, { $setOnInsert: { cents: 0, claimed: false } }, { ...options, upsert: true });
+        const result = await mockBalances.updateOne({ _id: id, claimed: { $ne: true } },
+          { $inc: { cents }, $set: { claimed: true } }, options);
+        return result.modifiedCount === 1;
+      },
+      async debitMock(id, cents) {
+        const result = await mockBalances.updateOne({ _id: id, cents: { $gte: cents } }, { $inc: { cents: -cents } }, options);
+        return result.modifiedCount === 1;
+      },
+      creditMock: (id, cents) => mockBalances.updateOne({ _id: id }, { $inc: { cents } }, { ...options, upsert: true }),
       getWalletLink: userId => walletLinks.findOne({ _id: userId }, { ...options, ...withoutStorageId }),
       async insertWalletLink(userId, wallet) {
         try {

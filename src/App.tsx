@@ -11,7 +11,7 @@ import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
 import {
   applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
-  deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, money, pendingCancellation, visibleWorkspace, WorkflowError,
+  cents, deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, mockGrantCents, money, pendingCancellation, visibleWorkspace, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
@@ -156,7 +156,7 @@ function Workspace(props: WorkspaceProps) {
     };
   }, [demo, loading, busy, dialog, page, actor.id]);
 
-  const { projects, txs } = demo ? visibleWorkspace(data, actor) : data;
+  const { projects, txs, mockWallet } = demo ? visibleWorkspace(data, actor) : data;
   const privateProjects = projects.filter(project => canSeePrivate(project, actor));
   const current = projects.find(project => project.id === activeId);
   const disputes = privateProjects.filter(project => project.status === 'Disputed');
@@ -360,9 +360,19 @@ function Workspace(props: WorkspaceProps) {
         </section>}
         {!loading && page === 'detail' && (current ?
           <ProjectDetail key={current.id} project={current} actor={actor} demo={!!demo}
+            mockCents={mockWallet?.cents ?? 0} onOpenWallet={() => navigate('wallet')}
             onAction={action => openDialog({ kind: 'action', projectId: current.id, action })} onBack={() => navigate('projects')}/> :
           <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/><button className="back" onClick={() => navigate('projects')}>← Quay lại dự án</button></div>)}
         {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id} isClient={actor.role === 'Client'}/>}
+        {!loading && page === 'wallet' && !demo && mockWallet && <section className="panel">
+          <div className="panel-head"><div><h3>Số dư MOCK mô phỏng</h3><p>Dùng cho các dự án mô phỏng trên web.</p></div></div>
+          <div className="balance">{money(mockWallet.cents / 100)}</div>
+          {actor.role === 'Client' && !mockWallet.claimed && <button className="primary" disabled={busy}
+            onClick={() => void run(async () => {
+              setData(await api<WorkspaceData>('wallet/mock-claim', {}, actor.id));
+              setNotice('Đã nhận ngân sách MOCK thử.');
+            })}>Nhận {money(mockGrantCents / 100)} thử</button>}
+        </section>}
         {!loading && page === 'wallet' && (demo || txs.length > 0) && <section className="panel">
           <div className="panel-head"><h3>Giao dịch dự án mô phỏng</h3><span className="pill blue">MOCK</span></div>
           <TxTable txs={txs}/>
@@ -472,7 +482,7 @@ function HardhatFundingStat({ accountId }: { accountId: string }) {
     };
     return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value="—" note={notes[status]}/>;
   }
-  return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value={`${status.escrowBalance ?? '0'} MockUSDC`}
+  return <Stat icon={<Wallet/>} label="Ký quỹ Hardhat Local" value={`${status.escrowBalance ?? '0'} ${status.currency}`}
     note={status.receipt ? `Nạp ký quỹ ở block ${status.receipt.block}` : 'Chưa có giao dịch nạp ký quỹ'}/>;
 }
 
@@ -516,8 +526,9 @@ function TxTable({ txs }: { txs: Tx[] }) {
   </table></div>;
 }
 
-function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
+function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onAction, onBack }: {
   project: Project; actor: Account; demo: boolean; onAction: (action: ProjectAction) => void; onBack: () => void;
+  mockCents: number; onOpenWallet: () => void;
 }) {
   const [tab, setTab] = useState('milestones');
   const owner = actor.id === p.ownerId && actor.role === 'Client';
@@ -545,7 +556,12 @@ function ProjectDetail({ project: p, actor, demo, onAction, onBack }: {
       </div>
       <div className="detail-actions">
         {owner && p.status === 'Open' && actionButton({ action: 'assign' }, demo ? 'Chọn Freelancer demo' : undefined)}
-        {owner && p.status === 'Proposal sent' && actionButton({ action: 'fund' }, `Ký quỹ ${money(p.budget)}`)}
+        {owner && p.status === 'Proposal sent' && (demo || mockCents >= cents(p.budget)
+          ? actionButton({ action: 'fund' }, `Ký quỹ ${money(p.budget)}`)
+          : <div>
+            <p className="hint">Số dư {money(mockCents / 100)}. Cần {money(p.budget)} để ký quỹ dự án.</p>
+            <button className="secondary" onClick={onOpenWallet}>Mở ví MOCK</button>
+          </div>)}
         {canCancel && !cancellation && actionButton({ action: 'requestCancel' }, undefined, 'danger-outline')}
         {cancellation && cancellation.proposerId !== actor.id && <button className="danger-outline"
           onClick={() => onAction({ action: 'confirmCancel', cancellationId: cancellation.id })}>

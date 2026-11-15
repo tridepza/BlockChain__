@@ -9,7 +9,6 @@ import { checkLocalDeployment } from './wallet.mjs';
 
 const transport = http(localChain.rpcUrl, { timeout: 3500, retryCount: 0 });
 const rpc = createPublicClient({ chain: hardhat, transport });
-const amount = parseUnits('100', 6);
 const factoryAbi = parseAbi([
   'struct Terms { bytes32 projectRef; bytes32 agreementRef; uint64 createBy; address freelancer; address arbitrator; uint256 budgetUnits; uint256[] amounts; uint64[] baseDues; uint32 policyVersion; bytes32 documentHash; }',
   'function escrowFor(address client, bytes32 agreementRef) view returns (address)',
@@ -18,6 +17,8 @@ const factoryAbi = parseAbi([
   'function token() view returns (address)',
 ]);
 const tokenAbi = parseAbi([
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
   'function balanceOf(address owner) view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
@@ -34,7 +35,7 @@ const escrowAbi = parseAbi([
   'event Funded(uint256 amount)',
 ]);
 
-async function confirmedFunding(address, owner, token, event) {
+async function confirmedFunding(address, owner, token, event, amount) {
   const [receipt, transaction, block] = await Promise.all([
     rpc.getTransactionReceipt({ hash: event.transactionHash }),
     rpc.getTransaction({ hash: event.transactionHash }),
@@ -55,19 +56,23 @@ async function confirmedFunding(address, owner, token, event) {
   return { hash: receipt.transactionHash, block: receipt.blockNumber.toString() };
 }
 
-export async function localFunding(root, wallet, action) {
+export async function localFunding(root, wallet, action, currency = 'FESC') {
   if (wallet?.chainId !== localChain.id) throw new WorkflowError(409, 'Hãy xác minh ví Hardhat Local trước.');
   const owner = getAddress(wallet.address);
-  const deployment = await checkLocalDeployment(root, owner);
+  const deployment = await checkLocalDeployment(root, owner, currency);
   const token = getAddress(deployment.token);
   const factory = getAddress(deployment.factory);
-  const [code, factoryToken] = await Promise.all([
+  const [code, factoryToken, symbol, decimals] = await Promise.all([
     rpc.getCode({ address: token }),
     rpc.readContract({ address: factory, abi: factoryAbi, functionName: 'token' }),
+    rpc.readContract({ address: token, abi: tokenAbi, functionName: 'symbol' }),
+    rpc.readContract({ address: token, abi: tokenAbi, functionName: 'decimals' }),
   ]);
-  if (!code || keccak256(code) !== deployment.tokenCodeHash || !isAddressEqual(factoryToken, token)) {
-    throw new WorkflowError(503, 'Chưa xác minh được MockUSDC của deployment.');
+  if (!code || keccak256(code) !== deployment.tokenCodeHash || !isAddressEqual(factoryToken, token) ||
+      symbol !== currency || decimals !== (currency === 'FESC' ? 18 : 6)) {
+    throw new WorkflowError(503, `Chưa xác minh được token ${currency} của deployment.`);
   }
+  const amount = parseUnits('100', decimals);
 
   const { freelancer, arbitrator } = deployment.accounts;
   if (isAddressEqual(owner, freelancer) || isAddressEqual(owner, arbitrator)) {
@@ -80,7 +85,10 @@ export async function localFunding(root, wallet, action) {
     rpc.getBalance({ address: owner }),
     rpc.readContract({ address: token, abi: tokenAbi, functionName: 'balanceOf', args: [owner] }),
   ]);
-  const status = { escrow: null, token, eth: formatEther(eth), balance: formatUnits(balance, 6), escrowBalance: null, step: 'create', receipt: null };
+  const status = {
+    escrow: null, token, currency, eth: formatEther(eth), balance: formatUnits(balance, decimals),
+    enoughToken: balance >= amount, escrowBalance: null, step: 'create', receipt: null,
+  };
   let request;
   if (address === zeroAddress) {
     if (action === 'create') {
@@ -88,7 +96,7 @@ export async function localFunding(root, wallet, action) {
         projectRef: keccak256(stringToHex('Freelancer Escrow local funding demo')),
         agreementRef, createBy: block.timestamp + 1800n, freelancer, arbitrator, budgetUnits: amount,
         amounts: [amount], baseDues: [block.timestamp + 11n * 86400n], policyVersion: 1,
-        documentHash: sha256(stringToHex('Demo agreement: one milestone of 100 MockUSDC on Hardhat Local')),
+        documentHash: sha256(stringToHex(`Demo agreement: one milestone of 100 ${currency} on Hardhat Local`)),
       };
       const hash = await rpc.readContract({ address: factory, abi: factoryAbi, functionName: 'hashTerms', args: [owner, terms] });
       request = { address: factory, abi: factoryAbi, functionName: 'createEscrow', args: [terms, hash] };
@@ -101,7 +109,7 @@ export async function localFunding(root, wallet, action) {
       rpc.readContract({ address: token, abi: tokenAbi, functionName: 'allowance', args: [owner, address] }),
     ]);
     if (total !== amount || !isAddressEqual(actualFreelancer, freelancer) || !isAddressEqual(actualArbitrator, arbitrator)) {
-      throw new WorkflowError(409, 'Escrow này có điều khoản khác với bài thử 100 MockUSDC.');
+      throw new WorkflowError(409, `Escrow này có điều khoản khác với bài thử 100 ${currency}.`);
     }
     switch (state) {
       case 0: status.step = 'accept'; break;
@@ -115,9 +123,9 @@ export async function localFunding(root, wallet, action) {
           address, abi: escrowAbi, eventName: 'Funded', fromBlock: BigInt(deployment.startBlock), strict: true,
         });
         if (event?.transactionHash) {
-          status.receipt = await confirmedFunding(address, owner, token, event);
+          status.receipt = await confirmedFunding(address, owner, token, event, amount);
           const held = await rpc.readContract({ address: token, abi: tokenAbi, functionName: 'balanceOf', args: [address] });
-          status.escrowBalance = formatUnits(held, 6);
+          status.escrowBalance = formatUnits(held, decimals);
           status.step = 'funded';
         }
         break;
@@ -131,19 +139,21 @@ export async function localFunding(root, wallet, action) {
       const hash = await signer.writeContract(request);
       const receipt = await rpc.waitForTransactionReceipt({ hash, timeout: 10000 });
       if (receipt.status !== 'success') throw new WorkflowError(409, 'Ví Freelancer thử chưa chấp nhận được escrow.');
-      return localFunding(root, wallet);
+      return localFunding(root, wallet, undefined, currency);
     }
     if (action === status.step && (action === 'approve' || action === 'reset')) {
       request = { address: token, abi: tokenAbi, functionName: 'approve', args: [address, action === 'reset' ? 0n : amount] };
     }
     if (action === 'fund' && status.step === 'fund') {
-      if (balance < amount) throw new WorkflowError(409, 'Ví Client cần đủ 100 MockUSDC thử.');
       request = { address, abi: escrowAbi, functionName: 'fund' };
     }
   }
   if (!action) return status;
   if (!request) throw new WorkflowError(409, 'Trạng thái escrow đã đổi. Bấm đọc lại trạng thái rồi thử tiếp.');
   if (eth === 0n) throw new WorkflowError(409, 'Ví chưa có ETH thử để trả phí gas.');
+  if (['approve', 'fund'].includes(action) && balance < amount) {
+    throw new WorkflowError(409, `Ví Client cần đủ 100 ${currency} thử.`);
+  }
   await rpc.simulateContract({ ...request, account: owner });
   return {
     to: request.address,

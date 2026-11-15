@@ -122,6 +122,11 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await click(guest, 'Xem dự án công khai');
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
     await perform(page, 'Chọn Freelancer', { label: 'Email của Freelancer', value: workerEmail });
+    await expect(page.getByText('Số dư 0.00 MOCK. Cần 100.00 MOCK để ký quỹ dự án.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Ký quỹ 100.00 MOCK', exact: true })).toHaveCount(0);
+    await click(page, 'Mở ví MOCK');
+    await click(page, 'Nhận 1000.00 MOCK thử');
+    await openProject(page, title);
     await perform(page, 'Ký quỹ 100.00 MOCK');
     await openProject(freelancer, title);
     await expect(freelancer.getByRole('button', { name: 'Nghiệm thu & giải ngân' })).toHaveCount(0);

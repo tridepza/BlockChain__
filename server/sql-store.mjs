@@ -28,6 +28,23 @@ export function sqlStore(db) {
         await query('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)', [tokenHash, userId, expires]);
       },
       updateUserName: (id, name) => query('UPDATE users SET name = ? WHERE id = ?', [name, id]),
+      async getMockBalance(id) {
+        const [row] = await query('SELECT cents, claimed FROM mock_balances WHERE user_id = ?', [id]);
+        return { cents: Number(row?.cents ?? 0), claimed: Boolean(row?.claimed) };
+      },
+      async claimMock(id, cents) {
+        const rows = await query(`INSERT INTO mock_balances (user_id, cents, claimed) VALUES (?, ?, 1)
+          ON CONFLICT(user_id) DO UPDATE SET cents = mock_balances.cents + excluded.cents, claimed = 1
+          WHERE mock_balances.claimed = 0 RETURNING user_id`, [id, cents]);
+        return rows.length > 0;
+      },
+      async debitMock(id, cents) {
+        const rows = await query('UPDATE mock_balances SET cents = cents - ? WHERE user_id = ? AND cents >= ? RETURNING user_id',
+          [cents, id, cents]);
+        return rows.length > 0;
+      },
+      creditMock: (id, cents) => query(`INSERT INTO mock_balances (user_id, cents) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET cents = mock_balances.cents + excluded.cents`, [id, cents]),
       async getWalletLink(userId) {
         const [row] = await query('SELECT data FROM wallet_links WHERE user_id = ?', [userId]);
         return row ? readData(row) : null;

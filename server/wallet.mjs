@@ -12,10 +12,11 @@ const factoryAbi = parseAbi(['function instanceKey() view returns (bytes32)']);
 const rpc = createPublicClient({ transport: http(localChain.rpcUrl, { timeout: 2500, retryCount: 0 }) });
 const expired = () => new WorkflowError(409, 'Yêu cầu ký đã hết hạn, đã dùng hoặc thuộc phiên khác. Hãy kết nối lại.');
 
-export async function checkLocalDeployment(root, address) {
+export async function checkLocalDeployment(root, address, currency = 'MockUSDC') {
   let deployment;
   try {
-    deployment = JSON.parse(await readFile(resolve(root, '.hardhat/local-deployment.json'), 'utf8'));
+    const manifest = currency === 'FESC' ? 'local-fesc-deployment.json' : 'local-deployment.json';
+    deployment = JSON.parse(await readFile(resolve(root, '.hardhat', manifest), 'utf8'));
     const [chainId, startBlock, factoryCode, instanceKey] = await Promise.all([
       rpc.getChainId(),
       rpc.getBlock({ blockNumber: BigInt(deployment.startBlock) }),
@@ -31,7 +32,8 @@ export async function checkLocalDeployment(root, address) {
     }
   } catch (error) {
     if (error instanceof WorkflowError) throw error;
-    throw new WorkflowError(503, 'Chưa xác minh được Hardhat local. Khởi động chain và chạy chain:deploy rồi thử lại.');
+    const script = currency === 'FESC' ? 'chain:deploy:fesc' : 'chain:deploy';
+    throw new WorkflowError(503, `Chưa xác minh được ${currency} trên Hardhat Local. Kiểm tra node và chạy ${script} nếu dùng chain mới.`);
   }
   return deployment;
 }

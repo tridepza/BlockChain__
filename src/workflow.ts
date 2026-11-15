@@ -58,7 +58,9 @@ export type Tx = {
   status: string;
 };
 
-export type WorkspaceData = { projects: Project[]; txs: Tx[] };
+export type MockBalance = { cents: number; claimed: boolean };
+export type WorkspaceData = { projects: Project[]; txs: Tx[]; mockWallet?: MockBalance };
+export const mockGrantCents = 100_000;
 export const money = (amount: number) => `${amount.toFixed(2)} MOCK`;
 export const categories = ['Web Development', 'UI/UX Design', 'Data Analytics', 'Mobile App'];
 export const demoAccounts: Record<Role, Account> = {
@@ -76,7 +78,7 @@ export class WorkflowError extends Error {
   }
 }
 
-const cents = (amount: number) => Math.round(amount * 100);
+export const cents = (amount: number) => Math.round(amount * 100);
 const isSettled = (milestone: Milestone) => ['Paid', 'Refunded'].includes(milestone.status);
 export const currentMilestone = (project: Project) => project.milestones.find(m => !isSettled(m));
 

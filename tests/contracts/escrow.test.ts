@@ -48,12 +48,17 @@ type Terms = {
 };
 type Offer = [Address, bigint, bigint, Hex, boolean];
 
-async function setup(t: TestContext) {
+async function setup(t: TestContext, currency: 'MockUSDC' | 'FESC' = 'MockUSDC') {
   const connection = await network.create();
   t.after(() => connection.close());
   const [owner, freelancer, arbitrator, outsider] = (await connection.viem.getWalletClients()).map(wallet => wallet.account);
   const publicClient = await connection.viem.getPublicClient();
-  const token = await connection.viem.deployContract('MockUSDC', [[owner.address]]);
+  const deployedToken = currency === 'FESC'
+    ? await connection.viem.deployContract('FreelanceToken', [[outsider.address]])
+    : await connection.viem.deployContract('MockUSDC', [[owner.address]]);
+  // Both tokens expose the same OpenZeppelin ERC-20 calls and errors used by these tests.
+  const token = await connection.viem.getContractAt('MockUSDC', deployedToken.address);
+  const tokenUnits = (amount: string) => parseUnits(amount, currency === 'FESC' ? 18 : 6);
   const factory = await connection.viem.deployContract('EscrowFactory', [token.address, instanceKey]);
   const chainId = BigInt(await publicClient.getChainId());
   const now = (await publicClient.getBlock()).timestamp;
@@ -63,8 +68,8 @@ async function setup(t: TestContext) {
     createBy: now + 1800n,
     freelancer: freelancer.address,
     arbitrator: arbitrator.address,
-    budgetUnits: units('100'),
-    amounts: [units('30'), units('70')],
+    budgetUnits: tokenUnits('100'),
+    amounts: [tokenUnits('30'), tokenUnits('70')],
     baseDues: [now + 10n * 86400n, now + 12n * 86400n],
     policyVersion: 1,
     documentHash: sha256(toHex('document fixture')),
@@ -242,6 +247,22 @@ test('fund requires full allowance and succeeds exactly at the funding deadline'
   await escrow.write.expireFunding({ account: freelancer });
   assert.equal(await escrow.read.unallocated(), 0n);
   assert.equal(await token.read.balanceOf([owner.address]), ownerBalance);
+});
+
+test('FESC escrow requires a funded wallet even with full allowance', async t => {
+  const { connection, owner, freelancer, outsider, publicClient, token, terms, offChainHash, create } = await setup(t, 'FESC');
+  const { escrow } = await create();
+  await escrow.write.accept([offChainHash()], { account: freelancer });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  assert.equal(await token.read.balanceOf([owner.address]), 0n);
+  await connection.viem.assertions.revertWithCustomError(escrow.write.fund(), token, 'ERC20InsufficientBalance');
+  assert.equal(await escrow.read.funded(), 0n);
+  assert.equal(await token.read.balanceOf([escrow.address]), 0n);
+  await token.write.transfer([owner.address, terms.budgetUnits], { account: outsider });
+  const hash = await escrow.write.fund();
+  assert.equal((await publicClient.waitForTransactionReceipt({ hash })).status, 'success');
+  assert.equal(await token.read.balanceOf([escrow.address]), parseUnits('100', 18));
+  assert.equal(await token.read.balanceOf([owner.address]), 0n);
 });
 
 test('Freelancer can open a review-timeout dispute only after the review deadline', async t => {

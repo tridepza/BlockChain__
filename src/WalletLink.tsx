@@ -4,11 +4,14 @@ import { api, ApiError, errorMessage } from './api';
 import { localChain } from './local-chain';
 
 type Wallet = { address: string; chainId: number; verifiedAt: string };
+type Currency = 'FESC' | 'MockUSDC';
 export type FundingStatus = {
   escrow: string | null;
   token: string;
+  currency: Currency;
   eth: string;
   balance: string;
+  enoughToken: boolean;
   escrowBalance: string | null;
   step: 'create' | 'accept' | 'reset' | 'approve' | 'fund' | 'funded' | 'closed';
   receipt: { hash: string; block: string } | null;
@@ -18,16 +21,16 @@ export function readWalletLink(accountId: string) {
   return api<{ wallet: Wallet | null }>('wallet', undefined, accountId);
 }
 
-export function readLocalFunding(accountId: string) {
-  return api<FundingStatus>('wallet/local-funding', {}, accountId);
+export function readLocalFunding(accountId: string, currency: Currency = 'FESC') {
+  return api<FundingStatus>('wallet/local-funding', { currency }, accountId);
 }
 
 const fundingLabels = {
   create: 'Tạo escrow thử trong MetaMask',
   accept: 'Cho ví Freelancer thử chấp nhận',
   reset: 'Đặt hạn mức cũ về 0 trong MetaMask',
-  approve: 'Cấp quyền 100 MockUSDC trong MetaMask',
-  fund: 'Ký quỹ 100 MockUSDC trong MetaMask',
+  approve: 'Cấp quyền trong MetaMask',
+  fund: 'Ký quỹ trong MetaMask',
 };
 type Provider = {
   isMetaMask?: boolean;
@@ -84,6 +87,7 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [funding, setFunding] = useState<FundingStatus | null>(null);
+  const [currency, setCurrency] = useState<Currency>('FESC');
   const [fundingLoading, setFundingLoading] = useState(false);
   const [fundingMessage, setFundingMessage] = useState('');
   const [fundingError, setFundingError] = useState('');
@@ -124,12 +128,12 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
     if (!wallet || !isClient) return;
     let active = true;
     setFundingLoading(true);
-    readLocalFunding(accountId)
+    readLocalFunding(accountId, currency)
       .then(status => { if (active) setFunding(status); })
       .catch(reason => { if (active) setFundingError(errorMessage(reason)); })
       .finally(() => { if (active) setFundingLoading(false); });
     return () => { active = false; };
-  }, [accountId, isClient, wallet]);
+  }, [accountId, isClient, wallet, currency]);
 
   async function connect() {
     setError('');
@@ -243,11 +247,11 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
             setFundingError('Giao dịch đã bị hoàn tác trên Hardhat.');
           }
         }
-        setFunding(await readLocalFunding(accountId));
+        setFunding(await readLocalFunding(accountId, currency));
         return;
       }
       if (action === 'accept') {
-        setFunding(await api<FundingStatus>('wallet/local-funding', { action }, accountId));
+        setFunding(await api<FundingStatus>('wallet/local-funding', { action, currency }, accountId));
         return;
       }
       const provider = metaMask();
@@ -258,7 +262,7 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
       if (!await correctWallet()) throw new Error('Hãy chọn ví đã xác minh và mạng Hardhat Local trong MetaMask.');
       const versionBeforeRequest = version.current;
       const request = await api<{ to: string; data: string; deploymentBlock: string; deploymentBlockHash: string }>(
-        'wallet/local-funding', { action }, accountId,
+        'wallet/local-funding', { action, currency }, accountId,
       );
       const block = await provider.request({ method: 'eth_getBlockByNumber', params: [request.deploymentBlock, false] });
       if (!block || typeof block !== 'object' || !('hash' in block) || block.hash !== request.deploymentBlockHash) {
@@ -301,26 +305,40 @@ export default function WalletLink({ accountId, isClient }: { accountId: string;
     {wallet && isClient && <section className="panel">
       <div className="panel-head"><div>
         <h3>Ký quỹ Hardhat Local</h3>
-        <p>Hợp đồng thử với ngân sách 100 MockUSDC.</p>
+        <p>Hợp đồng thử với ngân sách 100 {currency}.</p>
       </div></div>
+      <label>Token ký quỹ <select value={currency} disabled={busy || fundingLoading || !!submitted} onChange={event => {
+        setFunding(null);
+        setFundingError('');
+        setFundingMessage('');
+        setCurrency(event.target.value === 'MockUSDC' ? 'MockUSDC' : 'FESC');
+      }}>
+        <option value="FESC">FESC</option>
+        <option value="MockUSDC">MockUSDC</option>
+      </select></label>
       {fundingLoading && <p className="hint" role="status">Đang đọc trạng thái ký quỹ…</p>}
       {funding && <>
         {funding.escrowBalance != null &&
-          <div className="balance">{funding.escrowBalance} MockUSDC<small>Đang giữ trong hợp đồng</small></div>}
-        <p className="hint">Số dư ví {funding.balance} MockUSDC và {Number(funding.eth).toFixed(4)} ETH thử</p>
+          <div className="balance">{funding.escrowBalance} {funding.currency}<small>Đang giữ trong hợp đồng</small></div>}
+        <p className="hint">Số dư ví {funding.balance} {funding.currency} và {Number(funding.eth).toFixed(4)} ETH thử</p>
+        <p className="hint">Địa chỉ token <code style={{ overflowWrap: 'anywhere' }}>{funding.token}</code></p>
         {funding.escrow && <p className="hint">Escrow <code style={{ overflowWrap: 'anywhere' }}>{funding.escrow}</code></p>}
         {funding.receipt && <p className="hint" role="status">
-          Đã ký quỹ 100 MockUSDC tại block {funding.receipt.block}. Giao dịch <code style={{ overflowWrap: 'anywhere' }}>{funding.receipt.hash}</code>
+          Đã ký quỹ 100 {funding.currency} tại block {funding.receipt.block}. Giao dịch <code style={{ overflowWrap: 'anywhere' }}>{funding.receipt.hash}</code>
         </p>}
         {funding.step === 'closed' && <p className="hint">Escrow thử đã đóng.</p>}
         {funding.step === 'accept' && <p className="hint">Tài khoản Hardhat thử sẽ thực hiện bước chấp nhận của Freelancer.</p>}
+        {['approve', 'fund'].includes(funding.step) && !funding.enoughToken &&
+          <p className="hint" role="status">Cần đủ 100 {funding.currency} trong ví trước khi ký quỹ.</p>}
       </>}
       {fundingMessage && <p className="hint" role="status">{fundingMessage}</p>}
       {fundingError && <p className="hint" role="alert">{fundingError}</p>}
       <button className="secondary" type="button" disabled={busy || fundingLoading} onClick={() => void runFunding()}>Đọc lại trạng thái</button>
       {' '}
       {funding && funding.step !== 'funded' && funding.step !== 'closed' &&
-        <button className="primary" type="button" disabled={busy || fundingLoading || !!submitted}
+        <button className="primary" type="button" disabled={busy || fundingLoading || !!submitted ||
+          (funding.step !== 'accept' && Number(funding.eth) === 0) ||
+          (['approve', 'fund'].includes(funding.step) && !funding.enoughToken)}
           onClick={() => void runFunding(funding.step as keyof typeof fundingLabels)}>
           {fundingLabels[funding.step]}
         </button>}

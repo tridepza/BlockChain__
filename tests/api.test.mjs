@@ -117,8 +117,18 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal((await action(owner, 'fund')).status, 409);
   assert.equal((await action(owner, 'assign', { email: worker.email })).status, 200);
   assert.deepEqual((await req('projects/public')).body.projects, []);
+  const noFunds = await action(owner, 'fund');
+  assert.equal(noFunds.status, 409);
+  assert.match(noFunds.body.error, /Số dư MOCK không đủ/);
+  assert.equal((await req('workspace', { cookie: owner })).body.projects[0].funded, 0);
+  const claim = cookie => req('wallet/mock-claim', { data: { cents: 99_000_000 }, cookie });
+  assert.equal((await claim(freelancer)).status, 403);
+  const claimed = await Promise.all([claim(owner), claim(owner)]);
+  assert.deepEqual(claimed.map(result => result.status).sort(), [200, 409]);
+  assert.equal(claimed.find(result => result.status === 200).body.mockWallet.cents, 100_000);
   const funding = await Promise.all([action(owner, 'fund'), action(owner, 'fund')]);
   assert.deepEqual(funding.map(result => result.status).sort(), [200, 409]);
+  assert.equal(funding.find(result => result.status === 200).body.mockWallet.cents, 99_970);
   assert.equal((await action(freelancer, 'submit', { milestoneId: 2, note: 'Bàn giao sai thứ tự' })).status, 409);
   const submission = { milestoneId: 1, note: 'Bàn giao hợp lệ' };
   const first = await action(freelancer, 'submit', submission);
@@ -172,9 +182,25 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal(cancelled.body.projects[0].status, 'Cancelled');
   assert.equal(cancelled.body.projects[0].paid, 0.1);
   assert.equal(cancelled.body.projects[0].cancellation, undefined);
+  assert.equal(cancelled.body.mockWallet.cents, 99_990);
+  assert.equal((await req('workspace', { cookie: freelancer })).body.mockWallet.cents, 10);
   assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
   assert.ok(cancelled.body.txs.every(tx => tx.status === 'Mô phỏng' && tx.id.startsWith('DEMO-')));
-  assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
+  assert.deepEqual((await req('workspace', { cookie: other })).body, {
+    projects: [], txs: [], mockWallet: { cents: 0, claimed: false },
+  });
+
+  const projects = [];
+  for (const title of ['Ký quỹ A', 'Ký quỹ B']) {
+    const result = await req('projects', { cookie: owner, data: { ...input, title, budget: '600', amounts: '300,300' } });
+    assert.equal(result.status, 201);
+    const id = result.body.project.id;
+    assert.equal((await action(owner, 'assign', { projectId: id, email: worker.email })).status, 200);
+    projects.push(id);
+  }
+  const simultaneous = await Promise.all(projects.map(id => action(owner, 'fund', { projectId: id })));
+  assert.deepEqual(simultaneous.map(result => result.status).sort(), [200, 409]);
+  assert.equal((await req('workspace', { cookie: owner })).body.mockWallet.cents, 39_990);
 });
 
 test('Vite từ chối DB đặt trong public hoặc thư mục đầu ra và chặn bản SQLite còn sót', async () => {
