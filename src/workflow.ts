@@ -126,9 +126,7 @@ export function visibleWorkspace(data: WorkspaceData, actor: Account): Workspace
       return [{ id, title, category, description, client, budget, currency, status, created, milestones,
         ownerId: '', freelancer: '', funded: 0, paid: 0 }];
     }),
-    txs: data.txs.filter(t => t.projectId === undefined
-      ? privateProjects.some(p => p.title === t.project)
-      : ids.has(t.projectId)),
+    txs: data.txs.filter(t => t.projectId !== undefined && ids.has(t.projectId)),
   };
 }
 

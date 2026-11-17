@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { createPublicClient, createWalletClient, http, parseUnits } from 'viem';
+import { hardhat } from 'viem/chains';
+import { mnemonicToAccount } from 'viem/accounts';
+import { startDurableNode, rpcAt } from '../scripts/local-node.mjs';
+
+test('node lưu token, số dư vault, receipt và block sau khởi động lại và qua ngày', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'fesc-chain-'));
+  const probe = createServer();
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const internalProbe = createServer();
+  await new Promise(resolve => internalProbe.listen(0, '127.0.0.1', resolve));
+  const internalPort = internalProbe.address().port;
+  await new Promise(resolve => internalProbe.close(resolve));
+  const state = join(dir, 'state.json');
+  let node = await startDurableNode({ port, internalPort, state });
+  async function stop() {
+    await node.close();
+  }
+  t.after(async () => { if (node.child.exitCode === null) await stop(); await rm(dir, { recursive: true }); });
+  const rpc = createPublicClient({ chain: hardhat, transport: http(node.url) });
+  const account = mnemonicToAccount('test test test test test test test test test test test junk');
+  const wallet = createWalletClient({ chain: hardhat, transport: http(node.url), account });
+  const artifact = async name => JSON.parse(await readFile(`.hardhat/artifacts/contracts/${name}.sol/${name}.json`, 'utf8'));
+  const token = await artifact('FreelanceToken');
+  const vault = await artifact('FescVault');
+  const confirm = hash => rpc.waitForTransactionReceipt({ hash });
+  const tokenReceipt = await confirm(await wallet.deployContract({ abi: token.abi, bytecode: token.bytecode, args: [[account.address]] }));
+  const tokenAddress = tokenReceipt.contractAddress;
+  const vaultReceipt = await confirm(await wallet.deployContract({ abi: vault.abi, bytecode: vault.bytecode, args: [tokenAddress] }));
+  const vaultAddress = vaultReceipt.contractAddress;
+  await confirm(await wallet.writeContract({ address: tokenAddress, abi: token.abi, functionName: 'approve', args: [vaultAddress, parseUnits('125', 18)] }));
+  const deposit = await confirm(await wallet.writeContract({ address: vaultAddress, abi: vault.abi, functionName: 'deposit', args: [parseUnits('125', 18)] }));
+  await confirm(await wallet.writeContract({ address: vaultAddress, abi: vault.abi, functionName: 'withdraw', args: [parseUnits('25', 18)] }));
+  await rpcAt(node.url, 'evm_increaseTime', [86401]); await rpcAt(node.url, 'evm_mine');
+  const tip = await rpc.getBlock();
+  const eth = await rpc.getBalance({ address: account.address });
+  const saved = JSON.parse(await readFile(state, 'utf8'));
+  assert.ok(JSON.stringify(saved).includes(deposit.transactionHash.slice(2)), 'Receipt must be checkpointed before RPC acknowledges the transaction');
+  await assert.rejects(rpcAt(node.url, 'anvil_reset'), /bị chặn/);
+  await stop();
+  node = await startDurableNode({ port, internalPort, state });
+  const restored = createPublicClient({ chain: hardhat, transport: http(node.url) });
+  assert.equal(await restored.readContract({ address: tokenAddress, abi: token.abi, functionName: 'balanceOf', args: [account.address] }), parseUnits('900', 18));
+  assert.equal(await restored.readContract({ address: vaultAddress, abi: vault.abi, functionName: 'balances', args: [account.address] }), parseUnits('100', 18));
+  assert.equal((await restored.getTransactionReceipt({ hash: deposit.transactionHash })).blockHash, deposit.blockHash);
+  assert.equal((await restored.getBlock({ blockNumber: tip.number })).hash, tip.hash);
+  assert.equal(await restored.getBalance({ address: account.address }), eth);
+  assert.equal((await restored.getContractEvents({ address: vaultAddress, abi: vault.abi, fromBlock: 0n })).length, 2);
+});

@@ -13,6 +13,7 @@ import { createApi } from '../server/api.mjs';
 import { WorkflowError } from '../src/workflow.ts';
 import { publicProjectPayments } from '../server/public-projects.mjs';
 import { assertStorageTarget } from '../server/storage-target.mjs';
+import { integrityPlan } from '../server/integrity.mjs';
 
 const password = 'mật-khẩu-test-2026';
 const client = { name: 'Tên trùng', email: 'owner@example.test', password, role: 'Client' };
@@ -76,7 +77,7 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   const transport = http('http://127.0.0.1:8545', { timeout: 3000, retryCount: 0 });
   const rpc = createPublicClient({ chain: hardhat, transport });
   assert.equal(await rpc.getChainId(), 31337);
-  assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat/i);
+  assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat|anvil/i);
   const testWallet = addressIndex => createWalletClient({ chain: hardhat, transport,
     account: mnemonicToAccount('test test test test test test test test test test test junk', { addressIndex }) });
   const owner = testWallet(16), freelancer = testWallet(17), arbitrator = testWallet(18);
@@ -93,12 +94,16 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   const token = tokenReceipt.contractAddress;
   const instanceKey = keccak256(toHex(root));
   const factoryReceipt = await deploy(factory, [token, instanceKey]);
+  const vaultReceipt = await deploy(await artifact('FescVault.sol/FescVault'), [token]);
   await mkdir(metadata);
   await writeFile(manifest, JSON.stringify({
     chainId: 31337, projectPayments: 1, instanceKey, token, tokenCodeHash: keccak256(await rpc.getCode({ address: token })),
     factory: factoryReceipt.contractAddress, factoryCodeHash: keccak256(await rpc.getCode({ address: factoryReceipt.contractAddress })),
     startBlock: factoryReceipt.blockNumber.toString(), startBlockHash: factoryReceipt.blockHash,
     accounts: { arbitrator: arbitrator.account.address },
+    vault: vaultReceipt.contractAddress,
+    vaultCodeHash: keccak256(await rpc.getCode({ address: vaultReceipt.contractAddress })),
+    vaultStartBlock: String(vaultReceipt.blockNumber),
   }));
   async function post(path, data, cookie, status = 200) {
     const result = await app.request(path, { data, cookie, headers: { Origin: app.origin } });
@@ -189,12 +194,32 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [freelancer.account.address] }), parseUnits('0.3', 18));
   const phases = (await app.request('explorer/projects')).body.payments;
   assert.deepEqual(phases.map(row => [row.stage, row.amount]), [['Ký quỹ', '0.3'], ['Milestone 1', '0.1'], ['Milestone 2', '0.2']]);
+  async function vaultAction(action, amount) {
+    const { body } = await post('wallet/fesc-account', { action, amount, address: owner.account.address }, freelancerCookie);
+    assert.equal(body.from.toLowerCase(), freelancer.account.address.toLowerCase());
+    await confirm(await freelancer.sendTransaction({ to: body.to, data: body.data }));
+    return body.step;
+  }
+  assert.equal(await vaultAction('deposit', '0.1'), 'approve');
+  assert.equal(await vaultAction('deposit', '0.1'), 'deposit');
+  let vaultBalance = (await post('wallet/fesc-account', {}, freelancerCookie)).body;
+  assert.equal(vaultBalance.accountBalance, '0.1');
+  assert.equal(vaultBalance.walletBalance, '0.2');
+  await post('wallet/fesc-account', { action: 'withdraw', amount: '0.11' }, freelancerCookie, 409);
+  await post('wallet/fesc-account', { action: 'withdraw', amount: '0.01' }, outsiderCookie, 409);
+  assert.equal(await vaultAction('withdraw', '0.04'), 'withdraw');
+  assert.equal(await vaultAction('withdraw', '0.06'), 'withdraw');
+  vaultBalance = (await post('wallet/fesc-account', {}, freelancerCookie)).body;
+  assert.equal(vaultBalance.accountBalance, '0');
+  assert.equal(vaultBalance.walletBalance, '0.3');
+  assert.equal(vaultBalance.history.length, 3);
 
   const outgoing = await confirm(await freelancer.writeContract({ address: token, abi: coin.abi,
     functionName: 'transfer', args: [owner.account.address, 1n] }));
   const walletQuery = 'explorer/transfers?q=' + freelancer.account.address;
   const publicWallet = (await app.request(walletQuery)).body;
-  const [direct, ...payouts] = publicWallet.transfers;
+  const [direct, ...walletMovements] = publicWallet.transfers;
+  const payouts = walletMovements.filter(row => row.from.toLowerCase() === escrow.toLowerCase());
   assert.equal(direct.hash, outgoing.transactionHash);
   assert.equal(direct.from.toLowerCase(), freelancer.account.address.toLowerCase());
   assert.equal(direct.to.toLowerCase(), owner.account.address.toLowerCase());
@@ -213,9 +238,9 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(firstPage.transfers.length, 20);
   assert.ok(firstPage.next);
   const secondPage = (await app.request('explorer/transfers?before=' + encodeURIComponent(firstPage.next))).body;
-  assert.equal(secondPage.transfers.length, 2);
+  assert.equal(secondPage.transfers.length, 5);
   assert.equal(secondPage.next, null);
-  assert.equal(new Set([...firstPage.transfers, ...secondPage.transfers].map(row => row.hash)).size, 22);
+  assert.equal(new Set([...firstPage.transfers, ...secondPage.transfers].map(row => row.hash)).size, 25);
 });
 
 test('tài khoản và session được lưu bền vững, cookie cũ bị thu hồi', async t => {
@@ -294,7 +319,7 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal(publicList[0].ownerId, undefined);
   assert.equal(publicList[0].milestones, undefined);
   assert.deepEqual((await req('workspace', { cookie: other })).body.projects, []);
-  assert.equal((await action(other, 'assign', { email: worker.email, ownerId: created.body.project.ownerId })).status, 403);
+  assert.equal((await action(other, 'assign', { email: worker.email, ownerId: created.body.project.ownerId })).status, 404);
   assert.equal((await action(owner, 'fund')).status, 409);
   assert.equal((await action(owner, 'assign', { email: worker.email })).status, 200);
   assert.deepEqual((await req('projects/public')).body.projects, []);
@@ -323,7 +348,7 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.deepEqual(proposed.body.txs.map(tx => tx.amount), [0.3]);
   const firstRequest = { cancellationId: proposed.body.projects[0].cancellation.id };
   assert.equal((await action(owner, 'confirmCancel', firstRequest)).status, 403);
-  assert.equal((await action(other, 'confirmCancel', firstRequest)).status, 403);
+  assert.equal((await action(other, 'confirmCancel', firstRequest)).status, 404);
   assert.equal((await action(freelancer, 'requestCancel', { note: 'Ghi đè đề nghị đang mở' })).status, 409);
   assert.equal((await action(freelancer, 'approve', { milestoneId: 1 })).status, 403);
   assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Chỉ mô phỏng trong demo' })).status, 403);
@@ -592,4 +617,51 @@ test('giới hạn OTP theo email vẫn có hiệu lực sau nhiều lần gửi
   app.advance(61_000);
   assert.equal((await app.rawRequest('auth/resend', { data: { challengeId: start.body.challengeId }, cookie })).status, 429);
   assert.equal(app.mail.length, 10);
+});
+
+test('quên mật khẩu cần OTP, đổi mật khẩu một lần và thu hồi mọi phiên cũ', async t => {
+  const app = await listen(':memory:'); t.after(app.close);
+  await app.request('auth/register', { data: client });
+  const login = await app.request('auth/login', { data: client });
+  const cookie = login.cookie.split(';')[0];
+  const request = app.rawRequest;
+  const unknown = await request('auth/forgot', { data: { email: 'missing@example.test' } });
+  assert.equal(unknown.status, 202);
+  assert.equal(app.mail.filter(mail => mail.email === 'missing@example.test').length, 0);
+  const start = await request('auth/forgot', { data: { email: client.email } });
+  assert.equal(start.status, 202);
+  const binding = start.cookie.split(';')[0];
+  const data = { challengeId: start.body.challengeId, code: app.mail.at(-1).code };
+  const newPassword = 'new-password-12345!';
+  assert.equal((await request('auth/reset', { cookie: binding, data: { challengeId: data.challengeId, password: newPassword, confirm: newPassword } })).status, 400);
+  const confirmed = await request('auth/verify', { cookie: binding, data });
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.body.user, undefined);
+  const reset = { challengeId: data.challengeId, resetToken: confirmed.body.resetToken, password: newPassword, confirm: newPassword };
+  assert.equal((await request('auth/reset', { cookie: binding, data: { ...reset, confirm: 'not-matching' } })).status, 400);
+  assert.equal((await request('auth/reset', { cookie: binding, data: { ...reset, resetToken: 'a'.repeat(64) } })).status, 400);
+  assert.equal((await request('auth/reset', { cookie: binding, data: reset })).status, 200);
+  assert.equal((await request('auth/reset', { cookie: binding, data: reset })).status, 400);
+  assert.equal((await request('auth/me', { cookie })).status, 401);
+  assert.equal((await request('auth/login', { data: client })).status, 401);
+  assert.equal((await app.request('auth/login', { data: { ...client, password: newPassword } })).status, 200);
+  assert.equal((await request('auth/forgot', { data: { email: { $ne: null } } })).status, 400);
+});
+
+test('dọn đúng dữ liệu mất liên kết, không xóa dự án chưa chọn Freelancer', () => {
+  const snapshot = { users: [{ id: 'client', email: 'client@test' }, { id: 'worker', email: 'worker@test' }],
+    projects: [
+      { _id: 1, id: 1, ownerId: 'client', milestones: [] },
+      { _id: 2, id: 2, ownerId: 'deleted-client', milestones: [] },
+      { _id: 3, id: 3, ownerId: 'client', freelancerId: 'deleted-worker', milestones: [] },
+      { _id: 4, id: 4, ownerId: 'client', freelancerId: 'worker', milestones: [{ deliveries: [{ id: 'd', original: {} }] }] },
+    ], transactions: [{ _id: 't1', projectId: 1 }, { _id: 't2', projectId: 2 }],
+    wallet_links: [{ _id: 'client' }, { _id: 'deleted-client' }],
+    delivery_files: [{ _id: 'd:original' }, { _id: 'orphan:original' }],
+  };
+  const plan = integrityPlan(snapshot);
+  assert.deepEqual(plan.remove.projects, [2, 3]);
+  assert.deepEqual(plan.remove.transactions, ['t2']);
+  assert.deepEqual(plan.remove.wallet_links, ['deleted-client']);
+  assert.deepEqual(plan.remove.delivery_files, ['orphan:original']);
 });

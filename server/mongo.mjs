@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { getCACertificates } from 'node:tls';
 import { parseEnv } from 'node:util';
 import { MongoClient } from 'mongodb';
+import { integrityPlan } from './integrity.mjs';
 
 class MongoSetupError extends Error {}
 
@@ -71,10 +72,14 @@ export function openMongo(config) {
       getAuthChallenge: id => authChallenges.findOne({ id }, { ...options, ...withoutStorageId }),
       getAuthChallengeForEmail: (email, purpose) => authChallenges.findOne({ _id: `${purpose}:${email}` }, { ...options, ...withoutStorageId }),
       saveAuthChallenge: row => authChallenges.replaceOne({ _id: `${row.purpose}:${row.email}` },
-        { ...row, _id: `${row.purpose}:${row.email}`, purgeAt: new Date(Math.max(row.expires, row.windowStart + 60 * 60_000)) }, { ...options, upsert: true }),
+        { ...row, _id: `${row.purpose}:${row.email}`, purgeAt: new Date(Math.max(row.expires, row.resetExpires ?? 0, row.windowStart + 60 * 60_000)) }, { ...options, upsert: true }),
       deleteAuthChallenge: id => authChallenges.deleteOne({ id }, options),
       pruneAuthChallenges: now => authChallenges.deleteMany({ purgeAt: { $lte: new Date(now) } }, options),
       getUserByEmail: email => users.findOne({ email }, { ...options, ...withoutStorageId }),
+      getAuthUserForWrite: email => users.findOneAndUpdate({ email }, { $inc: { authVersion: 1 } }, { ...options, ...withoutStorageId }),
+      updatePassword: (id, salt, password_hash) => users.updateOne({ _id: id }, { $set: { salt, password_hash } }, options),
+      deleteUserSessions: userId => sessions.deleteMany({ userId }, options),
+      deleteEmailChallenges: email => authChallenges.deleteMany({ email }, options),
       getUserById: id => users.findOne({ _id: id }, { ...options, projection: { _id: 1 } }),
       countUsers: () => users.countDocuments({}, options),
       async createUser(user) {
@@ -133,13 +138,27 @@ export function openMongo(config) {
         const result = await walletChallenges.deleteOne({ _id: id, userId, sessionId, expiresAt: { $gt: new Date(now) } }, options);
         return result.deletedCount === 1;
       },
-      listOpenProjects: () => projects.find({ status: 'Open' }, { ...options, ...withoutStorageId }).sort({ _id: -1 }).toArray(),
+      listOpenProjects: () => projects.aggregate([{ $match: { status: 'Open' } },
+        { $lookup: { from: 'users', localField: 'ownerId', foreignField: '_id', as: '_owner' } },
+        { $match: { '_owner.0': { $exists: true } } },
+        { $project: { _id: 0, id: 1, title: 1, category: 1, description: 1, budget: 1, currency: 1 } }, { $sort: { id: -1 } }], options).toArray(),
       async readWorkspace() {
         // Both reads use the same snapshot, including when an escrow update writes to both collections.
         const projectRows = await projects.find({}, { ...options, ...withoutStorageId }).sort({ _id: -1 }).toArray();
         const txs = await transactions.find({}, { ...options, ...withoutStorageId }).sort({ _id: -1 }).toArray();
         return { projects: projectRows, txs };
       },
+      async readWorkspaceForActor(actor) {
+        const privateFilter = { $or: [{ ownerId: actor.id }, { freelancerId: actor.id }] };
+        const filter = actor.role === 'Freelancer' ? { $or: [...privateFilter.$or, { status: 'Open' }] } : privateFilter;
+        const rows = await projects.aggregate([{ $match: filter },
+          { $lookup: { from: 'users', localField: 'ownerId', foreignField: '_id', as: '_owner' } },
+          { $match: { '_owner.0': { $exists: true } } }, { $project: { _owner: 0, _id: 0 } }, { $sort: { id: -1 } }], options).toArray();
+        const privateIds = rows.filter(row => row.ownerId === actor.id || row.freelancerId === actor.id).map(row => row.id);
+        const txs = privateIds.length ? await transactions.find({ projectId: { $in: privateIds } }, { ...options, ...withoutStorageId }).sort({ _id: -1 }).toArray() : [];
+        return { projects: rows, txs };
+      },
+      getProjectForActor: (id, actor) => projects.findOne({ _id: id, $or: [{ ownerId: actor.id }, { freelancerId: actor.id }] }, { ...options, ...withoutStorageId }),
       async createProject(project) {
         const counter = await counters.findOneAndUpdate(projectCounter, { $inc: { value: 1 } },
           { ...options, returnDocument: 'after' });
@@ -174,12 +193,27 @@ export function openMongo(config) {
   return {
     ...operations(),
     readWorkspace: () => transaction(store => store.readWorkspace()),
+    readWorkspaceForActor: actor => transaction(store => store.readWorkspaceForActor(actor)),
     transaction,
     close: () => client.close(),
     async snapshot() {
       const result = {};
       for (const collection of collections) result[collection.collectionName] = await collection.find({}).toArray();
       return result;
+    },
+    async cleanIntegrity(backup) {
+      return client.withSession(session => session.withTransaction(async () => {
+        const snapshot = {};
+        for (const collection of collections) snapshot[collection.collectionName] = await collection.find({}, { session }).toArray();
+        const plan = integrityPlan(snapshot);
+        if (backup) {
+          await backup(snapshot);
+          for (const [name, ids] of Object.entries(plan.remove)) {
+            if (ids.length) await db.collection(name).deleteMany({ _id: { $in: ids } }, { session });
+          }
+        }
+        return { orphanProjects: plan.orphanProjects, counts: plan.counts };
+      }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' }, timeoutMS: 20_000 }));
     },
     async migrate() {
       await checkDeployment();
@@ -196,6 +230,10 @@ export function openMongo(config) {
       await walletChallenges.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
       await authChallenges.createIndex({ id: 1 }, { unique: true });
       await authChallenges.createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0 });
+      await projects.createIndex({ ownerId: 1, id: -1 });
+      await projects.createIndex({ freelancerId: 1, id: -1 });
+      await projects.createIndex({ status: 1, id: -1 });
+      await transactions.createIndex({ projectId: 1, _id: -1 });
       const latest = await projects.findOne({}, { sort: { _id: -1 }, projection: { _id: 1 } });
       const highestProjectId = latest?._id ?? 0;
       if (!Number.isSafeInteger(highestProjectId) || highestProjectId < 0) {

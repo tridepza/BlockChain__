@@ -75,6 +75,7 @@ export function openPostgres(config) {
   const query = queryOn(pool);
   return {
     query,
+    dialect: 'postgres',
     transaction,
     projectLock: ' FOR UPDATE',
     sessionLock: ' FOR SHARE OF s',

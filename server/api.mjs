@@ -15,6 +15,7 @@ import { publicProjectPayments } from './public-projects.mjs';
 import { createPublicClient, http } from 'viem';
 import { localChain } from '../src/local-chain.ts';
 import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
+import { fescVault } from './fesc-vault.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -128,6 +129,10 @@ function createDatabaseApi(store, root, options = {}) {
     const previous = sessionToken(req);
     const token = randomBytes(32).toString('hex');
     await store.transaction(async writes => {
+      const current = await writes.getAuthUserForWrite(user.email);
+      if (!current || current.id !== user.id || !timingSafeEqual(Buffer.from(current.password_hash), Buffer.from(user.password_hash))) {
+        throw new WorkflowError(401, 'Tài khoản đã thay đổi. Hãy đăng nhập lại.');
+      }
       if (previous) await writes.deleteSession(hashToken(previous));
       await writes.insertSession(hashToken(token), user.id, Date.now() + sessionSeconds * 1000);
     });
@@ -135,7 +140,7 @@ function createDatabaseApi(store, root, options = {}) {
   }
 
   async function workspace(user) {
-    const data = visibleWorkspace(await store.readWorkspace(), user);
+    const data = visibleWorkspace(await store.readWorkspaceForActor(user), user);
     return { ...data, mockWallet: await store.getMockBalance(user.id) };
   }
 
@@ -160,6 +165,36 @@ function createDatabaseApi(store, root, options = {}) {
       return json(res, 200, await publicProjectPayments(store, rpc, (params.get('q') ?? '').trim().slice(0, 80)));
     }
 
+    if (method === 'POST' && path === '/api/auth/forgot') {
+      const body = await readJson(req);
+      const email = normalizeEmail(body.email);
+      if (!validEmail(email)) throw new WorkflowError(400, 'Nhập địa chỉ email hợp lệ.');
+      limitAttempts(req, path);
+      const user = await store.getUserByEmail(email);
+      const binding = randomBytes(32).toString('hex');
+      let challenge;
+      try {
+        challenge = await otp.issue(email, 'reset', user ? { id: user.id,
+          password_hash: Buffer.from(user.password_hash).toString('hex') }
+          : { id: randomUUID(), silent: true, password_hash: '' }, binding);
+      } catch (error) {
+        if (!(error instanceof WorkflowError) || error.status !== 503) throw error;
+        console.warn('Password reset: SMTP unavailable.');
+        challenge = { challengeId: randomUUID(), email, purpose: 'reset', expiresAt: Date.now() + 300_000, resendAt: Date.now() + 60_000 };
+      }
+      setOtpCookie(req, res, binding);
+      return json(res, 202, challenge);
+    }
+    if (method === 'POST' && path === '/api/auth/reset') {
+      const body = await readJson(req);
+      limitAttempts(req, path);
+      if (!validPassword(body.password)) throw new WorkflowError(400, 'Mật khẩu phải có từ 12 đến 128 ký tự, gồm chữ thường, số và ký tự đặc biệt.');
+      if (body.password !== body.confirm) throw new WorkflowError(400, 'Mật khẩu xác nhận chưa khớp.');
+      const salt = randomBytes(16);
+      await otp.resetPassword(body.challengeId, body.resetToken, otpBinding(req), salt, await passwordHash(body.password, salt));
+      setOtpCookie(req, res, '');
+      return json(res, 200, { message: 'Đã đặt lại mật khẩu. Hãy đăng nhập bằng mật khẩu mới.' });
+    }
     if (method === 'POST' && ['/api/auth/register', '/api/auth/login'].includes(path)) {
       const body = await readJson(req);
       const email = normalizeEmail(body.email);
@@ -196,6 +231,10 @@ function createDatabaseApi(store, root, options = {}) {
       const body = await readJson(req);
       limitAttempts(req, path);
       const result = await otp.verify(body.challengeId, body.code, otpBinding(req));
+      if (result.purpose === 'reset') {
+        setOtpCookie(req, res, otpBinding(req));
+        return json(res, 200, { resetToken: result.resetToken, expiresAt: result.expiresAt });
+      }
       setOtpCookie(req, res, '');
       if (result.purpose === 'register') return json(res, 201, { email: result.email });
       await startSession(req, res, result.user);
@@ -230,7 +269,7 @@ function createDatabaseApi(store, root, options = {}) {
 
     if (!deliveryDownload && !['/api/auth/me', '/api/auth/profile', '/api/workspace', '/api/projects', '/api/projects/action', '/api/projects/delivery',
       '/api/wallet', '/api/wallet/challenges', '/api/wallet/verify', '/api/wallet/local-funding', '/api/wallet/local-status',
-      '/api/wallet/mock-claim', '/api/wallet/fesc-balance', '/api/projects/fesc'].includes(path)) {
+      '/api/wallet/mock-claim', '/api/wallet/fesc-balance', '/api/wallet/fesc-account', '/api/projects/fesc'].includes(path)) {
       throw new WorkflowError(404, 'API không tồn tại.');
     }
     const user = token && await store.getSessionUser(hashToken(token));
@@ -244,7 +283,7 @@ function createDatabaseApi(store, root, options = {}) {
       const [, projectKey, milestoneId, deliveryId, kind] = deliveryDownload;
       const projectId = Number(projectKey);
       if (!Number.isSafeInteger(projectId)) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
-      const project = await store.getProject(projectId);
+      const project = await store.getProjectForActor(projectId, user);
       const isClient = user.role === 'Client' && user.id === project?.ownerId;
       const isFreelancer = user.role === 'Freelancer' && user.id === project?.freelancerId;
       if (!isClient && !isFreelancer) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
@@ -292,13 +331,17 @@ function createDatabaseApi(store, root, options = {}) {
         walletApi.getOrigin(req);
         return json(res, 200, await fescWalletBalance(root, await store.getWalletLink(user.id)));
       }
+      if (path === '/api/wallet/fesc-account') {
+        walletApi.getOrigin(req);
+        return json(res, 200, await fescVault(root, await store.getWalletLink(user.id), body));
+      }
       if (path === '/api/projects/fesc') {
         walletApi.getOrigin(req);
         if (!Number.isSafeInteger(body.projectId) || (body.action !== undefined && !fescActions.includes(body.action))) {
           throw new WorkflowError(400, 'Yêu cầu dự án FESC không hợp lệ.');
         }
         const result = await authenticatedWrite(async (writes, current) => {
-          const project = await writes.getProject(body.projectId);
+          const project = await writes.getProjectForActor(body.projectId, current);
           if (!project) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
           return projectFesc(root, writes, project, current, body);
         });
@@ -340,7 +383,7 @@ function createDatabaseApi(store, root, options = {}) {
         if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
         if (deliveryUpload && body.action !== 'submit') throw new WorkflowError(400, 'Thao tác bàn giao không hợp lệ.');
         await authenticatedWrite(async (writes, current) => {
-          let project = await writes.getProject(body.projectId);
+          let project = await writes.getProjectForActor(body.projectId, current);
           if (!project) throw new WorkflowError(404, 'Dự án không tồn tại.');
           const freelancerEmail = normalizeEmail(body.email);
           const freelancer = body.action === 'assign' && validEmail(freelancerEmail)

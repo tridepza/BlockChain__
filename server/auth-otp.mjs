@@ -34,17 +34,22 @@ export function authOtp(store, sendOtp, now = Date.now) {
       if (error.code === 11000) throw new WorkflowError(429, 'Vui lòng chờ 60 giây trước khi yêu cầu mã OTP tiếp theo.');
       throw error;
     }
-    try {
-      await sendOtp({ email, purpose, code });
-    } catch (error) {
-      await store.transaction(writes => writes.deleteAuthChallenge(row.id));
-      throw error;
+    async function deliver() {
+      try {
+        if (!payload.silent) await sendOtp({ email, purpose, code });
+      } catch (error) {
+        await store.transaction(writes => writes.deleteAuthChallenge(row.id));
+        throw error;
+      }
+      await store.transaction(async writes => {
+        const current = await writes.getAuthChallenge(row.id);
+        if (!current) throw invalid();
+        await writes.saveAuthChallenge({ ...current, ready: true });
+      });
     }
-    await store.transaction(async writes => {
-      const current = await writes.getAuthChallenge(row.id);
-      if (!current) throw invalid();
-      await writes.saveAuthChallenge({ ...current, ready: true });
-    });
+    // A reset request returns independently of SMTP latency so timing does not reveal registered emails.
+    if (purpose === 'reset') void deliver().catch(() => console.warn('Password reset email could not be delivered.'));
+    else await deliver();
     return publicChallenge(row);
   }
   return {
@@ -74,11 +79,30 @@ export function authOtp(store, sendOtp, now = Date.now) {
           user = await writes.getUserByEmail(row.email);
           if (!user || user.id !== row.payload.id || Buffer.from(user.password_hash).toString('hex') !== row.payload.password_hash) return { error: invalid() };
         }
+        if (row.purpose === 'reset') {
+          const resetToken = randomBytes(32).toString('hex');
+          await writes.saveAuthChallenge({ ...row, ready: false, hash: '', attempts: 5,
+            resetHash: digest(resetToken), resetExpires: now() + 10 * 60_000 });
+          return { email: row.email, purpose: row.purpose, resetToken, expiresAt: now() + 10 * 60_000 };
+        }
         await writes.saveAuthChallenge({ ...row, ready: false, payload: {}, hash: '', attempts: 5 });
         return { email: row.email, purpose: row.purpose, user };
       });
       if (result.error) throw result.error;
       return result;
+    },
+    async resetPassword(id, resetToken, binding, salt, hash) {
+      if (typeof id !== 'string' || typeof resetToken !== 'string' || !/^[\da-f]{64}$/.test(resetToken)) throw invalid();
+      await store.transaction(async writes => {
+        const row = await writes.getAuthChallenge(id);
+        if (!row || row.purpose !== 'reset' || !row.resetHash || row.resetExpires <= now() ||
+            row.binding !== digest(binding) || !timingSafeEqual(Buffer.from(row.resetHash, 'hex'), Buffer.from(digest(resetToken), 'hex'))) throw invalid();
+        const user = await writes.getAuthUserForWrite(row.email);
+        if (!user || user.id !== row.payload.id || Buffer.from(user.password_hash).toString('hex') !== row.payload.password_hash) throw invalid();
+        await writes.updatePassword(user.id, salt, hash);
+        await writes.deleteUserSessions(user.id);
+        await writes.deleteEmailChallenges(row.email);
+      });
     },
   };
 }

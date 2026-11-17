@@ -10,14 +10,18 @@
     "db:check": "node server/database-cli.mjs check",
     "db:select": "node server/select-database.mjs",
     "db:recover": "node server/recover-data.mjs",
+    "db:cleanup": "node server/cleanup-data.mjs",
     "mail:check": "node server/check-mail.mjs",
     "db:migrate": "node server/database-cli.mjs migrate",
     "db:import:sqlite-accounts": "node server/import-sqlite-accounts.mjs",
-    "test": "node --test tests/api.test.mjs",
+    "test": "node --test tests/api.test.mjs tests/persistence.test.mjs",
     "test:e2e": "playwright test",
-    "chain:node": "hardhat node --hostname 127.0.0.1",
+    "chain:node": "node scripts/local-node.mjs",
+    "chain:migrate": "node scripts/migrate-chain.mjs",
+    "chain:adopt": "node scripts/adopt-chain.mjs",
     "chain:deploy": "hardhat run scripts/deploy-local.ts --network localhost",
     "chain:deploy:fesc": "hardhat run scripts/deploy-fesc-local.ts --network localhost",
+    "chain:deploy:vault": "hardhat run scripts/deploy-vault-local.ts --network localhost",
     "compile:contracts": "hardhat compile",
     "test:contracts": "hardhat test nodejs",
     "typecheck:contracts": "tsc --project tsconfig.hardhat.json"
@@ -53,5 +57,12 @@
       "tmp": "0.2.7"
     },
     "zod": "$zod"
+  },
+  "optionalDependencies": {
+    "@foundry-rs/anvil-darwin-amd64": "1.7.1",
+    "@foundry-rs/anvil-darwin-arm64": "1.7.1",
+    "@foundry-rs/anvil-linux-amd64": "1.7.1",
+    "@foundry-rs/anvil-linux-arm64": "1.7.1",
+    "@foundry-rs/anvil-win32-amd64": "1.7.1"
   }
 }

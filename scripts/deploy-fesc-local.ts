@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { network } from 'hardhat';
 import { getAddress, isAddress, keccak256, parseUnits, toHex, zeroAddress } from 'viem';
 
 const tokenOnly = process.env.FESC_TOKEN_ONLY === '1';
+assert.ok(tokenOnly || !existsSync(new URL('../.hardhat/local-fesc-deployment.json', import.meta.url)) || process.env.FESC_FORCE_REDEPLOY === '1',
+  'Đã có token FESC. Không tự thay token làm số dư biến mất. Chạy chain:deploy:vault nếu chỉ thêm nạp/rút.');
 const addresses = (process.env.FESC_RECIPIENTS ?? '').split(',').map(value => value.trim()).filter(Boolean);
 assert.ok(addresses.length > 0, 'Điền FESC_RECIPIENTS bằng các địa chỉ ví thử, cách nhau bằng dấu phẩy.');
 const recipients = addresses.map(address => {
@@ -22,7 +25,7 @@ try {
   assert.equal(new URL(await config.url.getUrl()).href, 'http://127.0.0.1:8545/');
   const rpc = await connection.viem.getPublicClient();
   assert.equal(await rpc.getChainId(), 31337);
-  assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat/i);
+  assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat|anvil/i);
 
   const wallets = tokenOnly ? [] : await connection.viem.getWalletClients();
   const [, freelancer, arbitrator] = wallets.map(wallet => wallet.account.address);

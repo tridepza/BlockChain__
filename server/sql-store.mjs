@@ -5,6 +5,7 @@ const findSession = `
 const readData = row => JSON.parse(row.data);
 
 export function sqlStore(db) {
+  const field = (column, key) => db.dialect === 'postgres' ? `(${column}::jsonb ->> '${key}')` : `json_extract(${column}, '$.${key}')`;
   function operations(query, projectLock = '', sessionLock = '') {
     return {
       async getAuthChallenge(id) {
@@ -18,13 +19,20 @@ export function sqlStore(db) {
       },
       saveAuthChallenge: row => query(`INSERT INTO auth_challenges (id, email, purpose, expires, data) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(email, purpose) DO UPDATE SET id = excluded.id, expires = excluded.expires, data = excluded.data`,
-      [row.id, row.email, row.purpose, Math.max(row.expires, row.windowStart + 3_600_000), JSON.stringify(row)]),
+      [row.id, row.email, row.purpose, Math.max(row.expires, row.resetExpires ?? 0, row.windowStart + 3_600_000), JSON.stringify(row)]),
       deleteAuthChallenge: id => query('DELETE FROM auth_challenges WHERE id = ?', [id]),
       pruneAuthChallenges: now => query('DELETE FROM auth_challenges WHERE expires <= ?', [now]),
       async getUserByEmail(email) {
         const [user] = await query('SELECT * FROM users WHERE email = ?', [email]);
         return user;
       },
+      async getAuthUserForWrite(email) {
+        const [user] = await query('SELECT * FROM users WHERE email = ?' + projectLock, [email]);
+        return user;
+      },
+      updatePassword: (id, salt, hash) => query('UPDATE users SET salt = ?, password_hash = ? WHERE id = ?', [salt, hash, id]),
+      deleteUserSessions: id => query('DELETE FROM sessions WHERE user_id = ?', [id]),
+      deleteEmailChallenges: email => query('DELETE FROM auth_challenges WHERE email = ?', [email]),
       async createUser(user) {
         const rows = await query(`
           INSERT INTO users (id, name, email, role, salt, password_hash)
@@ -84,7 +92,8 @@ export function sqlStore(db) {
         return rows.length > 0;
       },
       async listOpenProjects() {
-        return (await query('SELECT data FROM projects ORDER BY id DESC')).map(readData).filter(p => p.status === 'Open');
+        return (await query(`SELECT p.data FROM projects p JOIN users u ON u.id = ${field('p.data', 'ownerId')}
+          WHERE ${field('p.data', 'status')} = 'Open' ORDER BY p.id DESC`)).map(readData);
       },
       async readWorkspace() {
         const rows = await query(`
@@ -97,6 +106,20 @@ export function sqlStore(db) {
           projects: rows.filter(row => row.kind === 0).map(readData),
           txs: rows.filter(row => row.kind === 1).map(readData),
         };
+      },
+      async readWorkspaceForActor(actor) {
+        const own = `(${field('p.data', 'ownerId')} = ? OR ${field('p.data', 'freelancerId')} = ?)`;
+        const rows = await query(`SELECT p.id, p.data FROM projects p JOIN users u ON u.id = ${field('p.data', 'ownerId')}
+          WHERE ${own}${actor.role === 'Freelancer' ? ` OR ${field('p.data', 'status')} = 'Open'` : ''} ORDER BY p.id DESC`, [actor.id, actor.id]);
+        const projects = rows.map(readData);
+        const ids = projects.filter(p => p.ownerId === actor.id || p.freelancerId === actor.id).map(p => String(p.id));
+        const txs = ids.length ? (await query(`SELECT data FROM transactions WHERE CAST(${field('data', 'projectId')} AS TEXT) IN (${ids.map(() => '?').join(',')}) ORDER BY id DESC`, ids)).map(readData) : [];
+        return { projects, txs };
+      },
+      async getProjectForActor(id, actor) {
+        const [row] = await query(`SELECT data FROM projects WHERE id = ? AND (${field('data', 'ownerId')} = ? OR ${field('data', 'freelancerId')} = ?)` + projectLock,
+          [id, actor.id, actor.id]);
+        return row && readData(row);
       },
       async createProject(project) {
         const [row] = await query('INSERT INTO projects (data) VALUES (?) RETURNING id', [JSON.stringify(project)]);
@@ -125,6 +148,7 @@ export function sqlStore(db) {
 
   return {
     ...operations(db.query),
+    readWorkspaceForActor: actor => db.transaction(query => operations(query, db.projectLock, db.sessionLock).readWorkspaceForActor(actor)),
     transaction: operation => db.transaction(query => operation(operations(query, db.projectLock, db.sessionLock))),
     close: db.close,
   };

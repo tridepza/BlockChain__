@@ -56,7 +56,11 @@ Không có `--apply` thì chỉ kiểm tra. Lệnh khôi phục sao lưu MongoDB
 
 Để chủ động đổi database, chạy `npm.cmd run db:select -- <mongodb|postgres|sqlite>` sau khi chuẩn bị database đích và khởi động lại website. Chuyển database không tự chuyển dữ liệu.
 
-Hardhat Local là blockchain thử trong bộ nhớ: khởi động lại node làm mất trạng thái hợp đồng. Việc này không xóa dự án đã lưu trong database. Các giao dịch mới có bản chiếu công khai lưu cùng lịch sử, còn hợp đồng cũ cần đúng trạng thái blockchain cũ để tiếp tục thao tác.
+`chain:node` hiện dùng Anvil có lưu trạng thái, vẫn giữ RPC `127.0.0.1:8545`, Chain ID `31337` và tên mạng Hardhat Local để tương thích MetaMask. State, token, số dư, block và receipt được lưu vào `.data/chain/state.json`, nạp lại khi mở node. RPC chỉ trả kết quả giao dịch sau khi giao dịch vào block và checkpoint đã ghi xong ra đĩa; có checkpoint bổ sung mỗi 30 giây khi phát hiện block mới. Không xóa thư mục này và không chạy lại deploy token mỗi ngày. Chương trình từ chối mở chain rỗng khi đã có deployment mà thiếu state.
+
+Nếu đang dùng node Hardhat trong bộ nhớ, giữ node đó chạy, dừng gửi giao dịch và chạy `npm.cmd run chain:migrate`. Lệnh sao lưu các giao dịch đã ký, tái hiện trên node tạm và kiểm tra hash giao dịch, trạng thái receipt, bytecode, nonce và số dư trước khi ghi state mới. Sau đó dừng node cũ, chạy `npm.cmd run chain:node` và `npm.cmd run chain:adopt`. Lệnh adopt chỉ cập nhật block xác minh; token, ví và giao dịch không được phát hành lại. Các trạng thái đã mất từ trước khi có bản sao lưu không thể suy ra chỉ từ database ứng dụng.
+
+Kiểm tra dữ liệu mất liên kết bằng `npm.cmd run db:cleanup`. Thêm `-- --apply` để sao lưu MongoDB vào `.data/backups` rồi dọn trong transaction. Chỉ xóa dự án mất chủ hoặc mất Freelancer đã liên kết, giao dịch/tệp không còn dự án, phiên và liên kết ví không còn tài khoản. Dự án chưa chọn Freelancer vẫn hợp lệ. Truy vấn workspace được lọc theo tài khoản ngay trong database; giao dịch chỉ liên kết theo ID dự án, không dựa vào tên trùng nhau. Dữ liệu của tài khoản khác không được trả về khi đoán ID.
 
 ## Gmail SMTP và xác nhận OTP
 
@@ -68,15 +72,30 @@ Hardhat Local là blockchain thử trong bộ nhớ: khởi động lại node l
 
 ```dotenv
 SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
+SMTP_PORT=587
 SMTP_USER=sender@gmail.com
 SMTP_PASSWORD=your-16-character-app-password
 SMTP_FROM="Freelancer Escrow <sender@gmail.com>"
 ```
 
-Gmail dùng TLS cho [SMTP cổng 465](https://developers.google.com/workspace/gmail/imap/imap-smtp). OTP có 6 chữ số, hết hạn sau 5 phút, dùng một lần, tối đa 5 lần nhập sai; gửi lại sau 60 giây và tối đa 10 mã mỗi giờ cho mỗi email/loại thao tác. Mã mới vô hiệu hóa mã cũ. Mã được băm và ràng buộc với trình duyệt gửi yêu cầu; OTP không được trả về qua API hoặc ghi vào log. Các yêu cầu OTP còn hiệu lực được lưu qua lần khởi động lại backend.
+SMTP dùng STARTTLS bắt buộc trên cổng 587; cổng 465 cũng được hỗ trợ khi chuỗi chứng chỉ hợp lệ. Máy có Avast chặn chứng chỉ SMTPS trên 465 có thể dùng 587. Không tắt xác minh chứng chỉ TLS. OTP có 6 chữ số, hết hạn sau 5 phút, dùng một lần, tối đa 5 lần nhập sai; gửi lại sau 60 giây và tối đa 10 mã mỗi giờ cho mỗi email/loại thao tác. Mã mới vô hiệu hóa mã cũ. Mã được băm và ràng buộc với trình duyệt gửi yêu cầu; OTP không được trả về qua API hoặc ghi vào log. Các yêu cầu OTP còn hiệu lực được lưu qua lần khởi động lại backend.
 
 Mật khẩu đăng ký phải có 12–128 ký tự, gồm chữ thường, chữ số và ký tự đặc biệt. Tài khoản cũ giữ mật khẩu hiện có và cũng phải xác nhận OTP khi đăng nhập. Thiếu cấu hình SMTP hoặc gửi thư thất bại thì không tạo tài khoản hay cấp phiên đăng nhập. Các bài kiểm thử dùng hàm gửi thư riêng trong server kiểm thử, không gửi email thật.
+
+Nút **Quên mật khẩu?** nhận Gmail đã đăng ký. Email chưa đăng ký cũng nhận phản hồi chung nhưng không gửi thư, giúp hạn chế dò tài khoản. Chỉ sau OTP đúng mới hiện hai ô **Mật khẩu mới** và **Xác nhận mật khẩu mới**. Quyền đổi mật khẩu có hiệu lực 10 phút, dùng một lần, ràng buộc trình duyệt và tài khoản ban đầu. Đặt lại mật khẩu băm mật khẩu mới, thu hồi mọi phiên cũ và mã đăng nhập/khôi phục đang chờ trong cùng transaction. OTP không cấp quyền ký ví hoặc khôi phục khóa ví.
+
+## Nạp và rút tài khoản FESC
+
+Trong **Ví & giao dịch**, số dư **Ví MetaMask** là token thật của địa chỉ đã liên kết. Nghiệm thu dự án trả thẳng FESC vào ví Freelancer, nên không cần thao tác rút thêm cho khoản nghiệm thu đó.
+
+Để gửi FESC từ ví vào tài khoản hợp đồng và rút trở lại, chạy một lần `npm.cmd run chain:deploy:vault` sau khi đã có token FESC. Lệnh này giữ nguyên token và số dư, triển khai `FescVault` nếu chưa có, giữ hợp đồng vault nếu đã triển khai. Sau đó dùng:
+
+- **Nạp FESC vào tài khoản**: nhập số tiền, ký cấp quyền đúng số token trong MetaMask, rồi bấm lại để ký giao dịch nạp. Hạn mức cũ khác số tiền yêu cầu được đặt về 0 trước khi cấp lại.
+- **Rút FESC về ví**: nhập số tiền và ký giao dịch rút. Chỉ ví gửi tiền mới được rút phần của mình, luôn về chính ví đó; không có hàm rút của quản trị viên.
+
+Số dư tài khoản đọc trực tiếp từ contract, không cộng tiền bằng dữ liệu do trình duyệt gửi hoặc dựa vào mã giao dịch chưa xác nhận. Giao dịch đang chờ chặn gửi trùng trong giao diện. Xóa tài khoản web không chuyển quyền sở hữu token trên blockchain.
+
+Luồng này dùng [approve/transferFrom và SafeERC20 của OpenZeppelin](https://docs.openzeppelin.com/contracts/5.x/api/token/erc20), kiểm tra số dư, chống reentrancy và kiểm thử bảo toàn tổng tài sản. Mỗi giao dịch cần chữ ký của ví, phí gas và xác nhận mạng theo [mô hình giao dịch Ethereum](https://ethereum.org/developers/docs/transactions/). Không cần bên thứ ba duyệt thủ công; không có thời gian khóa tiền bổ sung trong vault này. Các giao thức khác có quy tắc riêng: [Aave](https://www.aave.com/help/supplying/withdraw-tokens) yêu cầu đủ thanh khoản khi rút, còn [Lido](https://docs.lido.fi/contracts/withdrawal-queue-erc721/) có hàng đợi và bước finalization cho rút staking. Không áp dụng thời gian chờ staking vào tài khoản giữ FESC thông thường.
 
 ## Giao dịch dự án công khai
 
@@ -149,7 +168,7 @@ Script triển khai MockUSDC, cấp token thử cho ba tài khoản Hardhat và 
 
 Để thử từ MetaMask, thêm mạng tùy chỉnh với các giá trị trên và nhập tài khoản Hardhat thử từ terminal node. Xác nhận địa chỉ ví và số dư ETH thử nghiệm. Sau khi triển khai, dùng địa chỉ `token` trong manifest để thêm MockUSDC vào MetaMask. Khóa Hardhat chỉ dùng trên mạng local. [Hướng dẫn thêm mạng vào MetaMask](https://support.metamask.io/configure/networks/how-to-add-a-custom-network-rpc)
 
-Nhấn `Ctrl+C` ở terminal node để dừng. Mỗi lần khởi động lại node, chạy lại `chain:deploy` để tạo deployment mới và cập nhật manifest trước khi dùng địa chỉ trong ví. Chạy lại lệnh deploy khi node vẫn đang chạy sẽ tạo một bộ hợp đồng mới trên cùng node.
+Nhấn `Ctrl+C` ở terminal node để dừng. Lần sau chỉ chạy lại `chain:node` để nạp state đã lưu; không triển khai lại token sau mỗi lần khởi động. `chain:deploy` là tạo deployment MockUSDC mới, không phải khôi phục số dư cũ.
 
 ### Token thử Freelance Token trong MetaMask
 
@@ -164,12 +183,12 @@ npm.cmd run chain:deploy:fesc
 Remove-Item Env:FESC_TOKEN_ONLY
 ```
 
-Lệnh triển khai hợp đồng ERC-20 và cấp **1.000 FESC** cho mỗi ví chỉ định. Trong MetaMask, chọn đúng ví và mạng **Hardhat Local**, mở **Manage tokens → Add custom token**, dán địa chỉ hợp đồng trên dòng `FESC 0x…`, rồi xác nhận nhập. Nếu MetaMask yêu cầu, nhập ký hiệu `FESC` và số chữ số thập phân `18`. FESC ở đây chỉ tồn tại trên chuỗi thử local. Khi khởi động node với chain trống, triển khai lại và dùng địa chỉ hợp đồng vừa in. [Hướng dẫn thêm token của MetaMask](https://support.metamask.io/manage-crypto/tokens/how-to-display-tokens-in-metamask)
+Lệnh triển khai hợp đồng ERC-20 và cấp **1.000 FESC** cho mỗi ví chỉ định. Trong MetaMask, chọn đúng ví và mạng **Hardhat Local**, mở **Manage tokens → Add custom token**, dán địa chỉ hợp đồng trên dòng `FESC 0x…`, rồi xác nhận nhập. Nếu MetaMask yêu cầu, nhập ký hiệu `FESC` và số chữ số thập phân `18`. FESC ở đây chỉ tồn tại trên chuỗi thử local và được lưu cùng state. Không triển khai token mới để sửa số dư đang thiếu; kiểm tra đúng mạng, địa chỉ token và bản sao lưu chain. [Hướng dẫn thêm token của MetaMask](https://support.metamask.io/manage-crypto/tokens/how-to-display-tokens-in-metamask)
 
 ### Ký quỹ và giải ngân FESC theo dự án
 
 1. Chạy `npm.cmd run chain:node` nếu Hardhat chưa chạy. Dùng tài khoản Hardhat `#0` làm ví Client và `#1` làm ví Freelancer để cả hai có ETH thử trả gas.
-2. Trên PowerShell, đặt `FESC_RECIPIENTS` thành địa chỉ của Client và triển khai FESC cùng factory. Chạy lại bước này nếu bạn đang dùng factory FESC cũ. Mỗi dự án đã tạo hợp đồng tiếp tục dùng token và factory được ghi lúc tạo.
+2. Lần đầu, trên PowerShell, đặt `FESC_RECIPIENTS` thành địa chỉ của Client và triển khai FESC cùng factory. Nếu đã có deployment, giữ nguyên và bỏ qua bước deploy; mỗi dự án tiếp tục dùng token và factory được ghi lúc tạo.
 
    ```powershell
    $env:FESC_RECIPIENTS = '0xDIA_CHI_VI_CLIENT'
@@ -186,7 +205,7 @@ Lệnh triển khai hợp đồng ERC-20 và cấp **1.000 FESC** cho mỗi ví 
 
 Mục **Ký quỹ FESC** hiển thị số dư của bên đang đăng nhập, số token trong hợp đồng và số đã chuyển cho Freelancer. **Ví & giao dịch** hiển thị số dư FESC và mã giao dịch ký quỹ, giải ngân. Dùng địa chỉ token trong dự án để nhập đúng đồng FESC vào MetaMask.
 
-Nếu khởi động Hardhat với chuỗi trống, triển khai lại và tạo dự án FESC mới để thử luồng mới.
+Chỉ triển khai FESC lần đầu. Script từ chối thay token đã có để tránh khiến người dùng nhìn nhầm số dư của token mới. Việc cố ý tạo môi trường thử mới cần cấu hình `FESC_FORCE_REDEPLOY=1`; không dùng tùy chọn này cho khôi phục số dư.
 
 ### Liên kết MetaMask với tài khoản web
 

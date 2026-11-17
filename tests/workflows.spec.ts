@@ -314,3 +314,83 @@ test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', as
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({ path: '.local-data/ui-preview/public-projects-desktop.png', fullPage: true });
 });
+
+test('quên mật khẩu chỉ hiện hai ô mật khẩu sau khi OTP đúng', async ({ page }) => {
+  const email = 'forgot-ui@example.test';
+  await register(page, 'Khôi Phục', email, 'Client');
+  await click(page, 'Quên mật khẩu?');
+  await expect(page.getByRole('heading', { name: 'Quên mật khẩu' })).toBeVisible();
+  await page.getByLabel('Email', { exact: true }).fill(email);
+  await click(page, 'Gửi mã OTP');
+  await expect(page.getByLabel('Mật khẩu mới', { exact: true })).toHaveCount(0);
+  await confirmOtp(page, email);
+  await expect(page.getByRole('heading', { name: 'Đặt lại mật khẩu' })).toBeVisible();
+  await page.getByLabel('Mật khẩu mới', { exact: true }).fill('mat-khau-moi-12345!');
+  await page.getByLabel('Xác nhận mật khẩu mới').fill('khong-trung-12345!');
+  await click(page, 'Lưu mật khẩu mới');
+  await expect(page.getByRole('alert')).toContainText('chưa khớp');
+  await page.getByLabel('Xác nhận mật khẩu mới').fill('mat-khau-moi-12345!');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: '.local-data/ui-preview/reset-password-mobile.png', fullPage: true });
+  await click(page, 'Lưu mật khẩu mới');
+  await expect(page.getByRole('heading', { name: 'Đăng nhập', exact: true })).toBeVisible();
+  await page.getByLabel('Mật khẩu', { exact: true }).fill('mat-khau-moi-12345!');
+  await click(page, 'Đăng nhập');
+  await confirmOtp(page, email);
+  await expect(page.getByRole('heading', { name: /Chào / })).toBeVisible();
+});
+
+test('nạp/rút FESC bằng MetaMask cập nhật hai số dư sau xác nhận', async ({ page }) => {
+  const address = '0x1000000000000000000000000000000000000001';
+  const token = '0x2000000000000000000000000000000000000002';
+  const vault = '0x3000000000000000000000000000000000000003';
+  const block = '0x' + 'a'.repeat(64);
+  let walletBalance = 100, accountBalance = 0, approved = false, action = '', amount = 0, sequence = 0;
+  await page.exposeFunction('walletRpc', async (method: string) => {
+    if (method === 'eth_accounts') return [address];
+    if (method === 'eth_chainId') return '0x7a69';
+    if (method === 'eth_getBlockByNumber') return { hash: block };
+    if (method === 'eth_sendTransaction') return '0x' + (++sequence).toString(16).padStart(64, '0');
+    if (method === 'eth_getTransactionReceipt') {
+      if (action === 'approve') approved = true;
+      if (action === 'deposit') { walletBalance -= amount; accountBalance += amount; }
+      if (action === 'withdraw') { walletBalance += amount; accountBalance -= amount; }
+      action = '';
+      return { status: '0x1' };
+    }
+  });
+  await page.addInitScript(() => {
+    const rpc = (window as unknown as { walletRpc: (method: string) => Promise<unknown> }).walletRpc;
+    Object.defineProperty(window, 'ethereum', { value: { isMetaMask: true, on() {}, removeListener() {},
+      request: ({ method }: { method: string }) => rpc(method) } });
+  });
+  await register(page, 'Ví Freelancer', 'vault-ui@example.test', 'Freelancer');
+  await login(page);
+  await page.route('**/api/wallet', route => route.fulfill({ json: { wallet: { address, chainId: 31337, verifiedAt: new Date().toISOString() } } }));
+  await page.route('**/api/wallet/fesc-balance', route => route.fulfill({ json: { balance: String(walletBalance), token } }));
+  await page.route('**/api/wallet/fesc-account', async route => {
+    const input = route.request().postDataJSON();
+    if (!input.action) return route.fulfill({ json: { token, vault, walletBalance: String(walletBalance), accountBalance: String(accountBalance), history: [] } });
+    amount = Number(input.amount);
+    action = input.action === 'deposit' && !approved ? 'approve' : input.action;
+    return route.fulfill({ json: { step: action, from: address, to: action === 'approve' ? token : vault,
+      data: '0x1234', deploymentBlock: '0x1', deploymentBlockHash: block } });
+  });
+  await click(page, 'Ví & giao dịch');
+  const section = page.getByRole('region', { name: 'Tài khoản FESC', exact: true });
+  await expect(section.getByText('0 FESC', { exact: false }).first()).toBeVisible();
+  await section.getByLabel('Số FESC nạp hoặc rút').fill('10');
+  await section.getByRole('button', { name: 'Nạp FESC vào tài khoản' }).click();
+  await expect(section.getByRole('status')).toContainText('Đã cập nhật quyền token');
+  await section.getByRole('button', { name: 'Nạp FESC vào tài khoản' }).click();
+  await expect(section.getByRole('status')).toHaveText('Đã nạp FESC vào tài khoản.');
+  expect(walletBalance).toBe(90); expect(accountBalance).toBe(10);
+  await section.getByLabel('Số FESC nạp hoặc rút').fill('5');
+  await section.getByRole('button', { name: 'Rút FESC về ví' }).click();
+  await expect(section.getByRole('status')).toHaveText('Đã rút FESC về ví MetaMask.');
+  expect(walletBalance).toBe(95); expect(accountBalance).toBe(5);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('main')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: '.local-data/ui-preview/fesc-account-mobile.png', fullPage: true });
+});

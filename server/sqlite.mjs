@@ -7,6 +7,7 @@ export function openSqlite(filename) {
   const db = new DatabaseSync(filename, { timeout: 3000 });
   db.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
       role TEXT NOT NULL CHECK(role IN ('Client', 'Freelancer')),
@@ -34,6 +35,7 @@ export function openSqlite(filename) {
   const query = (sql, params = []) => db.prepare(sql).all(...params);
 
   return {
+    dialect: 'sqlite',
     query: (sql, params) => exclusive(() => query(sql, params)),
     projectLock: '',
     sessionLock: '',

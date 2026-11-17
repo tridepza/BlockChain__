@@ -4,6 +4,7 @@ import { Wallet } from 'lucide-react';
 import { getAddress, isAddress, numberToHex, stringToHex } from 'viem';
 import { api, ApiError, errorMessage } from './api';
 import { localChain } from './local-chain';
+import FescAccount from './FescAccount';
 
 type Wallet = { address: string; chainId: number; verifiedAt: string };
 type Currency = 'FESC' | 'MockUSDC';
@@ -124,7 +125,7 @@ export async function sendLocalTransaction(transaction: LocalTransaction, onPerm
       for (let attempt = 0; attempt < 12; attempt++) {
         const receipt = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
         if (receipt && typeof receipt === 'object' && 'status' in receipt) {
-          if (receipt.status !== '0x1') throw new Error('Giao dịch đã bị hoàn tác trên Hardhat.');
+          if (receipt.status !== '0x1') throw Object.assign(new Error('Giao dịch đã bị hoàn tác trên blockchain.'), { transactionFailed: true });
           return true;
         }
         await new Promise(resolve => window.setTimeout(resolve, 500));
@@ -376,6 +377,9 @@ export default function WalletLink({ accountId, isClient, children }: { accountI
       </section>
       {children}
     </div>
+    {wallet && <FescAccount accountId={accountId} onChanged={() => {
+      void readFescBalance(accountId).then(setFesc).catch(reason => setFescError(errorMessage(reason)));
+    }}/>}
     {wallet && isClient && <details className="panel wallet-test" onToggle={event => setShowFunding(event.currentTarget.open)}>
       <summary>Bài thử ký quỹ Hardhat độc lập</summary>
       <p className="muted">Hợp đồng thử 100 {currency}, không gắn với dự án.</p>

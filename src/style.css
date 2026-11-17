@@ -300,3 +300,6 @@ td code { display: inline-block; min-width: 100px; overflow-wrap: anywhere; }
   .modal { padding: 16px; }
   .searchbar input, .modal input, .modal select, .modal textarea, .role-select select { font-size: 16px; }
 }
+.fesc-account > label { display: grid; gap: 7px; margin: 16px 0 12px; font-weight: 600; }
+.fesc-account input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--surface); font: inherit; font-size: 16px; }
+.fesc-account input:focus { outline: 2px solid var(--green); outline-offset: 2px; }
