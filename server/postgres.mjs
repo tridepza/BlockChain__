@@ -3,10 +3,11 @@ import { resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import pg from 'pg';
 
-export function postgresConfig(root = process.cwd()) {
+export function postgresConfig(root = process.cwd(), selected) {
   const path = resolve(root, '.env.postgres.local');
   const file = existsSync(path) ? parseEnv(readFileSync(path, 'utf8')) : {};
   const env = { ...file, ...process.env };
+  if (selected !== undefined) env.ESCROW_DB = selected;
   if (env.ESCROW_DB === undefined || env.ESCROW_DB === 'sqlite') return null;
   if (env.ESCROW_DB !== 'postgres') throw new Error('ESCROW_DB phải là sqlite hoặc postgres.');
   if (!env.PGPASSWORD) throw new Error('Thêm mật khẩu của freelancer_app vào PGPASSWORD trong .env.postgres.local.');
@@ -88,7 +89,8 @@ export function openPostgres(config) {
           AND to_regclass('public.wallet_links') IS NOT NULL
           AND to_regclass('public.wallet_challenges') IS NOT NULL
           AND to_regclass('public.delivery_files') IS NOT NULL
-          AND to_regclass('public.mock_balances') IS NOT NULL AS ready
+          AND to_regclass('public.mock_balances') IS NOT NULL
+          AND to_regclass('public.auth_challenges') IS NOT NULL AS ready
       `);
       return status;
     },
@@ -98,6 +100,7 @@ export function openPostgres(config) {
       await execute(readFileSync(new URL('./migrations/002-wallet-links.sql', import.meta.url), 'utf8'));
       await execute(readFileSync(new URL('./migrations/003-delivery-files.sql', import.meta.url), 'utf8'));
       await execute(readFileSync(new URL('./migrations/004-mock-balances.sql', import.meta.url), 'utf8'));
+      await execute(readFileSync(new URL('./migrations/005-auth-challenges.sql', import.meta.url), 'utf8'));
     }),
   };
 }

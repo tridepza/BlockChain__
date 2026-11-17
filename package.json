@@ -8,6 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "db:check": "node server/database-cli.mjs check",
+    "db:select": "node server/select-database.mjs",
+    "db:recover": "node server/recover-data.mjs",
+    "mail:check": "node server/check-mail.mjs",
     "db:migrate": "node server/database-cli.mjs migrate",
     "db:import:sqlite-accounts": "node server/import-sqlite-accounts.mjs",
     "test": "node --test tests/api.test.mjs",
@@ -25,6 +28,7 @@
   "dependencies": {
     "lucide-react": "^0.468.0",
     "mongodb": "7.8.0",
+    "nodemailer": "10.6.0",
     "pg": "8.23.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

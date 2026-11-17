@@ -44,6 +44,10 @@
 .explorer-pagination { justify-content: flex-end; margin-top: 14px; }
 .explorer-link { text-decoration: none; }
 .auth-explorer { display: inline-block; margin-top: 12px; color: var(--green); font-size: 13px; font-weight: 650; }
+.public-payment-project { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; }
+.public-payment-project h2 { font-size: 19px; }
+.public-payment-stage h3 { margin: 16px 9px 8px; font-size: 14px; color: var(--muted); }
+.public-payment-stage .transfer-detail { margin-inline: 0; }
 
 @media (max-width: 710px) {
   .transfer-summary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding-inline: 3px; }

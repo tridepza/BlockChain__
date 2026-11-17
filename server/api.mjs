@@ -8,7 +8,13 @@ import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
 import { walletLinking } from './wallet.mjs';
 import { localFunding } from './local-funding.mjs';
-import { fescActions, fescWalletBalance, projectFesc, publicFescTransfers } from './project-fesc.mjs';
+import { fescActions, fescWalletBalance, projectFesc, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
+import { authOtp, validPassword } from './auth-otp.mjs';
+import { otpMailer } from './mail.mjs';
+import { publicProjectPayments } from './public-projects.mjs';
+import { createPublicClient, http } from 'viem';
+import { localChain } from '../src/local-chain.ts';
+import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -69,14 +75,15 @@ async function readJson(req, limit = 16_384) {
   return data;
 }
 
-export function createApi(filename = process.env.ESCROW_DB_PATH || resolve('.data/escrow.sqlite'), root = process.cwd()) {
-  return createDatabaseApi(sqlStore(openSqlite(filename)), root);
+export function createApi(filename, root = process.cwd(), options = {}) {
+  return createDatabaseApi(sqlStore(openSqlite(filename ?? process.env.ESCROW_DB_PATH ?? resolve(root, '.data/escrow.sqlite'))), root, options);
 }
 
 export async function createConfiguredApi(root) {
   const connection = configuredDatabase(root);
   if (!connection) {
     console.info('Escrow database: SQLite local.');
+    if (process.env.ESCROW_DB_PATH !== ':memory:') rememberStorageTarget(root, sqliteTarget(root));
     return createApi(undefined, root);
   }
   const { db, store, name, explainError } = connection;
@@ -88,6 +95,7 @@ export async function createConfiguredApi(root) {
     throw new Error(explainError(error));
   }
   if (status.ready) {
+    rememberStorageTarget(root, connection.target);
     console.info(`Escrow database: ${name} / ${status.database}.`);
     return createDatabaseApi(store, root);
   }
@@ -95,8 +103,11 @@ export async function createConfiguredApi(root) {
   throw new Error(`Database ${name} chưa được khởi tạo. Chạy npm.cmd run db:migrate.`);
 }
 
-function createDatabaseApi(store, root) {
+function createDatabaseApi(store, root, options = {}) {
   const walletApi = walletLinking(root);
+  const otp = authOtp(store, options.sendOtp ?? otpMailer(root).sendOtp, options.now);
+  const otpBinding = req => (req.headers.cookie ?? '').match(/(?:^|;\s*)escrow_otp=([a-f0-9]{64})(?=;|$)/)?.[1] ?? '';
+  const setOtpCookie = (req, res, value) => res.setHeader('Set-Cookie', `escrow_otp=${value}; Path=/api/auth; HttpOnly; SameSite=Strict; Max-Age=${value ? 600 : 0}${req.socket.encrypted ? '; Secure' : ''}`);
   const attempts = new Map();
   const dummySalt = randomBytes(16);
   const dummyHash = randomBytes(64);
@@ -142,6 +153,12 @@ function createDatabaseApi(store, root) {
       const params = new URLSearchParams(req.url.slice(path.length + 1));
       return json(res, 200, await publicFescTransfers(root, params));
     }
+    if (method === 'GET' && path === '/api/explorer/projects') {
+      const params = new URLSearchParams(req.url.slice(path.length + 1));
+      const rpc = createPublicClient({ transport: http(localChain.rpcUrl, { timeout: 2500, retryCount: 0 }) });
+      await reconcilePublicProjects(root, store);
+      return json(res, 200, await publicProjectPayments(store, rpc, (params.get('q') ?? '').trim().slice(0, 80)));
+    }
 
     if (method === 'POST' && ['/api/auth/register', '/api/auth/login'].includes(path)) {
       const body = await readJson(req);
@@ -154,21 +171,45 @@ function createDatabaseApi(store, root) {
       if (path.endsWith('/register')) {
         const name = readName(body.name);
         if (!['Client', 'Freelancer'].includes(body.role)) throw new WorkflowError(400, 'Chọn vai trò Client hoặc Freelancer.');
-        if (password.length < 12) throw new WorkflowError(400, 'Mật khẩu phải có ít nhất 12 ký tự.');
+        if (!validPassword(password)) throw new WorkflowError(400, 'Mật khẩu phải có từ 12 đến 128 ký tự, gồm chữ thường, số và ký tự đặc biệt.');
         if (await store.getUserByEmail(email)) throw new WorkflowError(409, 'Email này đã được đăng ký.');
         const salt = randomBytes(16);
         const hash = await passwordHash(password, salt);
-        const created = await store.createUser({ id: randomUUID(), name, email, role: body.role, salt, password_hash: hash });
-        if (!created) throw new WorkflowError(409, 'Email này đã được đăng ký.');
-        return json(res, 201, { email });
+        const binding = randomBytes(32).toString('hex');
+        const challenge = await otp.issue(email, 'register', { id: randomUUID(), name, email, role: body.role,
+          salt: salt.toString('hex'), password_hash: hash.toString('hex') }, binding);
+        setOtpCookie(req, res, binding);
+        return json(res, 202, challenge);
       }
       const user = await store.getUserByEmail(email);
       const hash = await passwordHash(password, user?.salt ?? dummySalt);
       if (!timingSafeEqual(hash, user?.password_hash ?? dummyHash) || !user) {
         throw new WorkflowError(401, 'Email hoặc mật khẩu không đúng.');
       }
-      await startSession(req, res, user);
-      return json(res, 200, { user: publicAccount(user) });
+      const binding = randomBytes(32).toString('hex');
+      const challenge = await otp.issue(email, 'login', { id: user.id, password_hash: Buffer.from(user.password_hash).toString('hex') }, binding);
+      setOtpCookie(req, res, binding);
+      return json(res, 202, challenge);
+    }
+
+    if (method === 'POST' && path === '/api/auth/verify') {
+      const body = await readJson(req);
+      limitAttempts(req, path);
+      const result = await otp.verify(body.challengeId, body.code, otpBinding(req));
+      setOtpCookie(req, res, '');
+      if (result.purpose === 'register') return json(res, 201, { email: result.email });
+      await startSession(req, res, result.user);
+      // Keep both the session cookie and removal of the OTP binding.
+      res.setHeader('Set-Cookie', [res.getHeader('Set-Cookie'), 'escrow_otp=; Path=/api/auth; HttpOnly; SameSite=Strict; Max-Age=0']);
+      return json(res, 200, { user: publicAccount(result.user) });
+    }
+    if (method === 'POST' && path === '/api/auth/resend') {
+      const body = await readJson(req);
+      limitAttempts(req, path);
+      const binding = otpBinding(req);
+      const challenge = await otp.resend(body.challengeId, binding);
+      setOtpCookie(req, res, binding);
+      return json(res, 202, challenge);
     }
 
     if (method === 'POST' && path === '/api/auth/logout') {

@@ -3,6 +3,12 @@ import type { Page } from '@playwright/test';
 
 const password = 'mat-khau-demo-2026';
 const click = (page: Page, name: string) => page.getByRole('button', { name, exact: true }).click();
+async function confirmOtp(page: Page, email: string) {
+  await expect(page.getByRole('heading', { name: 'Xác nhận email' })).toBeVisible();
+  const { code } = await (await page.request.get('/__test/otp?email=' + encodeURIComponent(email))).json();
+  await page.getByLabel('Mã OTP', { exact: true }).fill(code);
+  await click(page, 'Xác nhận');
+}
 
 async function register(page: Page, name: string, email: string, role: 'Client' | 'Freelancer') {
   await page.goto('/');
@@ -13,12 +19,15 @@ async function register(page: Page, name: string, email: string, role: 'Client' 
   await page.getByLabel('Xác nhận mật khẩu').fill(password);
   await page.getByLabel('Vai trò').selectOption(role);
   await click(page, 'Đăng ký');
+  await confirmOtp(page, email);
   await expect(page.getByRole('status')).toContainText('Đăng ký thành công');
 }
 
 async function login(page: Page) {
+  const email = await page.getByLabel('Email', { exact: true }).inputValue();
   await page.getByLabel('Mật khẩu', { exact: true }).fill(password);
   await click(page, 'Đăng nhập');
+  await confirmOtp(page, email);
   await expect(page.getByRole('heading', { name: /Chào / })).toBeVisible();
 }
 
@@ -64,6 +73,7 @@ test('đăng ký, đăng nhập, tải lại, cập nhật hồ sơ và đăng x
   await expect(page.getByRole('alert')).toHaveText('Mật khẩu xác nhận chưa khớp.');
   await page.getByLabel('Xác nhận mật khẩu').fill(password);
   await click(page, 'Đăng ký');
+  await confirmOtp(page, 'mobile@example.test');
   await expect(page.getByRole('status')).toContainText('Đăng ký thành công');
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue('mobile@example.test');
   await page.getByLabel('Mật khẩu', { exact: true }).fill('sai-mat-khau');
@@ -125,7 +135,11 @@ test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ c
     } });
   });
   const freelancer = { name: 'Freelancer FESC', email: 'permissions-worker@example.test', password, role: 'Freelancer' };
-  expect((await page.request.post('/api/auth/register', { data: freelancer })).status()).toBe(201);
+  const registration = await page.request.post('/api/auth/register', { data: freelancer });
+  expect(registration.status()).toBe(202);
+  const challenge = await registration.json();
+  const { code } = await (await page.request.get('/__test/otp?email=' + encodeURIComponent(freelancer.email))).json();
+  expect((await page.request.post('/api/auth/verify', { data: { challengeId: challenge.challengeId, code } })).status()).toBe(201);
   await register(page, 'Client FESC', 'permissions-client@example.test', 'Client');
   await login(page);
   const title = 'Kiểm thử quyền Hardhat';
@@ -221,6 +235,7 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await expect(staleTab.getByRole('dialog').getByRole('alert')).toContainText('Bản bàn giao đã thay đổi.');
     await staleTab.close();
     await click(page, 'Làm mới');
+    await expect(page.getByText('Đã bổ sung bản mobile', { exact: true })).toBeVisible();
     const previewV2 = page.getByRole('link', { name: /Tải bản xem trước/ }).first();
     const originalV2 = (await previewV2.getAttribute('href'))!.replace(/preview$/, 'original');
     expect((await page.request.get(originalV2)).status()).toBe(403);
@@ -270,4 +285,32 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await click(page, 'Thử bản demo');
   await openProject(page, title);
   await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
+});
+
+test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await click(page, 'Đăng ký');
+  await page.getByLabel('Họ và tên').fill('OTP Preview');
+  await page.getByLabel('Email', { exact: true }).fill('otp-preview@example.test');
+  await page.getByLabel('Mật khẩu', { exact: true }).fill(password);
+  await page.getByLabel('Xác nhận mật khẩu').fill(password);
+  await click(page, 'Đăng ký');
+  await expect(page.getByRole('heading', { name: 'Xác nhận email' })).toBeVisible();
+  await expect(page.getByLabel('Mã OTP', { exact: true })).toHaveAttribute('autocomplete', 'one-time-code');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: '.local-data/ui-preview/otp-mobile.png', fullPage: true });
+  await page.route('**/api/explorer/projects?*', route => route.fulfill({ json: { payments: [
+    { projectId: 12, stage: 'Ký quỹ', amount: '100', currency: 'FESC',
+      from: '0x1000000000000000000000000000000000000001', to: '0x2000000000000000000000000000000000000002' },
+    { projectId: 12, stage: 'Milestone 1', amount: '30', currency: 'FESC',
+      from: '0x2000000000000000000000000000000000000002', to: '0x3000000000000000000000000000000000000003' },
+  ] } }));
+  await page.goto('/explorer');
+  await expect(page.getByRole('heading', { name: 'Dự án #12' })).toBeVisible();
+  await expect(page.getByText('Ví thanh toán', { exact: true })).toHaveCount(2);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: '.local-data/ui-preview/public-projects-mobile.png', fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.screenshot({ path: '.local-data/ui-preview/public-projects-desktop.png', fullPage: true });
 });

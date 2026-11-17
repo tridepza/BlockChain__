@@ -6,8 +6,8 @@ import { MongoClient } from 'mongodb';
 
 class MongoSetupError extends Error {}
 
-export function mongoConfig(root = process.cwd()) {
-  const mode = process.env.ESCROW_DB;
+export function mongoConfig(root = process.cwd(), selected = process.env.ESCROW_DB) {
+  const mode = selected;
   if (mode && mode !== 'mongodb') return null;
   const path = resolve(root, '.env.mongo.local');
   const file = existsSync(path) ? parseEnv(readFileSync(path, 'utf8')) : {};
@@ -60,13 +60,20 @@ export function openMongo(config) {
   const walletChallenges = db.collection('wallet_challenges');
   const deliveryFiles = db.collection('delivery_files');
   const mockBalances = db.collection('mock_balances');
-  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges, deliveryFiles, mockBalances];
+  const authChallenges = db.collection('auth_challenges');
+  const collections = [users, sessions, projects, transactions, counters, walletLinks, walletChallenges, deliveryFiles, mockBalances, authChallenges];
   const projectCounter = { _id: 'projects' };
   const withoutStorageId = { projection: { _id: 0 } };
 
   function operations(session) {
     const options = { session };
     return {
+      getAuthChallenge: id => authChallenges.findOne({ id }, { ...options, ...withoutStorageId }),
+      getAuthChallengeForEmail: (email, purpose) => authChallenges.findOne({ _id: `${purpose}:${email}` }, { ...options, ...withoutStorageId }),
+      saveAuthChallenge: row => authChallenges.replaceOne({ _id: `${row.purpose}:${row.email}` },
+        { ...row, _id: `${row.purpose}:${row.email}`, purgeAt: new Date(Math.max(row.expires, row.windowStart + 60 * 60_000)) }, { ...options, upsert: true }),
+      deleteAuthChallenge: id => authChallenges.deleteOne({ id }, options),
+      pruneAuthChallenges: now => authChallenges.deleteMany({ purgeAt: { $lte: new Date(now) } }, options),
       getUserByEmail: email => users.findOne({ email }, { ...options, ...withoutStorageId }),
       getUserById: id => users.findOne({ _id: id }, { ...options, projection: { _id: 1 } }),
       countUsers: () => users.countDocuments({}, options),
@@ -108,6 +115,7 @@ export function openMongo(config) {
       },
       creditMock: (id, cents) => mockBalances.updateOne({ _id: id }, { $inc: { cents } }, { ...options, upsert: true }),
       getWalletLink: userId => walletLinks.findOne({ _id: userId }, { ...options, ...withoutStorageId }),
+      getWalletOwner: address => walletLinks.findOne({ address }, options),
       async insertWalletLink(userId, wallet) {
         try {
           await walletLinks.insertOne({ _id: userId, ...wallet }, options);
@@ -144,6 +152,7 @@ export function openMongo(config) {
       saveDeliveryFile: (id, kind, file) => deliveryFiles.insertOne({ _id: `${id}:${kind}`, ...file }, options),
       getDeliveryFile: (id, kind) => deliveryFiles.findOne({ _id: `${id}:${kind}` }, { ...options, ...withoutStorageId }),
       addTransaction: tx => transactions.insertOne({ ...tx }, options),
+      savePublicPayment: (tx, publicPayment) => transactions.updateOne({ id: tx.id, projectId: tx.projectId }, { $set: { publicPayment } }, options),
     };
   }
 
@@ -167,6 +176,11 @@ export function openMongo(config) {
     readWorkspace: () => transaction(store => store.readWorkspace()),
     transaction,
     close: () => client.close(),
+    async snapshot() {
+      const result = {};
+      for (const collection of collections) result[collection.collectionName] = await collection.find({}).toArray();
+      return result;
+    },
     async migrate() {
       await checkDeployment();
       for (const collection of collections) {
@@ -180,6 +194,8 @@ export function openMongo(config) {
       await sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
       await walletLinks.createIndex({ address: 1 }, { unique: true });
       await walletChallenges.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+      await authChallenges.createIndex({ id: 1 }, { unique: true });
+      await authChallenges.createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0 });
       const latest = await projects.findOne({}, { sort: { _id: -1 }, projection: { _id: 1 } });
       const highestProjectId = latest?._id ?? 0;
       if (!Number.isSafeInteger(highestProjectId) || highestProjectId < 0) {
@@ -196,10 +212,13 @@ export function openMongo(config) {
         const sessionIndexes = await sessions.indexes();
         const walletIndexes = await walletLinks.indexes();
         const challengeIndexes = await walletChallenges.indexes();
+        const authIndexes = await authChallenges.indexes();
         ready = emailIndexes.some(index => index.name === 'email_1' && index.unique === true)
           && sessionIndexes.some(index => index.name === 'expiresAt_1' && index.expireAfterSeconds === 0)
           && walletIndexes.some(index => index.name === 'address_1' && index.unique === true)
           && challengeIndexes.some(index => index.name === 'expiresAt_1' && index.expireAfterSeconds === 0)
+          && authIndexes.some(index => index.name === 'id_1' && index.unique === true)
+          && authIndexes.some(index => index.name === 'purgeAt_1' && index.expireAfterSeconds === 0)
           && Boolean(await counters.findOne(projectCounter));
       }
       return { database: db.databaseName, ready };

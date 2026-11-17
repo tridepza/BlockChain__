@@ -13,3 +13,4 @@ test-results/
 !.env.example
 !.env.postgres.example
 !.env.mongo.example
+!.env.mail.example

@@ -10,6 +10,9 @@ import { createPublicClient, createWalletClient, http, keccak256, parseUnits, to
 import { hardhat } from 'viem/chains';
 import { mnemonicToAccount } from 'viem/accounts';
 import { createApi } from '../server/api.mjs';
+import { WorkflowError } from '../src/workflow.ts';
+import { publicProjectPayments } from '../server/public-projects.mjs';
+import { assertStorageTarget } from '../server/storage-target.mjs';
 
 const password = 'mật-khẩu-test-2026';
 const client = { name: 'Tên trùng', email: 'owner@example.test', password, role: 'Client' };
@@ -20,25 +23,39 @@ const input = {
   budget: '0.30', milestones: 'Một, Hai', amounts: '0.10, 0.20',
 };
 
-async function listen(filename, root) {
-  const api = createApi(filename, root);
+let lastTestClock = Date.now();
+async function listen(filename, root, options = {}) {
+  const mail = [];
+  let clock = lastTestClock += 3_600_000;
+  const api = createApi(filename, root, { sendOtp: async message => { mail.push(message); }, now: () => clock, ...options });
   const server = createServer((req, res) => api.middleware(req, res, () => res.writeHead(404).end()));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const baseURL = origin + '/api/';
+  async function request(path, { data, cookie, headers } = {}) {
+    const response = await fetch(baseURL + path, {
+      method: data === undefined ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...headers },
+      body: data === undefined ? undefined : JSON.stringify(data),
+    });
+    return { status: response.status, cookie: response.headers.get('set-cookie'), body: await response.json() };
+  }
   return {
     origin,
+    mail,
+    advance: milliseconds => { clock += milliseconds; },
+    rawRequest: request,
     close: async () => {
       await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       await api.close();
     },
-    async request(path, { data, cookie, headers } = {}) {
-      const response = await fetch(baseURL + path, {
-        method: data === undefined ? 'GET' : 'POST',
-        headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...headers },
-        body: data === undefined ? undefined : JSON.stringify(data),
-      });
-      return { status: response.status, cookie: response.headers.get('set-cookie'), body: await response.json() };
+    async request(path, input = {}) {
+      if (['auth/register', 'auth/login'].includes(path)) clock += 61_000;
+      const result = await request(path, input);
+      if (!['auth/register', 'auth/login'].includes(path) || result.status !== 202) return result;
+      const code = mail.findLast(message => message.email === result.body.email && message.purpose === result.body.purpose).code;
+      return request('auth/verify', { data: { challengeId: result.body.challengeId, code },
+        cookie: [input.cookie, result.cookie.split(';')[0]].filter(Boolean).join('; '), headers: input.headers });
     },
   };
 }
@@ -129,6 +146,10 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(deposit.from.toLowerCase(), owner.account.address.toLowerCase());
   assert.equal(deposit.to.toLowerCase(), escrow.toLowerCase());
   assert.equal(deposit.amount, '0.3');
+  const publicProject = (await app.request('explorer/projects')).body.payments;
+  assert.deepEqual(publicProject, [{ projectId, stage: 'Ký quỹ', amount: '0.3', currency: 'FESC', from: owner.account.address,
+    to: escrow }]);
+  assert.deepEqual(Object.keys(publicProject[0]).sort(), ['amount', 'currency', 'from', 'projectId', 'stage', 'to']);
   assert.equal((await state(clientCookie)).held, '0.3');
   assert.equal((await state(clientCookie)).balance, '999.7');
   await execute('start', freelancerCookie, freelancer);
@@ -166,6 +187,8 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal((await post('wallet/fesc-balance', {}, freelancerCookie)).body.balance, '0.3');
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [escrow] }), 0n);
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [freelancer.account.address] }), parseUnits('0.3', 18));
+  const phases = (await app.request('explorer/projects')).body.payments;
+  assert.deepEqual(phases.map(row => [row.stage, row.amount]), [['Ký quỹ', '0.3'], ['Milestone 1', '0.1'], ['Milestone 2', '0.2']]);
 
   const outgoing = await confirm(await freelancer.writeContract({ address: token, abi: coin.abi,
     functionName: 'transfer', args: [owner.account.address, 1n] }));
@@ -212,7 +235,8 @@ test('tài khoản và session được lưu bền vững, cookie cũ bị thu h
     req('auth/register', { data: client }),
     req('auth/register', { data: { ...client, email: ' OWNER@EXAMPLE.TEST ' } }),
   ]);
-  assert.deepEqual(duplicates.map(result => result.status).sort(), [201, 409]);
+  assert.equal(duplicates.filter(result => result.status === 201).length, 1);
+  assert.ok(duplicates.some(result => [409, 429].includes(result.status)));
   assert.equal((await req('auth/login', { data: { ...client, password: 'incorrect' } })).status, 401);
   const login = await req('auth/login', { data: client });
   assert.equal(login.status, 200);
@@ -403,7 +427,7 @@ test('Vite dev chặn tệp SQLite, dữ liệu xác thực cũ và cấu hình 
   const dbMode = process.env.ESCROW_DB;
   const privateFiles = [
     '.local-data/auth.sqlite', '.local-data/legacy.txt', '.data/escrow.sqlite',
-    'backup.db-wal', 'backup.sqlite3', '.env.postgres.local', '.env.mongo.local',
+    'backup.db-wal', 'backup.sqlite3', '.env.postgres.local', '.env.mongo.local', '.env.mail.local',
   ];
   let server;
   try {
@@ -435,4 +459,137 @@ test('Vite dev chặn tệp SQLite, dữ liệu xác thực cũ và cấu hình 
     await server?.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('OTP bắt buộc trước khi tạo tài khoản và đăng nhập, chỉ dùng một lần và ràng buộc trình duyệt', async t => {
+  const app = await listen(':memory:'); t.after(app.close);
+  const req = app.rawRequest;
+  for (const weak of ['abcdefghijkl', '1234567890!!', 'abcdefghij12', 'abcdefghij!!', 'ABCDEF1234!!']) {
+    assert.equal((await req('auth/register', { data: { ...client, password: weak } })).status, 400);
+  }
+  const start = await req('auth/register', { data: client });
+  assert.equal(start.status, 202);
+  assert.equal(start.body.code, undefined);
+  assert.equal(start.body.user, undefined);
+  assert.equal(app.mail[0].email, client.email);
+  const binding = start.cookie.split(';')[0];
+  const verification = { challengeId: start.body.challengeId, code: app.mail[0].code };
+  assert.equal((await req('auth/login', { data: client })).status, 401);
+  assert.equal((await req('auth/me', { cookie: binding })).status, 401);
+  assert.equal((await req('auth/verify', { data: verification })).status, 400);
+  assert.equal((await req('auth/verify', { data: verification, cookie: binding })).status, 201);
+  assert.equal((await req('auth/verify', { data: verification, cookie: binding })).status, 400);
+  const login = await req('auth/login', { data: client });
+  assert.equal(login.status, 202);
+  assert.equal(login.cookie.includes('escrow_session='), false);
+  const cookie = login.cookie.split(';')[0];
+  const data = { challengeId: login.body.challengeId, code: app.mail.at(-1).code };
+  const wrong = data.code === '000000' ? '111111' : '000000';
+  assert.equal((await req('auth/verify', { data: { ...data, code: wrong }, cookie })).status, 400);
+  const verified = await req('auth/verify', { data, cookie });
+  assert.equal(verified.status, 200);
+  assert.equal(verified.body.user.email, client.email);
+  assert.equal((await req('auth/me', { cookie: verified.cookie.split(';')[0] })).status, 200);
+  assert.equal((await req('auth/verify', { data, cookie })).status, 400);
+});
+
+test('OTP hết hạn, giới hạn thử sai, gửi lại và lưu qua khởi động lại', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'escrow-otp-'));
+  const file = join(dir, 'otp.sqlite');
+  let now = Date.now();
+  let app = await listen(file, undefined, { now: () => now });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true }); });
+  let start = await app.rawRequest('auth/register', { data: client });
+  let binding = start.cookie.split(';')[0];
+  const first = { challengeId: start.body.challengeId, code: app.mail[0].code };
+  assert.equal((await app.rawRequest('auth/resend', { data: first, cookie: binding })).status, 429);
+  now += 61_000;
+  const resent = await app.rawRequest('auth/resend', { data: first, cookie: binding });
+  assert.equal(resent.status, 202);
+  assert.equal((await app.rawRequest('auth/verify', { data: first, cookie: binding })).status, 400);
+  const fresh = { challengeId: resent.body.challengeId, code: app.mail.at(-1).code };
+  const db = new DatabaseSync(file, { readOnly: true });
+  const stored = db.prepare('SELECT data FROM auth_challenges').get().data;
+  assert.equal(JSON.parse(stored).code, undefined);
+  assert.equal(JSON.parse(stored).hash === fresh.code, false);
+  assert.equal(db.prepare('SELECT count(*) AS count FROM users').get().count, 0);
+  db.close();
+  await app.close();
+  app = await listen(file, undefined, { now: () => now });
+  assert.equal((await app.rawRequest('auth/verify', { data: fresh, cookie: binding })).status, 201);
+  start = await app.rawRequest('auth/login', { data: client });
+  binding = start.cookie.split(';')[0];
+  const data = { challengeId: start.body.challengeId, code: app.mail.at(-1).code };
+  const wrong = data.code === '000000' ? '111111' : '000000';
+  for (let i = 0; i < 5; i++) assert.equal((await app.rawRequest('auth/verify', { data: { ...data, code: wrong }, cookie: binding })).status, 400);
+  await app.close();
+  app = await listen(file, undefined, { now: () => now });
+  assert.equal((await app.rawRequest('auth/verify', { data, cookie: binding })).status, 400);
+  now += 61_000;
+  const next = await app.rawRequest('auth/resend', { data, cookie: binding });
+  assert.equal(next.status, 202);
+  now += 5 * 60_000 + 1;
+  assert.equal((await app.rawRequest('auth/verify', { data: { challengeId: next.body.challengeId, code: app.mail.at(-1).code }, cookie: binding })).status, 400);
+});
+
+test('SMTP lỗi không tạo tài khoản hoặc cấp phiên đăng nhập', async t => {
+  const app = await listen(':memory:', undefined, { sendOtp: async () => { throw new WorkflowError(503, 'SMTP unavailable'); } });
+  t.after(app.close);
+  assert.equal((await app.rawRequest('auth/register', { data: client })).status, 503);
+  assert.equal((await app.rawRequest('auth/login', { data: client })).status, 401);
+  assert.equal((await app.rawRequest('auth/me')).status, 401);
+});
+
+test('dự án và giao dịch giữ nguyên khi qua ngày và mở lại database', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'escrow-persist-'));
+  const file = join(dir, 'projects.sqlite');
+  let app = await listen(file);
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true }); });
+  await app.request('auth/register', { data: client });
+  const login = await app.request('auth/login', { data: client });
+  const cookie = login.cookie.split(';')[0];
+  const created = await app.request('projects', { data: input, cookie });
+  assert.equal(created.status, 201);
+  const id = created.body.project.id;
+  const db = new DatabaseSync(file);
+  const project = JSON.parse(db.prepare('SELECT data FROM projects WHERE id = ?').get(id).data);
+  project.created = '2020-01-01';
+  db.prepare('UPDATE projects SET data = ? WHERE id = ?').run(JSON.stringify(project), id);
+  db.close();
+  const before = (await app.request('workspace', { cookie })).body;
+  await app.close();
+  app = await listen(file);
+  const after = (await app.request('workspace', { cookie })).body;
+  assert.deepEqual(after, before);
+  assert.equal(after.projects[0].id, id);
+  assertStorageTarget({ driver: 'sqlite' }, { driver: 'sqlite' });
+  assert.throws(() => assertStorageTarget({ driver: 'mongodb', database: 'saved' }, { driver: 'sqlite' }), /Không tự chuyển/);
+});
+
+test('công khai theo giai đoạn chỉ có ID dự án, khối lượng và địa chỉ ví', async () => {
+  const from = '0x1000000000000000000000000000000000000001';
+  const to = '0x2000000000000000000000000000000000000002';
+  const store = { readWorkspace: async () => ({ projects: [{ id: 9, title: 'private title', description: 'private brief', fesc: {} }],
+    txs: [{ id: '0x' + 'a'.repeat(64), currency: 'FESC', projectId: 9, project: 'private title',
+      publicPayment: { stage: 'Milestone 2', from, to, amount: '40' }, email: 'secret@example.test' },
+    { id: 'DEMO-123', currency: 'MOCK', projectId: 9, publicPayment: { from, to } }] }) };
+  const result = await publicProjectPayments(store, {});
+  assert.deepEqual(result, { payments: [{ projectId: 9, stage: 'Milestone 2', from, to, amount: '40', currency: 'FESC' }] });
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  assert.equal((await publicProjectPayments(store, {}, 'not-a-wallet')).payments.length, 0);
+  assert.equal((await publicProjectPayments(store, {}, from)).payments.length, 1);
+});
+
+test('giới hạn OTP theo email vẫn có hiệu lực sau nhiều lần gửi lại', async t => {
+  const app = await listen(':memory:'); t.after(app.close);
+  let start = await app.rawRequest('auth/register', { data: client });
+  const cookie = start.cookie.split(';')[0];
+  for (let i = 1; i < 10; i++) {
+    app.advance(61_000);
+    start = await app.rawRequest('auth/resend', { data: { challengeId: start.body.challengeId }, cookie });
+    assert.equal(start.status, 202);
+  }
+  app.advance(61_000);
+  assert.equal((await app.rawRequest('auth/resend', { data: { challengeId: start.body.challengeId }, cookie })).status, 429);
+  assert.equal(app.mail.length, 10);
 });

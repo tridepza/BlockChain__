@@ -7,6 +7,20 @@ const readData = row => JSON.parse(row.data);
 export function sqlStore(db) {
   function operations(query, projectLock = '', sessionLock = '') {
     return {
+      async getAuthChallenge(id) {
+        const [row] = await query('SELECT data FROM auth_challenges WHERE id = ?' + projectLock, [id]);
+        return row ? readData(row) : null;
+      },
+      async getAuthChallengeForEmail(email, purpose) {
+        if (projectLock) await query('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`${purpose}:${email}`]);
+        const [row] = await query('SELECT data FROM auth_challenges WHERE email = ? AND purpose = ?' + projectLock, [email, purpose]);
+        return row ? readData(row) : null;
+      },
+      saveAuthChallenge: row => query(`INSERT INTO auth_challenges (id, email, purpose, expires, data) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(email, purpose) DO UPDATE SET id = excluded.id, expires = excluded.expires, data = excluded.data`,
+      [row.id, row.email, row.purpose, Math.max(row.expires, row.windowStart + 3_600_000), JSON.stringify(row)]),
+      deleteAuthChallenge: id => query('DELETE FROM auth_challenges WHERE id = ?', [id]),
+      pruneAuthChallenges: now => query('DELETE FROM auth_challenges WHERE expires <= ?', [now]),
       async getUserByEmail(email) {
         const [user] = await query('SELECT * FROM users WHERE email = ?', [email]);
         return user;
@@ -101,6 +115,11 @@ export function sqlStore(db) {
         return row && readData(row);
       },
       addTransaction: tx => query('INSERT INTO transactions (data) VALUES (?)', [JSON.stringify(tx)]),
+      async savePublicPayment(tx, payment) {
+        const rows = await query('SELECT id, data FROM transactions');
+        const row = rows.find(row => { const saved = readData(row); return saved.id === tx.id && saved.projectId === tx.projectId; });
+        if (row) await query('UPDATE transactions SET data = ? WHERE id = ?', [JSON.stringify({ ...readData(row), publicPayment: payment }), row.id]);
+      },
     };
   }
 

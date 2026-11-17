@@ -8,6 +8,27 @@ import { applyProjectAction, cents, currentMilestone, getSubmissionVersion, Work
 import { checkLocalDeployment } from './wallet.mjs';
 
 const rpc = createPublicClient({ chain: hardhat, transport: http(localChain.rpcUrl, { timeout: 3500, retryCount: 0 }) });
+const publicSync = new WeakMap();
+
+export async function reconcilePublicProjects(root, store) {
+  const previous = publicSync.get(store);
+  if (previous && Date.now() - previous.at < 5000) return previous.pending;
+  const pending = (async () => {
+    const { projects } = await store.readWorkspace();
+    for (const project of projects.filter(project => project.currency === 'FESC' && project.fesc && project.status !== 'Completed')) {
+      try {
+        await store.transaction(async writes => {
+          const latest = await writes.getProject(project.id);
+          if (latest) await projectFesc(root, writes, latest, { id: latest.ownerId, role: 'Client' });
+        });
+      } catch {
+        // An unavailable historical local chain cannot erase persisted payment history.
+      }
+    }
+  })();
+  publicSync.set(store, { at: Date.now(), pending });
+  return pending;
+}
 const day = 86400n;
 const units = amount => BigInt(cents(amount)) * 10n ** 16n;
 const hash = value => keccak256(stringToHex(JSON.stringify(value)));
@@ -132,11 +153,11 @@ export async function fescWalletBalance(root, wallet) {
   return { token, balance: formatUnits(balance, 18) };
 }
 
-function buildTerms(project, { deployment, client, freelancer, createBy }) {
-  const projectRef = hash(['FESC project', project.ownerId, project.id]);
+function buildTerms(project, { deployment, client, freelancer, createBy, reference }) {
+  const projectRef = hash(['FESC project', reference?.ownerId ?? project.ownerId, reference?.projectId ?? project.id]);
   return {
     projectRef,
-    agreementRef: hash([projectRef, deployment.instanceKey, project.freelancerId]),
+    agreementRef: hash([projectRef, deployment.instanceKey, reference?.freelancerId ?? project.freelancerId]),
     createBy: BigInt(createBy),
     freelancer,
     arbitrator: deployment.accounts.arbitrator,
@@ -154,7 +175,7 @@ function deliveryHash(project, milestone) {
   if (!latest?.preview?.sha256 || latest.version !== getSubmissionVersion(milestone)) {
     throw new WorkflowError(409, 'Chưa có bản bàn giao hợp lệ cho milestone FESC.');
   }
-  return hash([project.fesc.deployment.instanceKey, project.id, milestone.id, latest.id, latest.version,
+  return hash([project.fesc.deployment.instanceKey, project.fesc.reference?.projectId ?? project.id, milestone.id, latest.id, latest.version,
     latest.note, latest.preview.sha256, latest.original?.sha256]);
 }
 
@@ -187,7 +208,12 @@ async function reconcile(writes, project, chain) {
     project = result.project;
     await writes.saveProject(project);
     await writes.addTransaction({ ...result.transactions[0], ...receipt, projectId: project.id, project: project.title,
-      currency: 'FESC', status: 'Đã xác nhận' });
+      currency: 'FESC', status: 'Đã xác nhận', publicPayment: {
+        stage: input.action === 'fund' ? 'Ký quỹ' : `Milestone ${input.milestoneId}`,
+        amount: String(result.transactions[0].amount),
+        from: input.action === 'fund' ? client : escrow,
+        to: input.action === 'fund' ? escrow : freelancer,
+      } });
   }
 
   if (!project.funded && funded === units(project.budget)) {

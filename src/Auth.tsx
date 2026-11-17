@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ArrowRight, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { api, errorMessage } from './api';
@@ -8,6 +8,7 @@ import { categoryLabel } from './ui-labels';
 
 type PublicProject = Pick<Project, 'id' | 'title' | 'category' | 'description' | 'budget' | 'currency'>;
 type Mode = 'login' | 'register' | 'projects';
+type Challenge = { challengeId: string; email: string; purpose: 'register' | 'login'; expiresAt: number; resendAt: number };
 
 export default function Auth({ onLogin, onDemo, initialMessage }: {
   onLogin: (user: Account) => void;
@@ -21,13 +22,23 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
   const [error, setError] = useState('');
   const [message, setMessage] = useState(initialMessage);
   const [projects, setProjects] = useState<PublicProject[]>([]);
+  const [challenge, setChallenge] = useState<Challenge | null>(null);
+  const [code, setCode] = useState('');
+  const [clock, setClock] = useState(Date.now());
   const register = mode === 'register';
+  useEffect(() => {
+    if (!challenge) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [challenge]);
 
   function switchMode(next: Mode) {
     setMode(next);
     setShowPassword(false);
     setError('');
     setMessage('');
+    setChallenge(null);
+    setCode('');
   }
 
   async function browseProjects() {
@@ -53,21 +64,44 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
     }
     setBusy(true);
     try {
-      if (register) {
-        const result = await api<{ email: string }>('auth/register', {
-          name: form.name, role: form.role, email: form.email, password: form.password,
-        });
-        switchMode('login');
-        setEmail(result.email);
-        setMessage('Đăng ký thành công. Hãy đăng nhập để mở workspace.');
-      } else {
-        onLogin((await api<{ user: Account }>('auth/login', { email: form.email, password: form.password })).user);
-      }
+      const result = await api<Challenge>(register ? 'auth/register' : 'auth/login', {
+        ...(register ? { name: form.name, role: form.role } : {}), email: form.email, password: form.password,
+      });
+      setChallenge(result);
+      setCode('');
+      setClock(Date.now());
+      setMessage(`Đã gửi mã OTP tới ${result.email}. Kiểm tra hộp thư đến hoặc thư rác.`);
     } catch (error) {
       setError(errorMessage(error));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function confirmOtp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!challenge) return;
+    setBusy(true); setError('');
+    try {
+      const result = await api<{ email?: string; user?: Account }>('auth/verify', { challengeId: challenge.challengeId, code });
+      if (challenge.purpose === 'register') {
+        switchMode('login');
+        setEmail(result.email!);
+        setMessage('Đăng ký thành công. Email đã được xác nhận. Hãy đăng nhập để mở workspace.');
+      } else if (result.user) onLogin(result.user);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+
+  async function resend() {
+    if (!challenge) return;
+    setBusy(true); setError('');
+    try {
+      setChallenge(await api<Challenge>('auth/resend', { challengeId: challenge.challengeId }));
+      setCode(''); setClock(Date.now());
+      setMessage('Đã gửi mã OTP mới. Mã cũ không còn hiệu lực.');
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -82,8 +116,8 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
       </section>
       <section className="auth-content" aria-labelledby="auth-title">
         <div className="auth-card">
-          <h1 id="auth-title">{mode === 'projects' ? 'Dự án đang mở' : register ? 'Tạo tài khoản' : 'Đăng nhập'}</h1>
-          <p>{mode === 'projects' ? 'Khám phá các dự án đang tìm Freelancer.' : register
+          <h1 id="auth-title">{challenge ? 'Xác nhận email' : mode === 'projects' ? 'Dự án đang mở' : register ? 'Tạo tài khoản' : 'Đăng nhập'}</h1>
+          <p>{challenge ? `Nhập mã 6 chữ số gửi tới ${challenge.email} để ${register ? 'hoàn tất đăng ký' : 'đăng nhập'}.` : mode === 'projects' ? 'Khám phá các dự án đang tìm Freelancer.' : register
             ? 'Chọn vai trò phù hợp để bắt đầu.'
             : 'Dùng email và mật khẩu để vào không gian làm việc.'}</p>
           {message && <p className="form-message" role="status">{message}</p>}
@@ -101,7 +135,17 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
             </div>
           ) : (
             <>
-              <form className="auth-form" key={mode} onSubmit={submit}>
+              {challenge ? <form className="auth-form" onSubmit={confirmOtp}>
+                <fieldset disabled={busy}>
+                  <label>Mã OTP<input name="otp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" minLength={6} maxLength={6}
+                    required autoFocus value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="000000"/></label>
+                  <p className="hint" role="timer">{clock >= challenge.expiresAt ? 'Mã đã hết hạn. Hãy gửi lại mã.' : `Mã có hiệu lực trong ${Math.ceil((challenge.expiresAt - clock) / 1000)} giây.`}</p>
+                  <button className="primary full" type="submit" disabled={clock >= challenge.expiresAt}>{busy ? 'Đang xác nhận…' : 'Xác nhận'}</button>
+                  <button className="secondary full" type="button" disabled={clock < challenge.resendAt} onClick={() => void resend()}>
+                    {clock < challenge.resendAt ? `Gửi lại mã sau ${Math.ceil((challenge.resendAt - clock) / 1000)} giây` : 'Gửi lại mã OTP'}</button>
+                  <button className="text-btn" type="button" onClick={() => switchMode(mode)}>Quay lại nhập thông tin</button>
+                </fieldset>
+              </form> : <form className="auth-form" key={mode} onSubmit={submit}>
                 <fieldset disabled={busy}>
                   {register && <label>Họ và tên<input name="name" autoComplete="name" required minLength={2} maxLength={80}/></label>}
                   <label>Email<input name="email" type="email" autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} required maxLength={254} placeholder="ban@example.com"/></label>
@@ -111,12 +155,13 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
                     <button type="button" aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff size={18}/> : <Eye size={18}/>}</button>
                   </div>
                   {register && <>
+                    <p className="hint">Từ 12 đến 128 ký tự, gồm chữ thường, số và ký tự đặc biệt (ví dụ !, @, #).</p>
                     <label>Xác nhận mật khẩu<input name="confirm" type="password" autoComplete="new-password" required maxLength={128}/></label>
                     <label>Vai trò<select name="role" defaultValue="Client"><option>Client</option><option>Freelancer</option></select></label>
                   </>}
                   <button className="primary full" type="submit">{busy ? 'Đang xử lý…' : register ? 'Đăng ký' : 'Đăng nhập'} <ArrowRight size={17}/></button>
                 </fieldset>
-              </form>
+              </form>}
               <div className="auth-switch">{register ? 'Đã có tài khoản?' : 'Chưa có tài khoản?'} <button className="text-btn" disabled={busy} onClick={() => switchMode(register ? 'login' : 'register')}>{register ? 'Đăng nhập' : 'Đăng ký'}</button></div>
               <div className="auth-links">
                 <button className="secondary" disabled={busy} onClick={browseProjects}>Xem dự án công khai</button>

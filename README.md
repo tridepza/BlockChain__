@@ -35,7 +35,56 @@ $env:NODE_USE_SYSTEM_CA = '1'
 npm.cmd ci --cache .npm-cache --no-audit --no-fund
 ```
 
-## Kết nối MongoDB Atlas
+## Lưu trữ dữ liệu
+
+### Giữ và khôi phục dữ liệu dự án
+
+Sau lần chạy thành công, ứng dụng ghi nơi lưu dữ liệu vào `.data/database-target.json`. Khi cấu hình thay đổi hoặc database cũ không kết nối được, backend báo lỗi thay vì tự mở database khác. Không xóa `.data` khi khởi động lại. Dữ liệu tài khoản và dự án không có thời hạn theo ngày; phiên đăng nhập hết hạn không xóa dự án.
+
+Nếu đã tạo dữ liệu ở SQLite hoặc PostgreSQL rồi chuyển sang MongoDB, có thể kiểm tra và hợp nhất bằng:
+
+```powershell
+npm.cmd run db:migrate
+npm.cmd run db:select -- mongodb
+npm.cmd run db:recover -- sqlite
+npm.cmd run db:recover -- sqlite --apply
+npm.cmd run db:recover -- postgres
+npm.cmd run db:recover -- postgres --apply
+```
+
+Không có `--apply` thì chỉ kiểm tra. Lệnh khôi phục sao lưu MongoDB vào `.data/backups` trước khi ghi, giữ nguồn cũ, đối chiếu tài khoản theo email, giữ mật khẩu hiện có ở đích, chuyển dự án, giao dịch và tệp bàn giao, đồng thời tránh nhập lại dự án đã khôi phục. Các tham chiếu điều khoản FESC cũ được giữ khi ID dự án thay đổi. Ví đã thuộc tài khoản khác không bị chuyển chủ; số liên kết xung đột được báo sau khi nhập. Số dư MOCK chỉ được nhập cho tài khoản mới để tránh cộng lặp vào tài khoản đã có.
+
+Để chủ động đổi database, chạy `npm.cmd run db:select -- <mongodb|postgres|sqlite>` sau khi chuẩn bị database đích và khởi động lại website. Chuyển database không tự chuyển dữ liệu.
+
+Hardhat Local là blockchain thử trong bộ nhớ: khởi động lại node làm mất trạng thái hợp đồng. Việc này không xóa dự án đã lưu trong database. Các giao dịch mới có bản chiếu công khai lưu cùng lịch sử, còn hợp đồng cũ cần đúng trạng thái blockchain cũ để tiếp tục thao tác.
+
+## Gmail SMTP và xác nhận OTP
+
+Đăng ký cần xác nhận OTP trước khi tài khoản được tạo. Đăng nhập cần đúng mật khẩu và xác nhận OTP trước khi cấp cookie phiên. Mã được gửi tới email người dùng nhập; tài khoản Gmail cấu hình SMTP là bên đứng ra gửi thư.
+
+1. Sao chép `.env.mail.example` thành `.env.mail.local`.
+2. Bật xác minh hai bước cho Gmail gửi thư, rồi tạo [Mật khẩu ứng dụng theo hướng dẫn Google](https://support.google.com/accounts/answer/185833?hl=vi). Điền địa chỉ Gmail vào `SMTP_USER`, Mật khẩu ứng dụng vào `SMTP_PASSWORD`, và địa chỉ Gmail gửi vào `SMTP_FROM`. Không dùng mật khẩu đăng nhập Gmail thông thường. Tệp cấu hình này được Git bỏ qua và bị chặn qua HTTP.
+3. Chạy `npm.cmd run mail:check` để kiểm tra kết nối, rồi khởi động lại website. Lệnh kiểm tra không gửi thư.
+
+```dotenv
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=sender@gmail.com
+SMTP_PASSWORD=your-16-character-app-password
+SMTP_FROM="Freelancer Escrow <sender@gmail.com>"
+```
+
+Gmail dùng TLS cho [SMTP cổng 465](https://developers.google.com/workspace/gmail/imap/imap-smtp). OTP có 6 chữ số, hết hạn sau 5 phút, dùng một lần, tối đa 5 lần nhập sai; gửi lại sau 60 giây và tối đa 10 mã mỗi giờ cho mỗi email/loại thao tác. Mã mới vô hiệu hóa mã cũ. Mã được băm và ràng buộc với trình duyệt gửi yêu cầu; OTP không được trả về qua API hoặc ghi vào log. Các yêu cầu OTP còn hiệu lực được lưu qua lần khởi động lại backend.
+
+Mật khẩu đăng ký phải có 12–128 ký tự, gồm chữ thường, chữ số và ký tự đặc biệt. Tài khoản cũ giữ mật khẩu hiện có và cũng phải xác nhận OTP khi đăng nhập. Thiếu cấu hình SMTP hoặc gửi thư thất bại thì không tạo tài khoản hay cấp phiên đăng nhập. Các bài kiểm thử dùng hàm gửi thư riêng trong server kiểm thử, không gửi email thật.
+
+## Giao dịch dự án công khai
+
+Mở `/explorer` để xem các dự án FESC đã có giao dịch được xác nhận, nhóm theo giai đoạn ký quỹ và từng milestone. Mỗi giai đoạn chỉ có khối lượng FESC, ví thanh toán và ví nhận, dưới ID dự án. API `/api/explorer/projects` không trả tên người dùng, email, tên/mô tả dự án hoặc tệp bàn giao. Có thể lọc theo ID dự án hoặc địa chỉ ví. Giao dịch MOCK và yêu cầu chưa được xác nhận không được đưa vào danh sách này.
+
+Giao dịch cũ chưa có bản chiếu sẽ được đọc từ receipt nếu blockchain cũ còn tồn tại rồi lưu lại; không suy đoán địa chỉ nhận khi không còn receipt.
+
+## Cấu hình MongoDB Atlas
 
 1. Trong Atlas, vào **Connect → Drivers** của cluster và lấy URI. Cấp quyền `readWrite` trên database `freelancer_escrow` cho tài khoản kết nối và thêm IP của mỗi máy vào **Network Access**.
 2. Sao chép `.env.mongo.example` thành `.env.mongo.local` ở thư mục gốc. Điền URI vào `MONGODB_URI`. Mỗi máy giữ tệp cục bộ riêng và dùng cùng tên `MONGODB_DB` để chia sẻ dữ liệu.
