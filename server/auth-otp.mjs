@@ -21,6 +21,7 @@ export function authOtp(store, sendOtp, now = Date.now) {
     const row = { id: randomUUID(), email, purpose, payload, binding: digest(binding),
       salt, hash: (await codeHash(code, salt)).toString('hex'), expires: timestamp + lifetime,
       resendAt: timestamp + cooldown, attempts: 0, ready: false };
+    let previousReady;
     try { await store.transaction(async writes => {
       await writes.pruneAuthChallenges(timestamp);
       const previous = await writes.getAuthChallengeForEmail(email, purpose);
@@ -29,6 +30,7 @@ export function authOtp(store, sendOtp, now = Date.now) {
       row.windowStart = sameWindow ? previous.windowStart : timestamp;
       row.sent = sameWindow ? previous.sent + 1 : 1;
       if (row.sent > 10) throw new WorkflowError(429, 'Đã đạt giới hạn gửi OTP. Hãy thử lại sau một giờ.');
+      previousReady = previous?.ready ? previous : null;
       await writes.saveAuthChallenge(row);
     }); } catch (error) {
       if (error.code === 11000) throw new WorkflowError(429, 'Vui lòng chờ 60 giây trước khi yêu cầu mã OTP tiếp theo.');
@@ -38,7 +40,15 @@ export function authOtp(store, sendOtp, now = Date.now) {
       try {
         if (!payload.silent) await sendOtp({ email, purpose, code });
       } catch (error) {
-        await store.transaction(writes => writes.deleteAuthChallenge(row.id));
+        await store.transaction(async writes => {
+          const current = await writes.getAuthChallengeForEmail(email, purpose);
+          // A slow failed send must not replace a newer browser's challenge.
+          if (current?.id !== row.id) return;
+          if (previousReady) await writes.saveAuthChallenge({ ...previousReady,
+            windowStart: current.windowStart, sent: current.sent, resendAt: current.resendAt });
+          // With no previous usable challenge, retain the unready row so SMTP
+          // failures cannot reset the cooldown/hourly budget. It cannot verify.
+        });
         throw error;
       }
       await store.transaction(async writes => {

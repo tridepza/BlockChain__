@@ -14,6 +14,8 @@ Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/
 
 ## Chạy website local
 
+Để chạy đầy đủ web/API và blockchain sau khi mở lại máy, xem [hai terminal khởi động và lệnh kiểm tra hệ thống](docs/chay-lai-sau-khi-mo-may.md).
+
 Yêu cầu Node.js 24 trở lên. Mở PowerShell tại thư mục dự án rồi chạy:
 
 ```powershell
@@ -56,7 +58,7 @@ Không có `--apply` thì chỉ kiểm tra. Lệnh khôi phục sao lưu MongoDB
 
 Để chủ động đổi database, chạy `npm.cmd run db:select -- <mongodb|postgres|sqlite>` sau khi chuẩn bị database đích và khởi động lại website. Chuyển database không tự chuyển dữ liệu.
 
-`chain:node` hiện dùng Anvil có lưu trạng thái, vẫn giữ RPC `127.0.0.1:8545`, Chain ID `31337` và tên mạng Hardhat Local để tương thích MetaMask. State, token, số dư, block và receipt được lưu vào `.data/chain/state.json`, nạp lại khi mở node. RPC chỉ trả kết quả giao dịch sau khi giao dịch vào block và checkpoint đã ghi xong ra đĩa; có checkpoint bổ sung mỗi 30 giây khi phát hiện block mới. Không xóa thư mục này và không chạy lại deploy token mỗi ngày. Chương trình từ chối mở chain rỗng khi đã có deployment mà thiếu state.
+`chain:node` dùng Hardhat với nhật ký block và giao dịch đã ký cho chain mới, vẫn giữ RPC `127.0.0.1:8545`, Chain ID `31337` và tên mạng Hardhat Local để tương thích MetaMask. Nhật ký tại `.data/chain/state.json` được phát lại và kiểm tra hash khi mở node, giữ token, số dư, block và receipt. RPC chỉ xác nhận giao dịch sau khi nhật ký đã được ghi bền vững ra đĩa. Cách chạy này không cần Anvil trên Windows. State Anvil đã tồn tại vẫn dùng backend Anvil cũ, không tự chuyển đổi định dạng. Không xóa thư mục này và không chạy lại deploy token mỗi ngày. Chương trình từ chối mở chain rỗng khi đã có deployment mà thiếu state.
 
 Nếu đang dùng node Hardhat trong bộ nhớ, giữ node đó chạy, dừng gửi giao dịch và chạy `npm.cmd run chain:migrate`. Lệnh sao lưu các giao dịch đã ký, tái hiện trên node tạm và kiểm tra hash giao dịch, trạng thái receipt, bytecode, nonce và số dư trước khi ghi state mới. Sau đó dừng node cũ, chạy `npm.cmd run chain:node` và `npm.cmd run chain:adopt`. Lệnh adopt chỉ cập nhật block xác minh; token, ví và giao dịch không được phát hành lại. Các trạng thái đã mất từ trước khi có bản sao lưu không thể suy ra chỉ từ database ứng dụng.
 
@@ -69,6 +71,16 @@ Kiểm tra dữ liệu mất liên kết bằng `npm.cmd run db:cleanup`. Thêm 
 1. Sao chép `.env.mail.example` thành `.env.mail.local`.
 2. Bật xác minh hai bước cho Gmail gửi thư, rồi tạo [Mật khẩu ứng dụng theo hướng dẫn Google](https://support.google.com/accounts/answer/185833?hl=vi). Điền địa chỉ Gmail vào `SMTP_USER`, Mật khẩu ứng dụng vào `SMTP_PASSWORD`, và địa chỉ Gmail gửi vào `SMTP_FROM`. Không dùng mật khẩu đăng nhập Gmail thông thường. Tệp cấu hình này được Git bỏ qua và bị chặn qua HTTP.
 3. Chạy `npm.cmd run mail:check` để kiểm tra kết nối, rồi khởi động lại website. Lệnh kiểm tra không gửi thư.
+
+`SMTP_FROM` phải là địa chỉ gửi thật, không để `your-sender@gmail.com` trong tệp mẫu. Với Gmail thông thường, dùng cùng địa chỉ với `SMTP_USER`. Xác thực SMTP thành công chỉ chứng minh máy chủ kết nối được, không chứng minh thư đã vào Inbox của người nhận.
+
+Để chủ động gửi **một email kiểm tra thật** tới hộp thư của bạn (không chứa OTP và không đổi tài khoản), chạy:
+
+```powershell
+npm.cmd run mail:test -- --to dia-chi-cua-ban@gmail.com
+```
+
+Kiểm tra Inbox, Thư rác và Tất cả thư. Terminal backend ghi `OTP SMTP accepted` khi SMTP chấp nhận đúng người nhận, hoặc `OTP SMTP failed` kèm mã lỗi đã lọc nếu gửi thất bại. Log không chứa OTP, mật khẩu hay địa chỉ người nhận. Trạng thái accepted vẫn chưa chứng minh thư đã tới Inbox.
 
 ```dotenv
 SMTP_HOST=smtp.gmail.com
@@ -99,9 +111,19 @@ Luồng này dùng [approve/transferFrom và SafeERC20 của OpenZeppelin](https
 
 ## Giao dịch dự án công khai
 
-Mở `/explorer` để xem các dự án FESC đã có giao dịch được xác nhận, nhóm theo giai đoạn ký quỹ và từng milestone. Mỗi giai đoạn chỉ có khối lượng FESC, ví thanh toán và ví nhận, dưới ID dự án. API `/api/explorer/projects` không trả tên người dùng, email, tên/mô tả dự án hoặc tệp bàn giao. Có thể lọc theo ID dự án hoặc địa chỉ ví. Giao dịch MOCK và yêu cầu chưa được xác nhận không được đưa vào danh sách này.
+Mở `/explorer` không cần đăng nhập để xem **Lịch sử giao dịch** FESC trên blockchain hiện tại: mã giao dịch, block, thời gian, ví gửi, ví nhận, số tiền và số xác nhận. Tìm bằng địa chỉ ví hoặc mã giao dịch đầy đủ; dùng **Xem thêm** để đọc các block cũ hơn. Liên kết `/explorer?q=<mã giao dịch>` từ ví hoặc bảng giao dịch mở thẳng kết quả tra cứu. Giao dịch nạp/rút vault, chuyển FESC giữa ví và thanh toán hợp đồng đều xuất hiện nếu có sự kiện chuyển token thành công.
+
+API `/api/explorer/transfers` đọc sự kiện `Transfer` và đối chiếu receipt thành công với block trên chain. Không đưa giao dịch chờ, bị hoàn tác, MOCK, cấp quyền token hoặc phát hành/đốt token vào lịch sử chuyển tiền. Mỗi dòng chỉ có hash, vị trí log, block, thời gian, ví gửi/nhận và lượng FESC. API không công khai email, tên tài khoản, nội dung dự án hoặc tệp bàn giao. Một giao dịch có thể có nhiều dòng nếu nó thực hiện nhiều lần chuyển token; từng dòng được phân biệt bằng hash và vị trí log.
+
+Tab **Theo dự án** giữ lịch sử đã ghi nhận theo giai đoạn ký quỹ và milestone, tìm bằng ID dự án hoặc địa chỉ ví. Mỗi giai đoạn chỉ có khối lượng FESC, ví thanh toán và ví nhận, dưới ID dự án. API `/api/explorer/projects` không trả tên người dùng, email, tên/mô tả dự án hoặc tệp bàn giao. Bản ghi của chain trước không phải bằng chứng số dư hiện tại trên chain mới.
+
+Tab **Top FESC** tại `/explorer?view=holders` xếp tối đa 100 địa chỉ giữ nhiều FESC nhất theo số dư giảm dần, gồm ví và hợp đồng. Bảng hiển thị hạng, địa chỉ, loại địa chỉ và số dư chính xác tại block đang đọc. Bấm địa chỉ để xem số dư cùng lịch sử chuyển FESC có ngày, giờ Việt Nam và mã giao dịch; bấm **Làm mới** để cập nhật sau giao dịch. Địa chỉ chưa đăng ký tài khoản web vẫn được tính, không công khai danh tính chủ ví.
+
+API `/api/explorer/holders` tìm địa chỉ từ toàn bộ sự kiện token, gồm phát hành ban đầu, rồi đọc số dư và tổng cung tại cùng một block. Địa chỉ số dư bằng 0 không được xếp hạng. Backend đối chiếu tổng số dư với tổng cung và từ chối trả bảng không đầy đủ khi RPC lỗi hoặc chain đổi trong lúc tra cứu. Số dư trong trang địa chỉ là số FESC tại địa chỉ đó; FESC đã gửi vào vault nằm ở địa chỉ hợp đồng vault.
 
 Giao dịch cũ chưa có bản chiếu sẽ được đọc từ receipt nếu blockchain cũ còn tồn tại rồi lưu lại; không suy đoán địa chỉ nhận khi không còn receipt.
+
+Đây là trình tra cứu **FESC trên Hardhat Local**, không phải mạng Bitcoin hoặc dịch vụ nạp/rút BTC, VND hay ETH. Truy cập công khai nghĩa là không cần tài khoản ứng dụng; bản chạy local vẫn chỉ mở ở địa chỉ/cổng của máy đang chạy web và RPC.
 
 ## Cấu hình MongoDB Atlas
 

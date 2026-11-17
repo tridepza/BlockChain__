@@ -8,7 +8,7 @@ import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
 import { walletLinking } from './wallet.mjs';
 import { localFunding } from './local-funding.mjs';
-import { fescActions, fescWalletBalance, projectFesc, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
+import { fescActions, fescWalletBalance, projectFesc, publicFescHolders, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
 import { authOtp, validPassword } from './auth-otp.mjs';
 import { otpMailer } from './mail.mjs';
 import { publicProjectPayments } from './public-projects.mjs';
@@ -157,6 +157,9 @@ function createDatabaseApi(store, root, options = {}) {
     if (method === 'GET' && path === '/api/explorer/transfers') {
       const params = new URLSearchParams(req.url.slice(path.length + 1));
       return json(res, 200, await publicFescTransfers(root, params));
+    }
+    if (method === 'GET' && path === '/api/explorer/holders') {
+      return json(res, 200, await publicFescHolders(root));
     }
     if (method === 'GET' && path === '/api/explorer/projects') {
       const params = new URLSearchParams(req.url.slice(path.length + 1));

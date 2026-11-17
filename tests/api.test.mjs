@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { createServer as createViteServer, preview, resolveConfig } from 'vite';
-import { createPublicClient, createWalletClient, http, keccak256, parseUnits, toHex } from 'viem';
+import { createPublicClient, createWalletClient, decodeFunctionData, encodeEventTopics, encodeFunctionData, encodeFunctionResult, http, keccak256, parseAbi, parseUnits, toHex, zeroAddress } from 'viem';
 import { hardhat } from 'viem/chains';
 import { mnemonicToAccount } from 'viem/accounts';
 import { createApi } from '../server/api.mjs';
@@ -14,6 +14,7 @@ import { WorkflowError } from '../src/workflow.ts';
 import { publicProjectPayments } from '../server/public-projects.mjs';
 import { assertStorageTarget } from '../server/storage-target.mjs';
 import { integrityPlan } from '../server/integrity.mjs';
+import { projectFesc } from '../server/project-fesc.mjs';
 
 const password = 'mật-khẩu-test-2026';
 const client = { name: 'Tên trùng', email: 'owner@example.test', password, role: 'Client' };
@@ -105,6 +106,27 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
     vaultCodeHash: keccak256(await rpc.getCode({ address: vaultReceipt.contractAddress })),
     vaultStartBlock: String(vaultReceipt.blockNumber),
   }));
+  const holders = async expected => {
+    const result = await app.request('explorer/holders');
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.deepEqual(Object.keys(result.body).sort(), ['chainId', 'holders', 'latestBlock', 'token', 'totalHolders', 'totalSupply']);
+    assert.equal(result.body.token.toLowerCase(), token.toLowerCase());
+    assert.equal(result.body.chainId, 31337);
+    assert.equal(result.body.totalSupply, '1000');
+    assert.equal(result.body.totalHolders, expected.length);
+    assert.deepEqual(result.body.holders.map(row => [row.address.toLowerCase(), row.balance, row.kind]),
+      expected.map(([address, balance, kind = 'wallet']) => [address.toLowerCase(), balance, kind]));
+    assert.equal(result.body.holders.reduce((sum, row) => sum + parseUnits(row.balance, 18), 0n), parseUnits('1000', 18));
+    result.body.holders.forEach((row, index) => {
+      assert.deepEqual(Object.keys(row).sort(), ['address', 'balance', 'kind', 'rank']);
+      assert.equal(row.rank, index + 1);
+      assert.notEqual(row.address.toLowerCase(), zeroAddress);
+    });
+    return result.body;
+  };
+  // Token creation precedes the factory start block. Mint recipients still
+  // belong in the holder table before any ordinary transfer has happened.
+  const initialHolders = await holders([[owner.account.address, '1000']]);
   async function post(path, data, cookie, status = 200) {
     const result = await app.request(path, { data, cookie, headers: { Origin: app.origin } });
     assert.equal(result.status, status, `${path} ${data.action ?? ''}: ${JSON.stringify(result.body)}`);
@@ -146,6 +168,9 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   const publicFunding = await app.request(fundingQuery);
   assert.equal(publicFunding.status, 200);
   assert.deepEqual(await app.request(fundingQuery, { cookie: outsiderCookie }), publicFunding);
+  assert.deepEqual(Object.keys(publicFunding.body).sort(), ['chainId', 'latestBlock', 'next', 'token', 'transfers']);
+  assert.equal(publicFunding.body.chainId, 31337);
+  assert.ok(BigInt(publicFunding.body.latestBlock) >= funding.blockNumber);
   const [deposit] = publicFunding.body.transfers;
   assert.deepEqual(Object.keys(deposit).sort(), ['amount', 'block', 'from', 'hash', 'logIndex', 'time', 'to']);
   assert.equal(deposit.from.toLowerCase(), owner.account.address.toLowerCase());
@@ -157,6 +182,7 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.deepEqual(Object.keys(publicProject[0]).sort(), ['amount', 'currency', 'from', 'projectId', 'stage', 'to']);
   assert.equal((await state(clientCookie)).held, '0.3');
   assert.equal((await state(clientCookie)).balance, '999.7');
+  await holders([[owner.account.address, '999.7'], [escrow, '0.3', 'contract']]);
   await execute('start', freelancerCookie, freelancer);
 
   for (const [milestoneId, total] of [[1, '0.1'], [2, '0.3']]) {
@@ -194,10 +220,12 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [freelancer.account.address] }), parseUnits('0.3', 18));
   const phases = (await app.request('explorer/projects')).body.payments;
   assert.deepEqual(phases.map(row => [row.stage, row.amount]), [['Ký quỹ', '0.3'], ['Milestone 1', '0.1'], ['Milestone 2', '0.2']]);
+  const vaultOperations = [];
   async function vaultAction(action, amount) {
     const { body } = await post('wallet/fesc-account', { action, amount, address: owner.account.address }, freelancerCookie);
     assert.equal(body.from.toLowerCase(), freelancer.account.address.toLowerCase());
-    await confirm(await freelancer.sendTransaction({ to: body.to, data: body.data }));
+    const receipt = await confirm(await freelancer.sendTransaction({ to: body.to, data: body.data }));
+    vaultOperations.push({ step: body.step, amount, receipt });
     return body.step;
   }
   assert.equal(await vaultAction('deposit', '0.1'), 'approve');
@@ -205,6 +233,8 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   let vaultBalance = (await post('wallet/fesc-account', {}, freelancerCookie)).body;
   assert.equal(vaultBalance.accountBalance, '0.1');
   assert.equal(vaultBalance.walletBalance, '0.2');
+  const depositedHolders = await holders([[owner.account.address, '999.7'],
+    [freelancer.account.address, '0.2'], [vaultReceipt.contractAddress, '0.1', 'contract']]);
   await post('wallet/fesc-account', { action: 'withdraw', amount: '0.11' }, freelancerCookie, 409);
   await post('wallet/fesc-account', { action: 'withdraw', amount: '0.01' }, outsiderCookie, 409);
   assert.equal(await vaultAction('withdraw', '0.04'), 'withdraw');
@@ -213,6 +243,24 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(vaultBalance.accountBalance, '0');
   assert.equal(vaultBalance.walletBalance, '0.3');
   assert.equal(vaultBalance.history.length, 3);
+  const withdrawnHolders = await holders([[owner.account.address, '999.7'], [freelancer.account.address, '0.3']]);
+  const vaultAddress = vaultReceipt.contractAddress;
+  const vaultHistory = (await app.request('explorer/transfers?q=' + vaultAddress)).body;
+  assert.equal(vaultHistory.chainId, 31337);
+  assert.deepEqual(vaultHistory.wallet, { address: vaultAddress.toLowerCase(), balance: '0', kind: 'contract' });
+  assert.deepEqual(vaultHistory.transfers.map(row => [row.from.toLowerCase(), row.to.toLowerCase(), row.amount]), [
+    [vaultAddress.toLowerCase(), freelancer.account.address.toLowerCase(), '0.06'],
+    [vaultAddress.toLowerCase(), freelancer.account.address.toLowerCase(), '0.04'],
+    [freelancer.account.address.toLowerCase(), vaultAddress.toLowerCase(), '0.1'],
+  ]);
+  for (const operation of vaultOperations) {
+    const result = (await app.request('explorer/transfers?q=' + operation.receipt.transactionHash)).body;
+    assert.equal(result.transfers.length, operation.step === 'approve' ? 0 : 1);
+    if (operation.step !== 'approve') {
+      assert.equal(result.transfers[0].hash, operation.receipt.transactionHash);
+      assert.equal(result.transfers[0].amount, operation.amount);
+    }
+  }
 
   const outgoing = await confirm(await freelancer.writeContract({ address: token, abi: coin.abi,
     functionName: 'transfer', args: [owner.account.address, 1n] }));
@@ -224,11 +272,33 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(direct.from.toLowerCase(), freelancer.account.address.toLowerCase());
   assert.equal(direct.to.toLowerCase(), owner.account.address.toLowerCase());
   assert.equal(direct.amount, '0.000000000000000001');
+  assert.equal(publicWallet.chainId, 31337);
+  assert.deepEqual(publicWallet.wallet, { address: freelancer.account.address.toLowerCase(), balance: '0.299999999999999999', kind: 'wallet' });
+  assert.ok(BigInt(publicWallet.latestBlock) >= outgoing.blockNumber);
   assert.deepEqual(payouts.map(row => row.amount), ['0.2', '0.1']);
   assert.ok(payouts.every(row => row.from.toLowerCase() === escrow.toLowerCase() &&
     row.to.toLowerCase() === freelancer.account.address.toLowerCase()));
   assert.deepEqual((await app.request('explorer/transfers?q=0x' + '0'.repeat(64))).body.transfers, []);
   assert.equal((await app.request('explorer/transfers?q=khong-hop-le')).status, 400);
+  assert.deepEqual((await app.request('explorer/transfers?q=' + tokenReceipt.transactionHash)).body.transfers, [], 'mint is not a completed transfer between wallets');
+  const outgoingCursor = `${instanceKey}:${outgoing.blockNumber}:${direct.logIndex}`;
+  assert.deepEqual((await app.request(walletQuery + '&before=' + encodeURIComponent(outgoingCursor))).body.transfers
+    .filter(row => row.hash === outgoing.transactionHash), []);
+  assert.deepEqual((await app.request('explorer/transfers?q=' + outgoing.transactionHash + '&before=' + encodeURIComponent(outgoingCursor))).body.transfers, []);
+  assert.equal((await app.request('explorer/transfers?before=invalid')).status, 400);
+  assert.equal((await app.request('explorer/transfers?before=' + encodeURIComponent('0x' + 'a'.repeat(64) + ':1'))).status, 409);
+  assert.equal((await app.request('explorer/transfers?before=' + encodeURIComponent(`${instanceKey}:${outgoing.blockNumber + 10000n}`))).status, 400);
+
+  // An explicitly signed, mined revert must never appear in the explorer.
+  const revertedRequest = await freelancer.prepareTransactionRequest({
+    to: token, gas: 100_000n,
+    data: encodeFunctionData({ abi: coin.abi, functionName: 'transfer', args: [owner.account.address, parseUnits('1000', 18)] }),
+  });
+  const revertedRaw = await freelancer.signTransaction(revertedRequest);
+  const revertedHash = keccak256(revertedRaw);
+  await freelancer.sendRawTransaction({ serializedTransaction: revertedRaw }).catch(() => {});
+  assert.equal((await rpc.waitForTransactionReceipt({ hash: revertedHash })).status, 'reverted');
+  assert.deepEqual((await app.request('explorer/transfers?q=' + revertedHash)).body.transfers, []);
 
   for (let index = 0; index < 18; index++) {
     await confirm(await owner.writeContract({ address: token, abi: coin.abi,
@@ -241,6 +311,171 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   assert.equal(secondPage.transfers.length, 5);
   assert.equal(secondPage.next, null);
   assert.equal(new Set([...firstPage.transfers, ...secondPage.transfers].map(row => row.hash)).size, 25);
+  assert.equal(firstPage.chainId, 31337);
+  assert.ok(BigInt(secondPage.latestBlock) >= BigInt(firstPage.latestBlock));
+  for (const row of [...firstPage.transfers, ...secondPage.transfers]) {
+    assert.deepEqual(Object.keys(row).sort(), ['amount', 'block', 'from', 'hash', 'logIndex', 'time', 'to']);
+    const receipt = await rpc.getTransactionReceipt({ hash: row.hash });
+    assert.equal(receipt.status, 'success');
+    assert.equal((await rpc.getBlock({ blockNumber: BigInt(row.block) })).hash, receipt.blockHash);
+  }
+  const publicJson = JSON.stringify([firstPage, secondPage, vaultHistory, publicWallet, initialHolders, depositedHolders, withdrawnHolders]);
+  for (const privateValue of [client.email, worker.email, outsider.email, input.title, input.description, 'original data']) {
+    assert.equal(publicJson.includes(privateValue), false);
+  }
+
+  // A provider returning a stale log/receipt must not publish unverified history.
+  const actualFetch = globalThis.fetch;
+  let corrupt = '';
+  const intercept = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const response = await actualFetch(url, options);
+    if (new URL(String(url)).origin !== 'http://127.0.0.1:8545') return response;
+    const request = JSON.parse(options.body);
+    const data = await response.json();
+    if (request.method === 'eth_getTransactionReceipt' && request.params[0] === outgoing.transactionHash) {
+      if (corrupt === 'pending') data.result = null;
+      if (corrupt === 'reverted') data.result.status = '0x0';
+      if (corrupt === 'removed') data.result.logs.forEach(log => { log.removed = true; });
+      if (corrupt === 'receipt-log') data.result.logs = [];
+    }
+    if (corrupt === 'orphaned' && request.method === 'eth_getBlockByNumber' && BigInt(request.params[0]) === outgoing.blockNumber) {
+      data.result.hash = '0x' + 'f'.repeat(64);
+    }
+    return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
+  });
+  for (const failure of ['pending', 'reverted', 'removed', 'receipt-log', 'orphaned']) {
+    corrupt = failure;
+    const result = await app.request('explorer/transfers?q=' + outgoing.transactionHash);
+    assert.equal(result.status, 200, failure);
+    assert.deepEqual(result.body.transfers, [], failure);
+  }
+  // For the general log-list path, matching a receipt event is mandatory too.
+  corrupt = 'receipt-log';
+  assert.equal((await app.request(walletQuery)).body.transfers.some(row => row.hash === outgoing.transactionHash), false);
+  intercept.mock.restore();
+});
+
+test('public FESC holders include initial mints, rank exact balances, and fail closed on incomplete RPC snapshots', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-public-holders-'));
+  await mkdir(join(root, '.hardhat'));
+  const address = index => '0x' + BigInt(index).toString(16).padStart(40, '0');
+  const token = address(1000), factory = address(1001), contract = address(106), emptied = address(107);
+  const code = '0x6000';
+  const head = 1005n;
+  const blockHash = number => '0x' + BigInt(number).toString(16).padStart(64, '0');
+  const deployment = { chainId: 31337, token, factory, instanceKey: '0x' + 'a'.repeat(64),
+    startBlock: '5', startBlockHash: blockHash(5), tokenCodeHash: keccak256(code), factoryCodeHash: keccak256(code) };
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify(deployment));
+  const app = await listen(':memory:', root);
+  t.after(async () => { await app.close(); await rm(root, { recursive: true }); });
+  const abi = parseAbi([
+    'function instanceKey() view returns (bytes32)', 'function token() view returns (address)',
+    'function balanceOf(address owner) view returns (uint256)', 'function totalSupply() view returns (uint256)',
+    'event Transfer(address indexed from, address indexed to, uint256 value)',
+  ]);
+  // Consecutive balances differ by one wei beyond Number's exact integer
+  // range. Pairs tie, requiring a stable address order, and exceed top 100.
+  const balances = new Map(Array.from({ length: 106 }, (_, index) => [address(index + 1),
+    parseUnits('1', 18) + BigInt(Math.floor(index / 2))]));
+  const supply = [...balances.values()].reduce((sum, balance) => sum + balance, 0n);
+  const expected = [...balances].sort(([a, av], [b, bv]) => av === bv ? a.localeCompare(b) : av > bv ? -1 : 1);
+  const logs = [...balances, [emptied, 1n]].map(([to, value], index) => ({
+    address: token, blockNumber: '0x0', blockHash: blockHash(0), transactionHash: blockHash(index + 2000),
+    transactionIndex: '0x0', logIndex: toHex(index), removed: false,
+    topics: encodeEventTopics({ abi, eventName: 'Transfer', args: { from: zeroAddress, to } }), data: toHex(value, { size: 32 }),
+  }));
+  // This address was once a holder but has no current balance.
+  logs.push({ ...logs.at(-1), blockNumber: '0x1', blockHash: blockHash(1), logIndex: '0x0',
+    transactionHash: blockHash(3000), topics: encodeEventTopics({ abi, eventName: 'Transfer', args: { from: emptied, to: address(1) } }) });
+  const calls = [];
+  let mode = 'healthy';
+  let walletHeadReads = 0;
+  const actualFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (new URL(String(url)).origin !== 'http://127.0.0.1:8545') return actualFetch(url, options);
+    const request = JSON.parse(options.body);
+    calls.push(request);
+    let result;
+    if (request.method === 'eth_chainId') result = '0x7a69';
+    else if (request.method === 'eth_blockNumber') result = toHex(head);
+    else if (request.method === 'eth_getBlockByNumber') {
+      const number = request.params[0] === 'latest' ? head : BigInt(request.params[0]);
+      const walletReorg = mode === 'wallet-reorg' && number === head && ++walletHeadReads > 1;
+      result = { number: toHex(number), hash: walletReorg || (mode === 'reorg' && request.params[0] !== 'latest' && number === head)
+        ? blockHash(9999) : blockHash(number), timestamp: '0x64', transactions: [] };
+    } else if (request.method === 'eth_getCode') {
+      result = [token, factory, contract].includes(request.params[0].toLowerCase()) ? code : '0x';
+    } else if (request.method === 'eth_getLogs') {
+      if (mode === 'logs-offline') throw new Error('Simulated RPC log failure');
+      const filter = request.params[0];
+      assert.equal(filter.address.toLowerCase(), token);
+      const from = BigInt(filter.fromBlock), to = BigInt(filter.toBlock);
+      result = logs.filter(log => BigInt(log.blockNumber) >= from && BigInt(log.blockNumber) <= to &&
+        (mode !== 'incomplete' || log.topics[2] !== '0x' + contract.slice(2).padStart(64, '0')) &&
+        (!filter.topics?.[1] || filter.topics[1] === log.topics[1]) &&
+        (!filter.topics?.[2] || filter.topics[2] === log.topics[2]));
+    } else if (request.method === 'eth_call') {
+      const { functionName, args } = decodeFunctionData({ abi, data: request.params[0].data });
+      if (mode === 'balance-offline' && functionName === 'balanceOf') throw new Error('Simulated RPC balance failure');
+      const value = { instanceKey: deployment.instanceKey, token,
+        totalSupply: supply,
+        balanceOf: args ? balances.get(args[0].toLowerCase()) ?? 0n : 0n }[functionName];
+      if (value === undefined) throw new Error('Unexpected holder contract call: ' + functionName);
+      result = encodeFunctionResult({ abi, functionName, result: value });
+    } else throw new Error('Unexpected holder RPC call: ' + request.method);
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }),
+      { headers: { 'Content-Type': 'application/json' } });
+  });
+  const listing = await app.request('explorer/holders');
+  assert.equal(listing.status, 200, JSON.stringify(listing.body));
+  assert.deepEqual(Object.keys(listing.body).sort(), ['chainId', 'holders', 'latestBlock', 'token', 'totalHolders', 'totalSupply']);
+  assert.equal(listing.body.totalSupply, '106.000000000000002756');
+  assert.equal(listing.body.totalHolders, 106);
+  assert.equal(listing.body.latestBlock, String(head));
+  assert.equal(listing.body.holders.length, 100);
+  assert.deepEqual(listing.body.holders.map(row => [row.rank, row.address, parseUnits(row.balance, 18), row.kind]),
+    expected.slice(0, 100).map(([wallet, balance], index) => [index + 1, wallet, balance, wallet === contract ? 'contract' : 'wallet']));
+  assert.equal(listing.body.holders.some(row => [zeroAddress, emptied].includes(row.address)), false);
+  const scanned = calls.filter(call => call.method === 'eth_getLogs').map(call => call.params[0]);
+  assert.ok(scanned.some(range => BigInt(range.fromBlock) === 0n), 'initial mints before factory deployment must be scanned');
+  assert.ok(scanned.some(range => BigInt(range.toBlock) === head), 'all blocks through the snapshot must be scanned');
+  for (const call of calls) {
+    if (call.method === 'eth_call') {
+      const { functionName } = decodeFunctionData({ abi, data: call.params[0].data });
+      if (['balanceOf', 'totalSupply'].includes(functionName)) assert.equal(BigInt(call.params[1]), head);
+    }
+  }
+  // Wallet details work even below the displayed top 100; they expose no rank
+  // or application identity, and transfer-only lookups keep their old shape.
+  const detail = await app.request('explorer/transfers?q=' + address(1));
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  assert.deepEqual(detail.body.wallet, { address: address(1), balance: '1', kind: 'wallet' });
+  assert.deepEqual(Object.keys(detail.body.wallet).sort(), ['address', 'balance', 'kind']);
+  const emptyDetail = await app.request('explorer/transfers?q=' + emptied);
+  assert.equal(emptyDetail.status, 200, JSON.stringify(emptyDetail.body));
+  assert.deepEqual(emptyDetail.body.wallet, { address: emptied, balance: '0', kind: 'wallet' });
+  const contractDetail = await app.request('explorer/transfers?q=' + contract);
+  assert.equal(contractDetail.status, 200, JSON.stringify(contractDetail.body));
+  assert.deepEqual(contractDetail.body.wallet, { address: contract, balance: '1.000000000000000052', kind: 'contract' });
+  const unfiltered = await app.request('explorer/transfers');
+  assert.equal(unfiltered.status, 200, JSON.stringify(unfiltered.body));
+  assert.equal(unfiltered.body.wallet, undefined);
+  for (const holder of listing.body.holders) assert.deepEqual(Object.keys(holder).sort(), ['address', 'balance', 'kind', 'rank']);
+  for (const failure of ['logs-offline', 'balance-offline', 'incomplete', 'reorg']) {
+    mode = failure;
+    const failed = await app.request('explorer/holders');
+    assert.equal(failed.status, 503, failure + ': ' + JSON.stringify(failed.body));
+    assert.equal(failed.body.holders, undefined, failure);
+    assert.equal(failed.body.totalSupply, undefined, failure);
+  }
+  mode = 'balance-offline';
+  const failedWallet = await app.request('explorer/transfers?q=' + address(1));
+  assert.equal(failedWallet.status, 503);
+  assert.equal(failedWallet.body.wallet, undefined);
+  mode = 'wallet-reorg';
+  const changedWallet = await app.request('explorer/transfers?q=' + address(1));
+  assert.equal(changedWallet.status, 503);
+  assert.equal(changedWallet.body.wallet, undefined);
 });
 
 test('tài khoản và session được lưu bền vững, cookie cũ bị thu hồi', async t => {
@@ -664,4 +899,306 @@ test('dọn đúng dữ liệu mất liên kết, không xóa dự án chưa ch�
   assert.deepEqual(plan.remove.transactions, ['t2']);
   assert.deepEqual(plan.remove.wallet_links, ['deleted-client']);
   assert.deepEqual(plan.remove.delivery_files, ['orphan:original']);
+});
+
+test('dự án FESC của chain cũ chỉ đọc lịch sử, không đổi dữ liệu hoặc gửi giao dịch trên chain mới', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-historical-'));
+  const file = join(root, 'projects.sqlite');
+  await mkdir(join(root, '.hardhat'));
+  const token = '0x1000000000000000000000000000000000000001';
+  const code = '0x6000';
+  const current = {
+    chainId: 31337, instanceKey: '0x' + '2'.repeat(64), token,
+    factory: '0x2000000000000000000000000000000000000002',
+    startBlock: '1', startBlockHash: '0x' + '3'.repeat(64),
+    factoryCodeHash: keccak256(code), tokenCodeHash: keccak256(code),
+  };
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify(current));
+  const app = await listen(file, root);
+  let fixture;
+  t.after(async () => { fixture?.close(); await app.close(); await rm(root, { recursive: true }); });
+  const actualFetch = globalThis.fetch;
+  const abi = parseAbi(['function instanceKey() view returns (bytes32)', 'function token() view returns (address)']);
+  let available = true;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (new URL(String(url)).origin !== 'http://127.0.0.1:8545') return actualFetch(url, options);
+    if (!available) throw new Error('RPC offline');
+    const request = JSON.parse(options.body);
+    let result;
+    if (request.method === 'eth_chainId') result = '0x7a69';
+    else if (request.method === 'eth_getBlockByNumber') result = { hash: current.startBlockHash, number: '0x1', timestamp: '0x1', transactions: [] };
+    else if (request.method === 'eth_getCode') result = code;
+    else if (request.method === 'eth_call') {
+      const name = request.params[0].data === '0xfc0c546a' ? 'token' : 'instanceKey';
+      result = encodeFunctionResult({ abi, functionName: name, result: name === 'token' ? token : current.instanceKey });
+    } else throw new Error('Unexpected historical RPC call: ' + request.method);
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }), { headers: { 'Content-Type': 'application/json' } });
+  });
+  await app.request('auth/register', { data: client });
+  const login = await app.request('auth/login', { data: client });
+  const cookie = login.cookie.split(';')[0];
+  const created = await app.request('projects', { data: { ...input, currency: 'FESC' }, cookie });
+  assert.equal(created.status, 201);
+  const id = created.body.project.id;
+  const db = new DatabaseSync(file);
+  fixture = db;
+  const saved = JSON.parse(db.prepare('SELECT data FROM projects WHERE id = ?').get(id).data);
+  saved.status = 'In progress'; saved.paid = 0.1; saved.freelancerId = 'historical-worker';
+  saved.fesc = { deployment: { ...current, instanceKey: '0x' + '1'.repeat(64) } };
+  db.prepare('UPDATE projects SET data = ? WHERE id = ?').run(JSON.stringify(saved), id);
+  const request = body => app.request('projects/fesc', { cookie, data: { projectId: id, ...body }, headers: { Origin: app.origin } });
+  const historical = await request();
+  assert.equal(historical.status, 200, JSON.stringify(historical.body));
+  assert.equal(historical.body.step, 'unavailable');
+  assert.equal(historical.body.historical, true);
+  assert.equal(historical.body.paid, saved.paid);
+  assert.equal(historical.body.balance, undefined);
+  assert.equal(historical.body.held, undefined);
+  assert.match(historical.body.message, /không thể xác minh/);
+  for (const action of ['create', 'accept', 'reset', 'allow', 'fund', 'start', 'submit', 'approve']) {
+    assert.equal((await request({ action })).status, 409);
+  }
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify({ ...current, factoryCodeHash: '0x' + '0'.repeat(64) }));
+  assert.equal((await request()).status, 503);
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify(current));
+  available = false;
+  const offline = await request();
+  assert.equal(offline.status, 503);
+  assert.equal(offline.body.historical, undefined);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT data FROM projects WHERE id = ?').get(id).data), saved);
+  available = true;
+  const active = { ...saved, fesc: { deployment: current } };
+  db.prepare('UPDATE projects SET data = ? WHERE id = ?').run(JSON.stringify(active), id);
+  const linked = await request();
+  assert.equal(linked.status, 200);
+  assert.equal(linked.body.step, 'link');
+  assert.equal(linked.body.historical, undefined);
+});
+
+test('FESC keeps a verified pinned deployment usable after another deployment on the same chain', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'escrow-same-chain-redeploy-'));
+  t.after(() => rm(root, { recursive: true }));
+  await mkdir(join(root, '.hardhat'));
+  const code = '0x6000';
+  const pinned = {
+    chainId: 31337, projectPayments: 1, instanceKey: '0x' + '1'.repeat(64),
+    token: '0x1000000000000000000000000000000000000001',
+    factory: '0x2000000000000000000000000000000000000002',
+    startBlock: '1', startBlockHash: '0x' + '3'.repeat(64),
+    factoryCodeHash: keccak256(code), tokenCodeHash: keccak256(code),
+    accounts: { arbitrator: '0x3000000000000000000000000000000000000003' },
+  };
+  const current = { ...pinned, instanceKey: '0x' + '2'.repeat(64),
+    token: '0x4000000000000000000000000000000000000004',
+    factory: '0x5000000000000000000000000000000000000005',
+    startBlock: '2', startBlockHash: '0x' + '4'.repeat(64) };
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify(current));
+  const abi = parseAbi([
+    'struct Terms { bytes32 projectRef; bytes32 agreementRef; uint64 createBy; address freelancer; address arbitrator; uint256 budgetUnits; uint256[] amounts; uint64[] baseDues; uint32 policyVersion; bytes32 documentHash; }',
+    'function instanceKey() view returns (bytes32)',
+    'function token() view returns (address)',
+    'function balanceOf(address owner) view returns (uint256)',
+    'function escrowFor(address client, bytes32 agreementRef) view returns (address)',
+    'function hashTerms(address client, Terms terms) view returns (bytes32)',
+    'function createEscrow(Terms terms, bytes32 expectedTermsHash) returns (address)',
+  ]);
+  const termsHash = '0x' + '6'.repeat(64);
+  const reads = [];
+  const actualFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (new URL(String(url)).origin !== 'http://127.0.0.1:8545') return actualFetch(url, options);
+    const request = JSON.parse(options.body);
+    let result;
+    if (request.method === 'eth_chainId') result = '0x7a69';
+    else if (request.method === 'eth_getBlockByNumber') {
+      const first = request.params[0] === '0x1';
+      result = { hash: first ? pinned.startBlockHash : current.startBlockHash,
+        number: first ? '0x1' : '0x2', timestamp: '0x64', transactions: [] };
+    } else if (request.method === 'eth_getCode') result = code;
+    else if (request.method === 'eth_getBalance') result = '0xde0b6b3a7640000';
+    else if (request.method === 'eth_call') {
+      const { to, data } = request.params[0];
+      reads.push(to.toLowerCase());
+      const deployment = to.toLowerCase() === current.factory ? current : pinned;
+      const { functionName } = decodeFunctionData({ abi, data });
+      const results = { token: deployment.token, instanceKey: deployment.instanceKey,
+        balanceOf: parseUnits('100', 18), hashTerms: termsHash,
+        escrowFor: '0x0000000000000000000000000000000000000000',
+        createEscrow: '0x6000000000000000000000000000000000000006' };
+      if (!(functionName in results)) throw new Error('Unexpected redeployment contract call');
+      result = encodeFunctionResult({ abi, functionName, result: results[functionName] });
+    } else throw new Error('Unexpected redeployment RPC call: ' + request.method);
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }),
+      { headers: { 'Content-Type': 'application/json' } });
+  });
+  const clientAddress = '0x7000000000000000000000000000000000000007';
+  const freelancerAddress = '0x8000000000000000000000000000000000000008';
+  const project = {
+    id: 1, ownerId: 'client', freelancerId: 'freelancer', currency: 'FESC', status: 'Open', paid: 0,
+    title: 'Pinned project', category: 'Web Development', description: 'Keep the original contracts', budget: 100,
+    milestones: [{ id: 1, title: 'Delivery', amount: 100, status: 'Pending' }],
+    fesc: { deployment: pinned, client: clientAddress, freelancer: freelancerAddress, createBy: '1000' },
+  };
+  const before = structuredClone(project);
+  const writes = { getWalletLink: async id => ({ chainId: 31337,
+    address: id === 'client' ? clientAddress : freelancerAddress }) };
+  const actor = { id: 'client', role: 'Client' };
+  const status = await projectFesc(root, writes, project, actor);
+  assert.equal(status.step, 'create');
+  assert.equal(status.historical, undefined);
+  assert.equal(status.token, pinned.token);
+  const transaction = await projectFesc(root, writes, project, actor, { action: 'create' });
+  assert.equal(transaction.to, pinned.factory);
+  assert.equal(transaction.from, clientAddress);
+  assert.equal(transaction.deploymentBlockHash, pinned.startBlockHash);
+  assert.ok(reads.includes(pinned.factory));
+  assert.deepEqual(project, before);
+});
+
+test('OTP gửi lại lỗi SMTP vẫn giữ yêu cầu cũ để thử lại, không gia hạn mã hay xóa giới hạn gửi', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'escrow-otp-retry-'));
+  const file = join(dir, 'otp.sqlite');
+  let now = Date.now(), fail = false, calls = 0;
+  const delivered = [];
+  const app = await listen(file, undefined, { now: () => now, sendOtp: async message => {
+    calls++;
+    if (fail) throw new WorkflowError(503, 'Simulated SMTP failure');
+    delivered.push(message);
+  } });
+  const db = new DatabaseSync(file, { readOnly: true });
+  t.after(async () => { db.close(); await app.close(); await rm(dir, { recursive: true }); });
+  const row = () => JSON.parse(db.prepare('SELECT data FROM auth_challenges').get().data);
+  const start = await app.rawRequest('auth/register', { data: client });
+  assert.equal(start.status, 202);
+  const cookie = start.cookie.split(';')[0];
+  const original = { challengeId: start.body.challengeId, code: delivered[0].code };
+  const wrong = original.code === '000000' ? '111111' : '000000';
+  assert.equal((await app.rawRequest('auth/verify', { data: { ...original, code: wrong }, cookie })).status, 400);
+  const before = row();
+  assert.equal(before.attempts, 1);
+  now += 61_000; fail = true;
+  assert.equal((await app.rawRequest('auth/resend', { data: original, cookie })).status, 503);
+  const restored = row();
+  for (const field of ['id', 'hash', 'salt', 'binding', 'expires', 'attempts', 'windowStart']) assert.equal(restored[field], before[field]);
+  assert.equal(restored.ready, true);
+  assert.equal(restored.sent, 2);
+  assert.equal(restored.resendAt, now + 60_000);
+  assert.equal(db.prepare('SELECT count(*) AS count FROM users').get().count, 0);
+  assert.equal(db.prepare('SELECT count(*) AS count FROM sessions').get().count, 0);
+  assert.equal((await app.rawRequest('auth/me', { cookie })).status, 401);
+  fail = false;
+  assert.equal((await app.rawRequest('auth/resend', { data: original, cookie })).status, 429);
+  assert.equal(calls, 2);
+  now += 61_000;
+  const resent = await app.rawRequest('auth/resend', { data: original, cookie });
+  assert.equal(resent.status, 202);
+  assert.notEqual(resent.body.challengeId, original.challengeId);
+  assert.equal(row().sent, 3);
+  assert.equal((await app.rawRequest('auth/verify', { data: original, cookie })).status, 400);
+  assert.equal((await app.rawRequest('auth/verify', { data: { challengeId: resent.body.challengeId, code: delivered.at(-1).code }, cookie })).status, 201);
+});
+
+test('OTP hết hạn không sống lại khi SMTP lỗi nhưng yêu cầu cũ vẫn gửi lại được mã mới', async t => {
+  let now = Date.now(), fail = false;
+  const delivered = [];
+  const app = await listen(':memory:', undefined, { now: () => now, sendOtp: async message => {
+    if (fail) throw new WorkflowError(503, 'Simulated SMTP failure');
+    delivered.push(message);
+  } });
+  t.after(app.close);
+  const start = await app.rawRequest('auth/register', { data: client });
+  const cookie = start.cookie.split(';')[0];
+  const original = { challengeId: start.body.challengeId, code: delivered[0].code };
+  now += 5 * 60_000 + 1; fail = true;
+  assert.equal((await app.rawRequest('auth/resend', { data: original, cookie })).status, 503);
+  assert.equal((await app.rawRequest('auth/verify', { data: original, cookie })).status, 400);
+  now += 61_000; fail = false;
+  const fresh = await app.rawRequest('auth/resend', { data: original, cookie });
+  assert.equal(fresh.status, 202);
+  assert.equal((await app.rawRequest('auth/verify', { data: { challengeId: fresh.body.challengeId, code: delivered.at(-1).code }, cookie })).status, 201);
+});
+
+test('OTP gửi chậm rồi lỗi không ghi đè yêu cầu mới từ trình duyệt khác', async t => {
+  let now = Date.now(), calls = 0, release, markStarted;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const delivered = [];
+  const app = await listen(':memory:', undefined, { now: () => now, sendOtp: async message => {
+    if (++calls === 2) { markStarted(); await waiting; throw new WorkflowError(503, 'Simulated delayed SMTP failure'); }
+    delivered.push(message);
+  } });
+  t.after(async () => { release(); await app.close(); });
+  const first = await app.rawRequest('auth/register', { data: client });
+  const firstCookie = first.cookie.split(';')[0];
+  now += 61_000;
+  const failed = app.rawRequest('auth/resend', { data: { challengeId: first.body.challengeId }, cookie: firstCookie });
+  await started;
+  now += 61_000;
+  const newer = await app.rawRequest('auth/register', { data: client });
+  assert.equal(newer.status, 202);
+  const newerCookie = newer.cookie.split(';')[0];
+  release();
+  assert.equal((await failed).status, 503);
+  assert.equal((await app.rawRequest('auth/verify', { data: { challengeId: newer.body.challengeId, code: delivered.at(-1).code }, cookie: firstCookie })).status, 400);
+  assert.equal((await app.rawRequest('auth/verify', { data: { challengeId: newer.body.challengeId, code: delivered.at(-1).code }, cookie: newerCookie })).status, 201);
+});
+
+test('OTP gửi lần đầu lỗi SMTP vẫn giữ giới hạn gửi theo giờ', async t => {
+  let now = Date.now(), calls = 0;
+  const app = await listen(':memory:', undefined, { now: () => now, sendOtp: async () => {
+    calls++; throw new WorkflowError(503, 'Simulated SMTP failure');
+  } });
+  t.after(app.close);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    assert.equal((await app.rawRequest('auth/register', { data: client })).status, 503);
+    now += 61_000;
+  }
+  assert.equal((await app.rawRequest('auth/register', { data: client })).status, 429);
+  assert.equal(calls, 10);
+  assert.equal((await app.rawRequest('auth/login', { data: client })).status, 401);
+  assert.equal((await app.rawRequest('auth/me')).status, 401);
+});
+
+test('quên mật khẩu gửi nền lỗi SMTP vẫn yêu cầu lại được và không tiết lộ email đã đăng ký', async t => {
+  let now = Date.now(), failReset = false, resetAttempts = 0;
+  const delivered = [];
+  const app = await listen(':memory:', undefined, { now: () => now, sendOtp: async message => {
+    if (message.purpose === 'reset') {
+      resetAttempts++;
+      if (failReset) throw new WorkflowError(503, 'Simulated reset SMTP failure');
+    }
+    delivered.push(message);
+  } });
+  t.after(app.close);
+  const warning = t.mock.method(console, 'warn', () => {});
+  const request = app.rawRequest;
+  const registration = await request('auth/register', { data: client });
+  assert.equal((await request('auth/verify', { cookie: registration.cookie.split(';')[0],
+    data: { challengeId: registration.body.challengeId, code: delivered[0].code } })).status, 201);
+  failReset = true;
+  const failed = await request('auth/forgot', { data: { email: client.email } });
+  const unknown = await request('auth/forgot', { data: { email: 'unregistered-reset@example.test' } });
+  assert.equal(failed.status, 202);
+  assert.equal(unknown.status, 202);
+  assert.deepEqual(Object.keys(unknown.body).sort(), Object.keys(failed.body).sort());
+  assert.equal(failed.body.code, undefined);
+  assert.equal(unknown.body.code, undefined);
+  assert.equal((await request('auth/verify', { cookie: failed.cookie.split(';')[0],
+    data: { challengeId: failed.body.challengeId, code: '000000' } })).status, 400);
+  assert.equal(resetAttempts, 1);
+  assert.equal(delivered.some(message => message.purpose === 'reset'), false);
+  assert.equal(warning.mock.callCount(), 1);
+  now += 61_000; failReset = false;
+  const fresh = await request('auth/forgot', { data: { email: client.email } });
+  assert.equal(fresh.status, 202);
+  assert.notEqual(fresh.body.challengeId, failed.body.challengeId);
+  const resetMail = delivered.findLast(message => message.purpose === 'reset');
+  assert.equal(resetMail.email, client.email);
+  assert.equal(resetAttempts, 2);
+  const verified = await request('auth/verify', { cookie: fresh.cookie.split(';')[0],
+    data: { challengeId: fresh.body.challengeId, code: resetMail.code } });
+  assert.equal(verified.status, 200);
+  assert.equal(typeof verified.body.resetToken, 'string');
+  assert.equal(verified.body.user, undefined);
+  assert.equal((await request('auth/me', { cookie: fresh.cookie.split(';')[0] })).status, 401);
 });

@@ -9,6 +9,7 @@ import { categoryLabel } from './ui-labels';
 type PublicProject = Pick<Project, 'id' | 'title' | 'category' | 'description' | 'budget' | 'currency'>;
 type Mode = 'login' | 'register' | 'forgot' | 'projects';
 type Challenge = { challengeId: string; email: string; purpose: 'register' | 'login' | 'reset'; expiresAt: number; resendAt: number };
+const resetOtpMessage = 'Nếu email này đã đăng ký, mã OTP sẽ được gửi tới hộp thư của bạn. Kiểm tra cả thư rác.';
 
 export default function Auth({ onLogin, onDemo, initialMessage }: {
   onLogin: (user: Account) => void;
@@ -72,7 +73,7 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
       setChallenge(result);
       setCode('');
       setClock(Date.now());
-      setMessage(mode === 'forgot' ? 'Nếu email này đã đăng ký, mã OTP sẽ được gửi tới hộp thư của bạn. Kiểm tra cả thư rác.'
+      setMessage(mode === 'forgot' ? resetOtpMessage
         : `Đã gửi mã OTP tới ${result.email}. Kiểm tra hộp thư đến hoặc thư rác.`);
     } catch (error) {
       setError(errorMessage(error));
@@ -117,9 +118,13 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
     if (!challenge) return;
     setBusy(true); setError('');
     try {
-      setChallenge(await api<Challenge>('auth/resend', { challengeId: challenge.challengeId }));
+      // Reset delivery runs in the background. Reissue by email so retry also
+      // works when the prior SMTP attempt failed after its 202 response.
+      const reset = challenge.purpose === 'reset';
+      setChallenge(await api<Challenge>(reset ? 'auth/forgot' : 'auth/resend',
+        reset ? { email: challenge.email } : { challengeId: challenge.challengeId }));
       setCode(''); setClock(Date.now());
-      setMessage('Đã gửi mã OTP mới. Mã cũ không còn hiệu lực.');
+      setMessage(reset ? resetOtpMessage : 'Đã gửi mã OTP mới. Mã cũ không còn hiệu lực.');
     } catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   }

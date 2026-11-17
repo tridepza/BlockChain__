@@ -3,6 +3,8 @@ import {
   keccak256, numberToHex, parseAbi, parseEventLogs, stringToHex, TransactionReceiptNotFoundError, zeroAddress,
 } from 'viem';
 import { hardhat } from 'viem/chains';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { localChain } from '../src/local-chain.ts';
 import { applyProjectAction, cents, currentMilestone, getSubmissionVersion, WorkflowError } from '../src/workflow.ts';
 import { checkLocalDeployment } from './wallet.mjs';
@@ -41,6 +43,7 @@ const factoryAbi = parseAbi([
 ]);
 const tokenAbi = parseAbi([
   'function balanceOf(address owner) view returns (uint256)',
+  'function totalSupply() view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
   'event Transfer(address indexed from, address indexed to, uint256 value)',
@@ -75,9 +78,108 @@ async function readDeployment(root, pinned) {
   return deployment;
 }
 
+async function belongsToPreviousChain(root, pinned) {
+  if (!pinned?.instanceKey) return false;
+  let configured;
+  try {
+    configured = JSON.parse(await readFile(resolve(root, '.hardhat/local-fesc-deployment.json'), 'utf8'));
+  } catch {
+    // Missing configuration does not establish that the chain has changed.
+    return false;
+  }
+  if (configured?.instanceKey === pinned.instanceKey) return false;
+  try {
+    // A redeploy on the same chain does not remove a project's pinned contracts.
+    await readDeployment(root, pinned);
+    return false;
+  } catch {
+    // Only a verified replacement deployment can establish a historical chain.
+  }
+  // An offline RPC or an invalid new manifest must not become a historical status.
+  const current = await readDeployment(root);
+  return current.instanceKey !== pinned.instanceKey;
+}
+
 const transferEvent = tokenAbi.find(item => item.type === 'event' && item.name === 'Transfer');
 const transferPageSize = 20;
 const transferBlockWindow = 1000n;
+const holderLimit = 100;
+const publicReadConcurrency = 4;
+
+async function mapPublicReads(items, operation) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  let failure;
+  await Promise.all(Array.from({ length: Math.min(publicReadConcurrency, items.length) }, async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try { results[index] = await operation(items[index], index); }
+      catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+  }));
+  if (failed) throw failure;
+  return results;
+}
+
+async function verifyPublicSnapshot(snapshot) {
+  if (typeof snapshot.number !== 'bigint' || !snapshot.hash ||
+      (await rpc.getBlock({ blockNumber: snapshot.number })).hash !== snapshot.hash) {
+    throw new WorkflowError(503, 'Blockchain đã đổi trong lúc tra cứu. Hãy làm mới để đọc lại dữ liệu.');
+  }
+}
+
+const accountKind = code => code && code !== '0x' ? 'contract' : 'wallet';
+
+export async function publicFescHolders(root) {
+  try {
+    const { token } = await readDeployment(root);
+    const snapshot = await rpc.getBlock({ blockTag: 'latest' });
+    const head = snapshot.number;
+    if (typeof head !== 'bigint' || !snapshot.hash) throw new Error('Unconfirmed snapshot');
+    const addresses = new Set();
+    // Token minting can precede factory deployment, so discovery starts at genesis.
+    for (let fromBlock = 0n; fromBlock <= head; fromBlock += transferBlockWindow) {
+      const toBlock = fromBlock + transferBlockWindow - 1n < head
+        ? fromBlock + transferBlockWindow - 1n : head;
+      const logs = await rpc.getLogs({ address: token, event: transferEvent, strict: true, fromBlock, toBlock });
+      for (const log of logs) {
+        if (log.removed || typeof log.blockNumber !== 'bigint' ||
+            log.blockNumber < fromBlock || log.blockNumber > toBlock || !isAddressEqual(log.address, token)) {
+          throw new Error('Incomplete token history');
+        }
+        for (const address of [log.args.from, log.args.to]) {
+          if (typeof address !== 'string' || !/^0x[0-9a-f]{40}$/i.test(address)) throw new Error('Invalid token holder');
+          if (!isAddressEqual(address, zeroAddress)) addresses.add(address.toLowerCase());
+        }
+      }
+    }
+    const totalSupply = await rpc.readContract({ address: token, abi: tokenAbi, functionName: 'totalSupply', blockNumber: head });
+    const balances = await mapPublicReads([...addresses], async address => ({ address,
+      units: await rpc.readContract({ address: token, abi: tokenAbi, functionName: 'balanceOf', args: [address], blockNumber: head }),
+    }));
+    // A failed or truncated log scan must never produce a plausible partial ranking.
+    if (balances.reduce((sum, holder) => sum + holder.units, 0n) !== totalSupply) {
+      throw new WorkflowError(503, 'Chưa đọc đủ người giữ FESC để lập bảng xếp hạng. Hãy thử lại.');
+    }
+    const nonzero = balances.filter(holder => holder.units > 0n)
+      .sort((a, b) => a.units === b.units ? a.address < b.address ? -1 : a.address > b.address ? 1 : 0
+        : a.units > b.units ? -1 : 1);
+    const holders = await mapPublicReads(nonzero.slice(0, holderLimit), async (holder, index) => ({
+      rank: index + 1, address: holder.address, balance: formatUnits(holder.units, 18),
+      kind: accountKind(await rpc.getCode({ address: holder.address, blockNumber: head })),
+    }));
+    await verifyPublicSnapshot(snapshot);
+    return { token, chainId: localChain.id, latestBlock: head.toString(),
+      totalSupply: formatUnits(totalSupply, 18), totalHolders: nonzero.length, holders };
+  } catch (error) {
+    if (error instanceof WorkflowError) throw error;
+    throw new WorkflowError(503, 'Chưa đọc được bảng người giữ FESC. Hãy kiểm tra Hardhat Local rồi thử lại.');
+  }
+}
 
 export async function publicFescTransfers(root, params) {
   const query = (params.get('q') ?? '').trim().toLowerCase();
@@ -95,17 +197,31 @@ export async function publicFescTransfers(root, params) {
     }
     const first = BigInt(startBlock);
     const head = await rpc.getBlockNumber({ cacheTime: 0 });
+    const walletSnapshot = address ? await rpc.getBlock({ blockNumber: head }) : undefined;
     const end = boundary ? BigInt(boundary[2]) : head;
     const beforeIndex = boundary?.[3] === undefined ? undefined : Number(boundary[3]);
     if (end < first || end > head) throw new WorkflowError(400, 'Trang giao dịch nằm ngoài phạm vi block hiện tại.');
     const start = end - first >= transferBlockWindow ? end - transferBlockWindow + 1n : first;
+    const receipts = new Map();
+    const blocks = new Map();
+    const receiptFor = transactionHash => {
+      if (!receipts.has(transactionHash)) receipts.set(transactionHash,
+        rpc.getTransactionReceipt({ hash: transactionHash }).catch(error => {
+          if (error instanceof TransactionReceiptNotFoundError) return undefined;
+          throw error;
+        }));
+      return receipts.get(transactionHash);
+    };
+    const blockFor = blockNumber => {
+      const key = blockNumber.toString();
+      // Resolve by number, not hash, so an orphaned block cannot pass verification.
+      if (!blocks.has(key)) blocks.set(key, rpc.getBlock({ blockNumber }));
+      return blocks.get(key);
+    };
     let logs;
     if (txHash) {
-      const receipt = await rpc.getTransactionReceipt({ hash: txHash }).catch(error => {
-        if (error instanceof TransactionReceiptNotFoundError) return undefined;
-        throw error;
-      });
-      logs = receipt?.status === 'success' && receipt.blockNumber >= first
+      const receipt = await receiptFor(txHash);
+      logs = receipt?.status === 'success' && receipt.blockNumber >= first && receipt.blockNumber <= end
         ? parseEventLogs({ abi: tokenAbi, eventName: 'Transfer', strict: true,
             logs: receipt.logs.filter(log => isAddressEqual(log.address, token)) })
         : [];
@@ -122,24 +238,48 @@ export async function publicFescTransfers(root, params) {
         logs = await rpc.getLogs(range);
       }
     }
-    const ordered = logs.filter(log => !log.removed && log.blockNumber <= end &&
+    const candidates = logs.filter(log => !log.removed && typeof log.blockNumber === 'bigint' &&
+      typeof log.blockHash === 'string' && typeof log.transactionHash === 'string' &&
+      Number.isSafeInteger(log.logIndex) && log.logIndex >= 0 && log.blockNumber >= first && log.blockNumber <= end &&
       (log.blockNumber !== end || beforeIndex === undefined || log.logIndex < beforeIndex) &&
-      !isAddressEqual(log.args.from, zeroAddress) && !isAddressEqual(log.args.to, zeroAddress))
+      !isAddressEqual(log.args.from, zeroAddress) && !isAddressEqual(log.args.to, zeroAddress));
+    const ordered = [...new Map(candidates.map(log => [log.transactionHash + ':' + log.logIndex, log])).values()]
       .sort((a, b) => a.blockNumber === b.blockNumber ? b.logIndex - a.logIndex : a.blockNumber > b.blockNumber ? -1 : 1);
-    const page = ordered.slice(0, transferPageSize);
-    const blocks = new Map();
-    for (const { blockHash } of page) {
-      if (!blocks.has(blockHash)) blocks.set(blockHash, rpc.getBlock({ blockHash }));
+    const verified = [];
+    for (const log of ordered) {
+      const [receipt, block] = await Promise.all([receiptFor(log.transactionHash), blockFor(log.blockNumber)]);
+      if (receipt?.status !== 'success' || receipt.transactionHash !== log.transactionHash ||
+          receipt.blockNumber !== log.blockNumber || receipt.blockHash !== log.blockHash ||
+          block.hash !== receipt.blockHash || !block.transactions.includes(log.transactionHash)) continue;
+      const confirmed = receipt.logs.find(entry => !entry.removed && entry.logIndex === log.logIndex &&
+        entry.transactionHash === log.transactionHash && entry.blockHash === log.blockHash &&
+        entry.blockNumber === log.blockNumber && isAddressEqual(entry.address, token) &&
+        entry.data === log.data && entry.topics.length === log.topics.length &&
+        entry.topics.every((topic, index) => topic === log.topics[index]));
+      if (!confirmed) continue;
+      verified.push(log);
+      // One extra verified event is enough to determine whether this page continues.
+      if (verified.length > transferPageSize) break;
     }
-    const transfers = await Promise.all(page.map(async ({ transactionHash, logIndex, blockHash, blockNumber, args }) => ({
+    const page = verified.slice(0, transferPageSize);
+    const transfers = await Promise.all(page.map(async ({ transactionHash, logIndex, blockNumber, args }) => ({
       hash: transactionHash, logIndex, block: blockNumber.toString(),
-      time: new Date(Number((await blocks.get(blockHash)).timestamp) * 1000).toISOString(),
+      time: new Date(Number((await blockFor(blockNumber)).timestamp) * 1000).toISOString(),
       from: args.from, to: args.to, amount: formatUnits(args.value, 18),
     })));
     const last = page.at(-1);
-    const next = ordered.length > transferPageSize ? `${instanceKey}:${last.blockNumber}:${last.logIndex}`
+    const next = verified.length > transferPageSize ? `${instanceKey}:${last.blockNumber}:${last.logIndex}`
       : !txHash && start > first ? `${instanceKey}:${start - 1n}` : null;
-    return { token, transfers, next };
+    let wallet;
+    if (address) {
+      const [balance, code] = await Promise.all([
+        rpc.readContract({ address: token, abi: tokenAbi, functionName: 'balanceOf', args: [address], blockNumber: head }),
+        rpc.getCode({ address, blockNumber: head }),
+      ]);
+      await verifyPublicSnapshot(walletSnapshot);
+      wallet = { address, balance: formatUnits(balance, 18), kind: accountKind(code) };
+    }
+    return { token, chainId: localChain.id, latestBlock: head.toString(), transfers, next, ...(wallet ? { wallet } : {}) };
   } catch (error) {
     if (error instanceof WorkflowError) throw error;
     throw new WorkflowError(503, 'Chưa đọc được giao dịch FESC. Hãy kiểm tra Hardhat Local rồi thử lại.');
@@ -248,6 +388,11 @@ export async function projectFesc(root, writes, project, actor, { action, milest
   const assignee = actor.role === 'Freelancer' && actor.id === project.freelancerId;
   if (project.currency !== 'FESC' || (!owner && !assignee)) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
   const status = { step: 'waiting', message: '', projectStatus: project.status, paid: project.paid };
+  if (await belongsToPreviousChain(root, project.fesc?.deployment)) {
+    const message = 'Dự án thuộc một blockchain local trước đây. Dữ liệu dự án vẫn được giữ, nhưng số dư và giao dịch cũ không thể xác minh trên blockchain hiện tại. Cần khôi phục blockchain cũ để tiếp tục dự án này.';
+    if (action) throw new WorkflowError(409, message);
+    return { ...status, step: 'unavailable', historical: true, message, token: project.fesc.deployment.token };
+  }
   if (!project.freelancerId) {
     if (action) throw new WorkflowError(409, 'Chọn Freelancer để tạo hợp đồng FESC.');
     return { ...status, message: 'Chọn Freelancer để tạo hợp đồng FESC.' };

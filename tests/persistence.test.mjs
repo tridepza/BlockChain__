@@ -24,7 +24,7 @@ test('node lưu token, số dư vault, receipt và block sau khởi động lạ
   async function stop() {
     await node.close();
   }
-  t.after(async () => { if (node.child.exitCode === null) await stop(); await rm(dir, { recursive: true }); });
+  t.after(async () => { await stop(); await rm(dir, { recursive: true }); });
   const rpc = createPublicClient({ chain: hardhat, transport: http(node.url) });
   const account = mnemonicToAccount('test test test test test test test test test test test junk');
   const wallet = createWalletClient({ chain: hardhat, transport: http(node.url), account });

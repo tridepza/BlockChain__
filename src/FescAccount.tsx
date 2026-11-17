@@ -48,7 +48,7 @@ export default function FescAccount({ accountId, onChanged }: { accountId: strin
       <div className="balance">{balance.accountBalance} FESC<small>Trong hợp đồng tài khoản</small></div>
       <p>Trong ví MetaMask: <strong>{balance.walletBalance} FESC</strong></p>
     </>}
-    <p className="hint">Tiền nghiệm thu dự án FESC được trả thẳng vào ví Freelancer. Dùng nút Nạp bên dưới để ghi nhận số dư tài khoản; không chuyển token trực tiếp tới địa chỉ hợp đồng.</p>
+    <p className="hint">Tiền nghiệm thu dự án FESC được trả thẳng vào ví Freelancer. Ký quỹ dự án hiện lấy FESC từ ví MetaMask. Dùng nút Nạp bên dưới để ghi nhận số dư tài khoản; không chuyển token trực tiếp tới địa chỉ hợp đồng.</p>
     <label>Số FESC nạp hoặc rút<input inputMode="decimal" value={amount} disabled={busy || !!pending}
       onChange={event => setAmount(event.target.value)} placeholder="Ví dụ: 10.5" maxLength={39}/></label>
     <div className="button-row">
@@ -62,9 +62,12 @@ export default function FescAccount({ accountId, onChanged }: { accountId: strin
     {error && <p className="form-error" role="alert">{error}</p>}
     {balance && <details className="technical-details"><summary>Lịch sử nạp/rút FESC</summary>
       {balance.history.length ? <ul>{balance.history.map(row => <li key={row.hash}>
-        <strong>{row.action}: {row.amount} FESC</strong><p className="chain-address">{row.hash}</p>
+        <strong>{row.action}: {row.amount} FESC</strong><p className="chain-address">
+          <a href={`/explorer?q=${encodeURIComponent(row.hash)}`} aria-label={`Tra cứu giao dịch ${row.action}: ${row.amount} FESC`}>{row.hash}</a>
+        </p>
       </li>)}</ul> : <p>Chưa có giao dịch nạp/rút.</p>}
       <p>Token <code>{balance.token}</code></p><p>Hợp đồng tài khoản <code>{balance.vault}</code></p>
     </details>}
+    <p><a href="/explorer">Xem lịch sử giao dịch FESC công khai</a></p>
   </section>;
 }

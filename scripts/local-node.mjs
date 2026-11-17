@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { open, rename } from 'node:fs/promises';
+import { open, readFile, rename } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -43,7 +43,7 @@ export async function startPersistentNode({ port = 8545, state = resolve('.data/
   throw new Error('Anvil không mở RPC trong thời gian chờ.');
 }
 
-export async function startDurableNode({ port = 8545, internalPort = 8547, state = resolve('.data/chain/state.json') } = {}) {
+export async function startDurableAnvilNode({ port = 8545, internalPort = 8547, state = resolve('.data/chain/state.json') } = {}) {
   if (await rpcAt(`http://127.0.0.1:${port}`, 'web3_clientVersion').catch(() => null)) throw new Error(`Cổng ${port} đang được dùng.`);
   const node = await startPersistentNode({ port: internalPort, state, save: false });
   let pending = Promise.resolve();
@@ -119,18 +119,37 @@ export async function startDurableNode({ port = 8545, internalPort = 8547, state
   } };
 }
 
+// New chains use Hardhat's signed-block journal on every supported OS. Existing
+// Anvil snapshots stay with Anvil; never reinterpret or overwrite their state.
+export async function startDurableNode(options = {}) {
+  const state = options.state ?? resolve('.data/chain/state.json');
+  let existing;
+  if (existsSync(state)) existing = JSON.parse(await readFile(state, 'utf8'));
+  const { startDurableHardhatNode, HARDHAT_JOURNAL_FORMAT } = await import('./hardhat-node.mjs');
+  if (existing && existing.format !== HARDHAT_JOURNAL_FORMAT) return startDurableAnvilNode(options);
+  return startDurableHardhatNode(options);
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const state = resolve('.data/chain/state.json');
-  if (!existsSync(state) && existsSync('.hardhat/local-fesc-deployment.json')) {
-    throw new Error('Chưa có state bền vững nhưng đã có deployment. Chạy chain:migrate trước; không tự tạo chain rỗng làm mất số dư.');
+  try {
+    if (existsSync('.data/chain/init-in-progress.json')) {
+      throw new Error('Khởi tạo chain chưa hoàn tất. Kiểm tra bản sao lưu được ghi trong .data/chain/init-in-progress.json trước khi khởi động.');
+    }
+    if (!existsSync(state) && (existsSync('.hardhat/local-fesc-deployment.json') || existsSync('.hardhat/local-deployment.json'))) {
+      throw new Error('Thiếu state của deployment cũ. Khôi phục backup hoặc dùng chain:init -- --new để chủ động tạo môi trường mới có sao lưu; không tự triển khai đè.');
+    }
+    const node = await startDurableNode({ state });
+    console.log(`FESC Local RPC ${node.url} · Chain ID 31337\nTrạng thái tự lưu: ${state}`);
+    let closing = false;
+    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
+      if (closing) return; closing = true;
+      try { await node.close(); }
+      catch { console.error('Chưa ghi được checkpoint cuối. Kiểm tra state đã lưu trước khi khởi động lại.'); }
+    });
+    node.child?.once('exit', code => { process.exitCode = code ?? 0; });
+  } catch (error) {
+    console.error(`Không khởi động được blockchain: ${error.message}`);
+    process.exitCode = 1;
   }
-  const node = await startDurableNode({ state });
-  console.log(`FESC Local RPC ${node.url} · Chain ID 31337\nTrạng thái tự lưu: ${state}`);
-  let closing = false;
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
-    if (closing) return; closing = true;
-    try { await node.close(); }
-    catch { console.error('Chưa ghi được checkpoint cuối. Kiểm tra state đã lưu trước khi khởi động lại.'); }
-  });
-  node.child.once('exit', code => { process.exitCode = code ?? 0; });
 }

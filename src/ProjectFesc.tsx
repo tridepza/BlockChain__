@@ -17,7 +17,8 @@ const labels = {
 };
 type Action = keyof typeof labels;
 type FescStatus = {
-  step: Action | 'waiting' | 'link' | 'upload' | 'complete';
+  step: Action | 'waiting' | 'link' | 'upload' | 'complete' | 'unavailable';
+  historical?: boolean;
   message: string;
   balance?: string;
   gas?: string;
@@ -119,7 +120,7 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
       <div className="fesc-balances">
         {status.balance !== undefined && <div><small>Số dư ví của bạn</small><b>{status.balance} FESC</b></div>}
         {status.held !== undefined && <div><small>Trong hợp đồng</small><b>{status.held} FESC</b></div>}
-        <div><small>Đã chuyển cho Freelancer</small><b>{status.paid.toFixed(2)} FESC</b></div>
+        <div><small>{status.historical ? 'Đã ghi nhận trước đây' : 'Đã chuyển cho Freelancer'}</small><b>{status.paid.toFixed(2)} FESC</b></div>
       </div>
       {(status.token || status.escrow) && <details className="technical-details">
         <summary>Địa chỉ hợp đồng</summary>

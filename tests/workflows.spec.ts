@@ -306,13 +306,160 @@ test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', as
     { projectId: 12, stage: 'Milestone 1', amount: '30', currency: 'FESC',
       from: '0x2000000000000000000000000000000000000002', to: '0x3000000000000000000000000000000000000003' },
   ] } }));
-  await page.goto('/explorer');
+  await page.goto('/explorer?view=projects');
   await expect(page.getByRole('heading', { name: 'Dự án #12' })).toBeVisible();
   await expect(page.getByText('Ví thanh toán', { exact: true })).toHaveCount(2);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: '.local-data/ui-preview/public-projects-mobile.png', fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({ path: '.local-data/ui-preview/public-projects-desktop.png', fullPage: true });
+});
+
+test.describe('Thời gian giao dịch theo múi giờ Việt Nam', () => {
+  test.use({ timezoneId: 'America/Los_Angeles' });
+
+  test('lịch sử FESC công khai tra cứu, phân trang và giữ bộ lọc khi tải lại trên điện thoại', async ({ page }) => {
+    const wallet = '0x1000000000000000000000000000000000000001';
+    const recipient = '0x2000000000000000000000000000000000000002';
+    const hash = '0x' + 'a'.repeat(64);
+    const olderHash = '0x' + 'b'.repeat(64);
+    const cursor = '0x' + 'c'.repeat(64) + ':120:1';
+    const rows = [
+      { hash, logIndex: 2, block: '120', time: '2026-11-17T17:00:01.000Z', from: wallet, to: recipient, amount: '12.5' },
+      { hash, logIndex: 1, block: '120', time: '2026-11-17T17:00:01.000Z', from: recipient, to: wallet, amount: '0.000000000000000001' },
+      { hash: olderHash, logIndex: 0, block: '119', time: '2026-11-17T16:59:59.000Z', from: recipient, to: wallet, amount: '5' },
+    ];
+    const requests: { query: string; before: string | null }[] = [];
+    await page.route('**/api/explorer/transfers?*', route => {
+      const params = new URL(route.request().url()).searchParams;
+      const query = params.get('q') ?? '';
+      const before = params.get('before');
+      requests.push({ query, before });
+      const transfers = query === olderHash ? [rows[2]] : query === wallet ? rows : before ? rows.slice(1) : rows.slice(0, 2);
+      return route.fulfill({ json: { token: recipient, chainId: 31337, latestBlock: '123', transfers,
+        next: !query && !before ? cursor : null } });
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/explorer');
+    await expect(page.getByRole('tab', { name: 'Lịch sử giao dịch' })).toHaveAttribute('aria-selected', 'true');
+    const list = page.getByRole('list', { name: 'Lịch sử chuyển FESC đã xác nhận' });
+    await expect(list.getByRole('listitem')).toHaveCount(2);
+    await expect(list.getByRole('listitem').first().getByText('12.5 FESC', { exact: true })).toBeVisible();
+    await expect(list.getByRole('listitem').first().getByText('4', { exact: true })).toBeVisible();
+    await expect(list.getByText('0.000000000000000001 FESC', { exact: true })).toBeVisible();
+    const newest = list.getByRole('listitem').first();
+    await expect(newest.getByText('Ngày giao dịch', { exact: true })).toBeVisible();
+    await expect(newest.getByText('Giờ giao dịch', { exact: true })).toBeVisible();
+    await expect(newest.locator('dl')).toContainText(/Ngày giao dịch\s*18\/11\/2026/);
+    await expect(newest.locator('dl')).toContainText(/Giờ giao dịch\s*00:00:01\s*\(UTC\+7\)/);
+    await expect(page.getByText(/Thời gian theo block xác nhận, giờ Việt Nam \(UTC\+7\)/)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: '.local-data/ui-preview/transfer-date-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.screenshot({ path: '.local-data/ui-preview/transfer-date-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await click(page, 'Xem giao dịch cũ hơn');
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    expect(requests).toContainEqual({ query: '', before: cursor });
+    await expect(list.getByRole('listitem').last().getByText('5', { exact: true })).toBeVisible();
+    await expect(list.getByRole('listitem').last().locator('dl')).toContainText(/Ngày giao dịch\s*17\/11\/2026/);
+    await expect(list.getByRole('listitem').last().locator('dl')).toContainText(/Giờ giao dịch\s*23:59:59\s*\(UTC\+7\)/);
+    await expect(page.getByRole('button', { name: 'Xem giao dịch cũ hơn' })).toHaveCount(0);
+
+    await page.getByRole('searchbox', { name: 'Địa chỉ ví hoặc mã giao dịch' }).fill(wallet);
+    await click(page, 'Tra cứu');
+    await expect(page).toHaveURL('/explorer?q=' + wallet);
+    await expect.poll(() => requests.at(-1)).toEqual({ query: wallet, before: null });
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    await page.reload();
+    await expect(page.getByRole('searchbox')).toHaveValue(wallet);
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    await list.getByRole('link', { name: olderHash, exact: true }).click();
+    await expect(page).toHaveURL('/explorer?q=' + olderHash);
+    await expect(list.getByRole('listitem')).toHaveCount(1);
+    await expect.poll(() => requests.at(-1)).toEqual({ query: olderHash, before: null });
+  });
+});
+
+test('Top FESC xếp hạng số dư công khai, mở lịch sử ví và cập nhật khi làm mới', async ({ page }) => {
+  const wallet = '0x1000000000000000000000000000000000000001';
+  const contract = '0x2000000000000000000000000000000000000002';
+  const smallWallet = '0x3000000000000000000000000000000000000003';
+  const token = '0x4000000000000000000000000000000000000004';
+  const transferHash = '0x' + 'd'.repeat(64);
+  const preciseBalance = '1234.123456789012345678';
+  const updatedBalance = '1233.123456789012345678';
+  let updated = false, holderRequests = 0;
+  await page.route('**/api/explorer/holders*', route => {
+    holderRequests++;
+    return route.fulfill({ json: {
+      token, chainId: 31337, latestBlock: updated ? '124' : '123',
+      totalSupply: updated ? '1243.12345678901234568' : '1244.12345678901234568', totalHolders: 3,
+      holders: [
+        { rank: 1, address: wallet, balance: updated ? updatedBalance : preciseBalance, kind: 'wallet' },
+        { rank: 2, address: contract, balance: '10.000000000000000001', kind: 'contract' },
+        { rank: 3, address: smallWallet, balance: '0.000000000000000001', kind: 'wallet' },
+      ],
+    } });
+  });
+  await page.route('**/api/explorer/transfers?*', route => route.fulfill({ json: {
+    token, chainId: 31337, latestBlock: '123', next: null,
+    wallet: { address: wallet, balance: preciseBalance, kind: 'wallet' },
+    transfers: [{ hash: transferHash, logIndex: 0, block: '120', time: '2026-11-17T17:00:01.000Z',
+      from: contract, to: wallet, amount: '0.000000000000000001' }],
+  } }));
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/explorer?view=holders');
+  await expect(page.getByRole('heading', { name: 'Top ví nắm giữ FESC' })).toBeVisible();
+  const topTab = page.getByRole('tab', { name: 'Top FESC', exact: true });
+  await expect(topTab).toHaveAttribute('aria-selected', 'true');
+  const table = page.getByRole('table', { name: 'Xếp hạng nắm giữ FESC', exact: true });
+  const bodyRows = table.getByRole('row').filter({ has: page.getByRole('cell') });
+  await expect(bodyRows).toHaveCount(3);
+  for (const [index, address, balance] of [
+    [0, wallet, preciseBalance], [1, contract, '10.000000000000000001'], [2, smallWallet, '0.000000000000000001'],
+  ] as const) {
+    const row = bodyRows.nth(index);
+    await expect(row.getByRole('cell').first()).toHaveText('#' + (index + 1));
+    await expect(row.getByRole('link', { name: address, exact: true })).toBeVisible();
+    await expect(row.getByRole('cell').last().getByText(balance + ' FESC', { exact: true })).toBeVisible();
+    await expect(row.getByRole('cell')).toHaveCount(3);
+  }
+  await expect(table.getByRole('columnheader', { name: /Tên|Email|Người dùng/ })).toHaveCount(0);
+  await expect(bodyRows.nth(1)).toContainText('Hợp đồng');
+  await page.screenshot({ path: '.local-data/ui-preview/top-fesc-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await expect(bodyRows.first().getByRole('link', { name: wallet, exact: true })).toBeVisible();
+  await page.screenshot({ path: '.local-data/ui-preview/top-fesc-mobile.png', fullPage: true });
+
+  await bodyRows.first().getByRole('link', { name: wallet, exact: true }).click();
+  await expect(page).toHaveURL('/explorer?q=' + wallet);
+  const summary = page.getByRole('region', { name: 'Thông tin địa chỉ FESC', exact: true });
+  await expect(summary).toContainText(wallet);
+  await expect(summary.getByText('Số dư FESC', { exact: true })).toBeVisible();
+  await expect(summary).toContainText(preciseBalance);
+  const history = page.getByRole('list', { name: 'Lịch sử chuyển FESC đã xác nhận' });
+  await expect(history.getByRole('listitem')).toHaveCount(1);
+  await expect(history.getByRole('link', { name: transferHash, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: '.local-data/ui-preview/top-fesc-wallet-mobile.png', fullPage: true });
+  await page.goBack();
+  await expect(page).toHaveURL('/explorer?view=holders');
+  await expect(topTab).toHaveAttribute('aria-selected', 'true');
+  await expect(bodyRows).toHaveCount(3);
+  const beforeRefresh = holderRequests;
+  updated = true;
+  await click(page, 'Làm mới');
+  await expect.poll(() => holderRequests).toBeGreaterThan(beforeRefresh);
+  await expect(bodyRows.first()).toContainText(updatedBalance);
+  await expect(bodyRows.first()).not.toContainText(preciseBalance);
+  await topTab.press('Home');
+  await expect(page.getByRole('tab', { name: 'Lịch sử giao dịch' })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Lịch sử giao dịch' }).press('End');
+  await expect(topTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL('/explorer?view=holders');
 });
 
 test('quên mật khẩu chỉ hiện hai ô mật khẩu sau khi OTP đúng', async ({ page }) => {
@@ -393,4 +540,80 @@ test('nạp/rút FESC bằng MetaMask cập nhật hai số dư sau xác nhận'
   await expect(page.locator('main')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: '.local-data/ui-preview/fesc-account-mobile.png', fullPage: true });
+});
+
+test('dự án FESC thuộc chain trước chỉ hiện lịch sử và không mời ký giao dịch', async ({ page }) => {
+  await register(page, 'Lịch Sử FESC', 'historical-ui@example.test', 'Client');
+  await login(page);
+  const creation = await page.request.post('/api/projects', { data: {
+    title: 'Dự án trên chain trước', currency: 'FESC', description: 'Lịch sử vẫn được giữ',
+    category: 'Web Development', budget: '100', milestones: 'Bàn giao', amounts: '100',
+  } });
+  expect(creation.status()).toBe(201);
+  const { project } = await creation.json();
+  const historical = { ...project, freelancerId: 'historical-worker', freelancer: 'Freelancer trước', status: 'In progress', paid: 30 };
+  await page.route('**/api/workspace', route => route.fulfill({ json: { projects: [historical], txs: [], mockWallet: { cents: 0, claimed: false } } }));
+  await page.route('**/api/projects/fesc', route => route.fulfill({ json: {
+    step: 'unavailable', historical: true, projectStatus: historical.status, paid: historical.paid,
+    message: 'Dự án thuộc một blockchain local trước đây. Dữ liệu dự án vẫn được giữ, nhưng số dư và giao dịch cũ không thể xác minh trên blockchain hiện tại.',
+  } }));
+  await page.reload();
+  await openProject(page, historical.title);
+  const section = page.getByRole('region', { name: 'Ký quỹ FESC' });
+  await expect(section.getByRole('status')).toContainText('không thể xác minh');
+  await expect(section.getByText('Đã ghi nhận trước đây', { exact: true })).toBeVisible();
+  await expect(section.getByText('30.00 FESC', { exact: true })).toBeVisible();
+  await expect(section.getByText('Số dư ví của bạn', { exact: true })).toHaveCount(0);
+  await expect(section.getByText('Trong hợp đồng', { exact: true })).toHaveCount(0);
+  await expect(section.getByRole('alert')).toHaveCount(0);
+  await expect(section.getByRole('button')).toHaveCount(1);
+  await expect(section.getByRole('button', { name: 'Làm mới FESC' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Gửi bàn giao', exact: true })).toHaveCount(0);
+});
+
+test('quên mật khẩu gửi lại qua email khi yêu cầu trước không giao được thư', async ({ page }) => {
+  const email = 'reset-retry-ui@example.test';
+  const message = 'Nếu email này đã đăng ký, mã OTP sẽ được gửi tới hộp thư của bạn. Kiểm tra cả thư rác.';
+  let attempts = 0, staleResends = 0, verifiedChallenge = '';
+  await page.clock.install();
+  await page.route('**/api/auth/forgot', async route => {
+    expect(route.request().postDataJSON()).toEqual({ email });
+    attempts++;
+    const now = await page.evaluate(() => Date.now());
+    // The first accepted request models an async SMTP failure: its challenge
+    // never becomes usable. A retry must obtain a new challenge and binding.
+    await route.fulfill({ status: 202,
+      headers: { 'Set-Cookie': `escrow_otp=${String(attempts).repeat(64)}; Path=/api/auth; HttpOnly; SameSite=Strict` },
+      json: { challengeId: `reset-request-${attempts}`, email, purpose: 'reset',
+        expiresAt: now + 300_000, resendAt: now + 60_000 },
+    });
+  });
+  await page.route('**/api/auth/resend', async route => {
+    staleResends++;
+    await route.fulfill({ status: 400, json: { error: 'The previous delivery challenge is unavailable.' } });
+  });
+  await page.route('**/api/auth/verify', async route => {
+    verifiedChallenge = route.request().postDataJSON().challengeId;
+    expect(verifiedChallenge).toBe('reset-request-2');
+    expect(route.request().headers().cookie).toContain(`escrow_otp=${'2'.repeat(64)}`);
+    await route.fulfill({ json: { resetToken: 'a'.repeat(64) } });
+  });
+  await page.goto('/');
+  await click(page, 'Quên mật khẩu?');
+  await page.getByLabel('Email', { exact: true }).fill(email);
+  await click(page, 'Gửi mã OTP');
+  await expect(page.getByRole('heading', { name: 'Xác nhận email' })).toBeVisible();
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await page.getByLabel('Mã OTP', { exact: true }).fill('123456');
+  await page.clock.fastForward(61_000);
+  await click(page, 'Gửi lại mã OTP');
+  await expect.poll(() => attempts).toBe(2);
+  await expect(page.getByLabel('Mã OTP', { exact: true })).toHaveValue('');
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(staleResends).toBe(0);
+  await page.getByLabel('Mã OTP', { exact: true }).fill('654321');
+  await click(page, 'Xác nhận');
+  await expect(page.getByRole('heading', { name: 'Đặt lại mật khẩu' })).toBeVisible();
+  expect(verifiedChallenge).toBe('reset-request-2');
 });
