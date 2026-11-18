@@ -299,16 +299,22 @@ test('Client approval pays the submitted FESC milestone directly and exactly onc
   assert.equal(await escrow.read.state(), 5);
 });
 
-test('Freelancer can open a review-timeout dispute only after the review deadline', async t => {
+for (const policyVersion of [1, 2]) {
+test(`policy ${policyVersion}: Freelancer can complain only after the review deadline`, async t => {
   const { connection, freelancer, publicClient, token, terms, offChainHash, create } = await setup(t);
-  const { escrow } = await create();
-  await escrow.write.accept([offChainHash()], { account: freelancer });
+  const agreement = { ...terms, policyVersion };
+  const { escrow } = await create(agreement);
+  await escrow.write.accept([offChainHash(agreement)], { account: freelancer });
   await token.write.approve([escrow.address, terms.budgetUnits]);
   await escrow.write.fund();
   await escrow.write.start({ account: freelancer });
-  await escrow.write.submit([0n, await escrow.read.version(), hash('delivery')], { account: freelancer });
+  const submitted = await publicClient.waitForTransactionReceipt({
+    hash: await escrow.write.submit([0n, await escrow.read.version(), hash('delivery')], { account: freelancer }),
+  });
 
   const [, , reviewBy] = await escrow.read.milestones([0n]);
+  const submittedAt = (await publicClient.getBlock({ blockNumber: submitted.blockNumber })).timestamp;
+  assert.equal(reviewBy - submittedAt, policyVersion === 2 ? 5n * 86400n : 3n * 86400n);
   const args = [0n, await escrow.read.version(), 1, hash('review timeout')] as const;
   await connection.networkHelpers.time.increaseTo(reviewBy);
   await connection.viem.assertions.revertWithCustomError(
@@ -320,6 +326,30 @@ test('Freelancer can open a review-timeout dispute only after the review deadlin
   assert.equal(receipt.status, 'success');
   assert.equal((await publicClient.getBlock({ blockNumber: receipt.blockNumber })).timestamp, reviewBy + 1n);
   assert.equal(await escrow.read.unallocated(), terms.budgetUnits);
+});
+}
+
+test('policy 2 preserves the agreed milestone deadline and lets Client complain when work is late', async t => {
+  const { connection, owner, outsider, freelancer, token, terms, offChainHash, create } = await setup(t, 'FESC');
+  const agreement = { ...terms, policyVersion: 2 };
+  const { escrow } = await create(agreement);
+  await escrow.write.accept([offChainHash(agreement)], { account: freelancer });
+  await token.write.transfer([owner.address, terms.budgetUnits], { account: outsider });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  await escrow.write.fund();
+  await escrow.write.start({ account: freelancer });
+  await escrow.write.submit([0n, await escrow.read.version(), hash('first delivery')], { account: freelancer });
+  await connection.networkHelpers.time.increaseTo(terms.baseDues[1] - 3600n);
+  await escrow.write.approveAndPayMilestone([0n, await escrow.read.version()]);
+  const [, , deadline] = await escrow.read.milestones([1n]);
+  assert.equal(deadline, terms.baseDues[1]);
+  await connection.networkHelpers.time.increaseTo(deadline + 1n);
+  const version = await escrow.read.version();
+  await connection.viem.assertions.revertWithCustomError(
+    escrow.simulate.submit([1n, version, hash('late delivery')], { account: freelancer.address }), escrow, 'InvalidTime',
+  );
+  await escrow.write.openDispute([1n, version, 2, hash('late work')]);
+  assert.equal(await escrow.read.state(), 4);
 });
 
 test('arbitration allocates the disputed milestone once and refunds future milestones', async t => {

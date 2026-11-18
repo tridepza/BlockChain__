@@ -25,6 +25,7 @@
     "chain:adopt": "node scripts/adopt-chain.mjs",
     "chain:deploy": "hardhat run scripts/deploy-local.ts --network localhost",
     "chain:deploy:fesc": "hardhat run scripts/deploy-fesc-local.ts --network localhost",
+    "chain:upgrade:fesc-factory": "hardhat run scripts/upgrade-fesc-factory.ts --network localhost",
     "chain:deploy:vault": "hardhat run scripts/deploy-vault-local.ts --network localhost",
     "compile:contracts": "hardhat compile",
     "test:contracts": "hardhat test nodejs",

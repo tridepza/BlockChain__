@@ -57,6 +57,7 @@ contract Escrow is ReentrancyGuard {
 
     uint64 public constant WINDOW = 72 hours;
     uint32 public constant POLICY_VERSION = 1;
+    uint64 public constant REVIEW_WINDOW_V2 = 5 days;
     bytes32 private constant CONSENT_STATE_TAG = keccak256("FreelancerEscrow/ConsentState/v1");
     bytes32 private constant CONSENT_PAYLOAD_TAG = keccak256("FreelancerEscrow/ConsentPayload/v1");
     bytes32 private constant CONSENT_TAG = keccak256("FreelancerEscrow/Consent/v1");
@@ -72,6 +73,7 @@ contract Escrow is ReentrancyGuard {
     uint64 public immutable createBy;
     uint64 public immutable fundDeadline;
     uint64 public immutable startDeadline;
+    uint32 public immutable policyVersion;
     uint256 public immutable total;
     State public state;
     Closure public closure;
@@ -115,7 +117,7 @@ contract Escrow is ReentrancyGuard {
             owner == address(0) || terms.freelancer == address(0) || terms.arbitrator == address(0) ||
             owner == terms.freelancer || owner == terms.arbitrator || terms.freelancer == terms.arbitrator ||
             terms.projectRef == bytes32(0) || terms.agreementRef == bytes32(0) || terms.documentHash == bytes32(0) ||
-            terms.policyVersion != POLICY_VERSION ||
+            (terms.policyVersion != POLICY_VERSION && terms.policyVersion != 2) ||
             terms.amounts.length == 0 || terms.amounts.length > 10 ||
             terms.amounts.length != terms.baseDues.length
         ) revert InvalidTerms();
@@ -132,6 +134,7 @@ contract Escrow is ReentrancyGuard {
         fundDeadline = uint64(block.timestamp + 48 hours);
         startDeadline = fundDeadline + 7 days;
         termsHash = verifiedTermsHash;
+        policyVersion = terms.policyVersion;
         uint64 previousDeadline = startDeadline;
         uint256 sum;
         for (uint256 i; i < terms.amounts.length; ++i) {
@@ -204,7 +207,7 @@ contract Escrow is ReentrancyGuard {
         if (evidenceHash == bytes32(0)) revert InvalidTerms();
         item.stage = Stage.Submitted;
         item.submissionHash = evidenceHash;
-        item.deadline = uint64(block.timestamp) + WINDOW;
+        item.deadline = uint64(block.timestamp) + (policyVersion == 2 ? REVIEW_WINDOW_V2 : WINDOW);
         advance(State.Active);
         emit Submitted(index, evidenceHash, item.deadline);
     }
@@ -217,6 +220,8 @@ contract Escrow is ReentrancyGuard {
         ++item.revisions;
         item.stage = Stage.RevisionRequested;
         item.deadline = uint64(block.timestamp) + WINDOW;
+        if (policyVersion == 2 && item.deadline > item.baseDeadline) item.deadline = item.baseDeadline;
+        if (block.timestamp > item.deadline) revert InvalidTime();
         advance(State.Active);
         emit RevisionRequested(index, reasonHash, item.deadline);
     }
@@ -253,7 +258,7 @@ contract Escrow is ReentrancyGuard {
             if (msg.sender != freelancer || item.stage != Stage.Submitted || block.timestamp <= item.deadline) revert InvalidState();
         } else if (reason == Reason.WorkTimeout) {
             if (msg.sender != client || (item.stage != Stage.InProgress && item.stage != Stage.RevisionRequested) ||
-                block.timestamp <= uint256(item.deadline) + WINDOW) revert InvalidState();
+                block.timestamp <= uint256(item.deadline) + (policyVersion == 2 ? 0 : WINDOW)) revert InvalidState();
         } else if (firstCancelExpiry == 0 || block.timestamp <= firstCancelExpiry) {
             revert InvalidState();
         }
@@ -332,7 +337,7 @@ contract Escrow is ReentrancyGuard {
     function activate() private {
         Milestone storage item = milestones[current];
         uint64 minimum = uint64(block.timestamp) + WINDOW;
-        item.deadline = current != 0 && minimum > item.baseDeadline ? minimum : item.baseDeadline;
+        item.deadline = policyVersion == 1 && current != 0 && minimum > item.baseDeadline ? minimum : item.baseDeadline;
         item.stage = Stage.InProgress;
     }
 
@@ -405,6 +410,7 @@ contract Escrow is ReentrancyGuard {
 }
 
 contract EscrowFactory {
+    uint32 public constant LATEST_POLICY_VERSION = 2;
     bytes32 private constant TERMS_TAG = keccak256("FreelancerEscrow/Terms/v1");
     IERC20 public immutable token;
     bytes32 public immutable instanceKey;
