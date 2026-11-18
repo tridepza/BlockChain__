@@ -137,14 +137,17 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(info.project.dispute.by, 'Freelancer');
   assert.equal(info.project.dispute.label, 'Client quá hạn nghiệm thu (5 ngày)');
   assert.deepEqual(info.chain.modes, ['continue', 'terminate']);
+  // The arbitrator is a known Hardhat account, so the server signs and the admin needs no wallet.
+  assert.equal(info.chain.serverSigner, true);
 
   // Admin splits the disputed milestone 50/50 and the contract continues with milestone 2.
   await request('admin/case', 'admin', { projectId: 1, action: 'review', revision: 0, note: 'Đã xem nhật ký trao đổi' });
   assert.equal(stored().adminReview.history[0].note, 'Đã xem nhật ký trao đổi');
   const split = { projectId: 1, action: 'split', mode: 'continue', revision: 1, note: 'Both parties share the delay', evidenceCount: '0' };
-  const { transaction } = await request('admin/case', 'admin', split);
-  const splitReceipt = await confirm(await wallets.admin.sendTransaction({ to: transaction.to, data: transaction.data }));
-  const resumed = await request('admin/case', 'admin', { ...split, hash: splitReceipt.transactionHash });
+  const resumed = await request('admin/case', 'admin', split);
+  assert.equal(resumed.transaction, undefined);
+  assert.match(resumed.project.adminReview.history.at(-1).hash, /^0x[0-9a-f]{64}$/);
+  await request('admin/case', 'admin', split, 409);
   assert.equal(resumed.emailed, 'sent');
   assert.equal(resumed.project.status, 'In progress');
   assert.deepEqual(resumed.project.milestones[0].arbitration, { decision: 'split', mode: 'continue', toFreelancer: 0.05, toClient: 0.05, paidOut: true });
@@ -169,9 +172,8 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(info.project.dispute.kind, 4);
   assert.equal(info.project.disputeHistory.length, 1);
   const refund = { projectId: 1, action: 'refund', mode: 'terminate', revision: 2, note: 'Refund the unfinished work', evidenceCount: '0' };
-  const second = await request('admin/case', 'admin', refund);
-  const refundReceipt = await confirm(await wallets.admin.sendTransaction({ to: second.transaction.to, data: second.transaction.data }));
-  const closed = await request('admin/case', 'admin', { ...refund, hash: refundReceipt.transactionHash });
+  await request('admin/case', 'worker', refund, 403);
+  const closed = await request('admin/case', 'admin', refund);
   assert.equal(closed.project.status, 'Completed');
   assert.equal(closed.project.milestones[1].status, 'Refunded');
   assert.equal(closed.project.disputeHistory.length, 2);

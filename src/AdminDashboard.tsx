@@ -149,7 +149,7 @@ export default function AdminDashboard() {
   </main>;
 }
 
-type CaseData = { project: Project; chain?: { unavailable?: boolean; message?: string; arbitrator: string; evidenceCount: string; modes?: string[] } };
+type CaseData = { project: Project; chain?: { unavailable?: boolean; message?: string; arbitrator: string; evidenceCount: string; modes?: string[]; serverSigner?: boolean } };
 function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () => void }) {
   const [details, setDetails] = useState<CaseData | null>(null);
   const [reload, setReload] = useState(0);
@@ -188,16 +188,18 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     try {
       const input = { projectId, action, note: text, mode, revision: details.project.adminReview?.revision ?? 0,
         evidenceCount: details.chain?.evidenceCount };
-      let transactionHash = hash;
-      if (details.project.currency === 'FESC' && action !== 'review' && !transactionHash) {
-        const prepared = await api<{ transaction: LocalTransaction }>('admin/case', input);
-        const sent = await sendLocalTransaction(prepared.transaction, setNotice);
-        transactionHash = sent.hash; setHash(transactionHash);
+      type CaseResult = { emailed?: string; transaction?: LocalTransaction };
+      if (action !== 'review' && !hash) setNotice('Đang ghi quyết định lên blockchain…');
+      // The server signs with the arbitrator wallet when it can; otherwise it returns the transaction for MetaMask.
+      let result = await api<CaseResult>('admin/case', { ...input, ...(hash && action !== 'review' ? { hash } : {}) });
+      if (result.transaction) {
+        const sent = await sendLocalTransaction(result.transaction, setNotice);
+        setHash(sent.hash);
         if (!await sent.confirmed()) {
           setNotice('Giao dịch đang chờ xác nhận. Giữ mã giao dịch và bấm kiểm tra lại.'); return;
         }
+        result = await api<CaseResult>('admin/case', { ...input, hash: sent.hash });
       }
-      const result = await api<{ emailed?: string }>('admin/case', { ...input, ...(transactionHash && action !== 'review' ? { hash: transactionHash } : {}) });
       if (action === 'review') { setReply(''); setNotice('Đã gửi phản hồi. Hai bên xem được trong dự án.'); }
       else {
         setConfirm(false); setHash('');
@@ -228,7 +230,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     {!details && !error && <p role="status">Đang mở hồ sơ…</p>}
     {error && <p className="form-error" role="alert">{error}</p>}
     {project && <>
-      {project.status === 'Disputed' && details.chain?.arbitrator && !details.chain.unavailable &&
+      {project.status === 'Disputed' && details.chain?.arbitrator && !details.chain.unavailable && !details.chain.serverSigner &&
         <section className="case-summary" aria-label="Ví ký phân xử">
           <b>Ví trọng tài của hợp đồng #{project.id}</b>
           <p><code>{details.chain.arbitrator}</code></p>
@@ -266,7 +268,9 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
         <div className="button-row"><button className="secondary" disabled={busy || reply.trim().length < 3} onClick={() => void send('review', reply)}>Gửi phản hồi</button></div>
         <h4>Quyết định cho giai đoạn bị khiếu nại{disputed ? `: ${disputed.title} (${disputed.amount} FESC)` : ''}</h4>
         {details.chain?.unavailable && <p className="form-error">{details.chain.message}</p>}
-        {details.chain?.arbitrator && <p className="hint">Cần ký bằng ví trọng tài: <code>{details.chain.arbitrator}</code>. {modes.includes('continue') ? 'FESC được chuyển thẳng về ví hai bên ngay trong giao dịch phân xử.' : 'Hợp đồng theo quy tắc cũ chỉ phân bổ quyền rút; hai bên tự bấm Rút FESC trong dự án.'}</p>}
+        {details.chain?.arbitrator && <p className="hint">{details.chain.serverSigner
+          ? 'Máy chủ tự ký quyết định bằng ví trọng tài của hợp đồng, admin không cần MetaMask.'
+          : <>Máy chủ không có khóa của ví trọng tài <code>{details.chain.arbitrator}</code>; cần ký bằng ví này trong MetaMask.</>} {modes.includes('continue') ? 'FESC được chuyển thẳng về ví hai bên ngay trong giao dịch phân xử.' : 'Hợp đồng theo quy tắc cũ chỉ phân bổ quyền rút; hai bên tự bấm Rút FESC trong dự án.'}</p>}
         <label>Quyết định<select aria-label="Quyết định" value={decision} disabled={busy} onChange={event => { setDecision(event.target.value); setConfirm(false); }}>
           {Object.entries(decisionText).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
@@ -275,7 +279,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
         </select></label>
         {modes.length < 2 && <p className="hint">Hợp đồng theo quy tắc cũ chỉ hỗ trợ chấm dứt sau phân xử.</p>}
         <label>Ghi chú / lý do quyết định<textarea value={note} minLength={3} maxLength={2000} disabled={busy} onChange={event => { setNote(event.target.value); setConfirm(false); }}/></label>
-        {project.currency === 'FESC' && <>
+        {project.currency === 'FESC' && !details.chain?.serverSigner && <>
           <label>Mã giao dịch phân xử đã gửi (nếu có)<input value={hash} disabled={busy} onChange={event => { setHash(event.target.value.trim()); setConfirm(false); }} placeholder="0x…"/></label>
           {hash && <p className="hint">Nhập đúng quyết định, lựa chọn sau quyết định và lý do đã dùng khi ký giao dịch này.</p>}
         </>}
@@ -285,7 +289,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
           {share && <p>Freelancer nhận {share[0]} FESC · Client nhận {share[1]} FESC</p>}
           <p>Lý do: {note}</p>
           <p className="hint">Kết quả được gửi qua email cho Client và Freelancer. Quyết định đã xác nhận không thể sửa lại.</p>
-          <div className="button-row"><button className="primary" disabled={busy} onClick={() => void send(decision, note)}>{busy ? 'Đang xử lý…' : hash ? 'Kiểm tra và ghi nhận' : 'Xác nhận quyết định'}</button>
+          <div className="button-row"><button className="primary" disabled={busy} onClick={() => void send(decision, note)}>{busy ? 'Đang ghi lên blockchain…' : hash ? 'Kiểm tra và ghi nhận' : 'Xác nhận quyết định'}</button>
             <button className="secondary" disabled={busy} onClick={() => setConfirm(false)}>Quay lại</button></div>
         </div>}
       </>}

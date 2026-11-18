@@ -9,6 +9,7 @@ import { localChain } from '../src/local-chain.ts';
 import { applyProjectAction, cents, currentMilestone, getSubmissionVersion, WorkflowError } from '../src/workflow.ts';
 import { checkLocalDeployment } from './wallet.mjs';
 import { evidenceFingerprint, markEvidenceUsed, pickEvidence } from './evidence.mjs';
+import { arbitratorSigner } from './arbitrator.mjs';
 
 const rpc = createPublicClient({ chain: hardhat, transport: http(localChain.rpcUrl, { timeout: 3500, retryCount: 0 }) });
 const publicSync = new WeakMap();
@@ -198,6 +199,19 @@ export async function adminFescCase(root, project, input = {}) {
     paid: Math.round((project.paid + toFreelancer) * 1e6) / 1e6, decision: input.note.trim(), milestones,
     dispute: undefined, disputeHistory: history, ...(expectedState === 3 ? { disputeReason: undefined, disputeOpenedBy: undefined } : {}) },
     arbitration, transaction: { id: receipt.transactionHash, time: isoTime(block.timestamp) } };
+}
+
+// Signs and mines the arbitration on the server so the admin needs no wallet. Returns the transaction
+// hash for the normal confirmation step, or undefined when this server cannot sign for the arbitrator.
+export async function adminFescServerSign(root, project, input) {
+  const info = await adminFescCase(root, project);
+  const signer = arbitratorSigner(root, info.arbitrator);
+  if (!signer) return undefined;
+  const prepared = await adminFescCase(root, project, { ...input, action: 'prepare' });
+  const hash = await signer.send({ to: prepared.to, data: prepared.data });
+  const receipt = await rpc.waitForTransactionReceipt({ hash, timeout: 30_000 });
+  if (receipt.status !== 'success') throw new WorkflowError(409, 'Giao dịch phân xử bị Hardhat từ chối. Hãy mở lại hồ sơ.');
+  return hash;
 }
 
 async function readDeployment(root, pinned) {

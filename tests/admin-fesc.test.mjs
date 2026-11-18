@@ -46,7 +46,8 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   }));
   const filename = join(root, 'app.sqlite');
   const notices = [];
-  service = createApi(filename, root, { adminEmails: 'admin@example.test', sendNotice: async message => { notices.push(message); } });
+  // Exercise the MetaMask fallback: the server does not sign for the arbitrator here.
+  service = createApi(filename, root, { adminEmails: 'admin@example.test', serverArbitrator: false, sendNotice: async message => { notices.push(message); } });
   db = new DatabaseSync(filename);
   const tokens = { client: 'a'.repeat(64), worker: 'b'.repeat(64), admin: 'c'.repeat(64) };
   for (const id of Object.keys(wallets)) {
@@ -105,6 +106,7 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   assert.equal(info.project.dispute.by, 'Client');
   assert.deepEqual(info.project.dispute.evidence.map(item => item.kind).sort(), ['file', 'link']);
   assert.deepEqual(info.chain.modes, ['terminate']);
+  assert.equal(info.chain.serverSigner, false);
   const evidenceUrl = `${origin}/api/admin/projects/1/evidence/${screenshot.id}`;
   assert.equal((await fetch(evidenceUrl, { headers: { Cookie: `escrow_session=${tokens.client}` } })).status, 403);
   const shown = await fetch(evidenceUrl + '?inline=1', { headers: { Cookie: `escrow_session=${tokens.admin}` } });

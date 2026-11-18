@@ -18,7 +18,8 @@ import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
 import { fescVault } from './fesc-vault.mjs';
 import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from './admin-analytics.mjs';
 import { discardEvidence, markEvidenceUsed, pickEvidence, receiveEvidence, sendEvidence } from './evidence.mjs';
-import { adminAccounts, chainUnavailableMessage, dueSeconds } from './project-fesc.mjs';
+import { adminAccounts, adminFescServerSign, chainUnavailableMessage, dueSeconds } from './project-fesc.mjs';
+import { arbitratorSigner } from './arbitrator.mjs';
 
 const decisionLabels = { release: 'Giải ngân 100% cho Freelancer', split: 'Chia đều 50/50 cho hai bên', refund: 'Hoàn 100% cho Client' };
 
@@ -262,6 +263,24 @@ function createDatabaseApi(store, root, options = {}) {
             await projectFesc(root, writes, latest, { id: latest.ownerId, role: 'Client' }).catch(() => {});
           }
         });
+        // Without a transaction hash, the server signs the decision itself when it holds the arbitrator key,
+        // so admins need no wallet. The checks guarding a decision run before anything is signed; the usual
+        // confirmation below then verifies the mined transaction, records it and emails both parties.
+        if (method === 'POST' && decisionLabels[input.action] && !input.hash && options.serverArbitrator !== false) {
+          const pending = await store.transaction(writes => writes.getProject(id));
+          const note = typeof input.note === 'string' ? input.note.trim() : '';
+          if (pending?.currency === 'FESC' && pending.fesc && pending.status === 'Disputed' &&
+              account.id !== pending.ownerId && account.id !== pending.freelancerId &&
+              note.length >= 3 && note.length <= 2000 && input.revision === (pending.adminReview?.revision ?? 0)) {
+            try {
+              const hash = await adminFescServerSign(root, pending, { ...input, decision: input.action });
+              if (hash) input.hash = hash;
+            } catch (error) {
+              if (error instanceof WorkflowError && error.status === 503) throw new WorkflowError(409, await chainUnavailableMessage(root, pending));
+              throw error;
+            }
+          }
+        }
         const result = await store.transaction(async writes => {
           const current = await writes.getSessionUser(hashToken(token), true);
           if (!current || !isAdminAccount(current, options.adminEmails ?? adminEmails(root))) throw new WorkflowError(403, 'Quyền quản trị đã thay đổi.');
@@ -270,7 +289,10 @@ function createDatabaseApi(store, root, options = {}) {
           if (method === 'GET') {
             let chain;
             if (project.currency === 'FESC') {
-              try { chain = await adminFescCase(root, project); }
+              try {
+                chain = await adminFescCase(root, project);
+                chain.serverSigner = options.serverArbitrator !== false && !!arbitratorSigner(root, chain.arbitrator);
+              }
               catch { chain = { unavailable: true, message: await chainUnavailableMessage(root, project) }; }
             }
             return { project, chain };
