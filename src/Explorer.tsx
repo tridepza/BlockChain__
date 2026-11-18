@@ -122,12 +122,9 @@ export default function Explorer() {
     </div></header>
     <main className="explorer-frame explorer-main">
       <div className="page-header"><div>
-        <span className="eyebrow">Sổ giao dịch công khai</span>
         <h1>Giao dịch FESC công khai</h1>
-        <p>Tra cứu các lần chuyển FESC đã được blockchain xác nhận, gồm ký quỹ, giải ngân và nạp/rút tài khoản.</p>
       </div><button type="button" className="secondary" disabled={loading} onClick={refresh}>
         <RefreshCw size={16}/> Làm mới</button></div>
-      <p className="explorer-privacy">Không cần đăng nhập. Chỉ công khai địa chỉ ví và giao dịch; email, nội dung dự án và tệp bàn giao được giữ riêng tư.</p>
       <div className="explorer-tabs" role="tablist" aria-label="Cách xem giao dịch" onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
@@ -159,7 +156,6 @@ export default function Explorer() {
         {error && <p className="form-error" role="alert">{error}</p>}
         {holdersView && <div className="holders-content">
           <h2>Top ví nắm giữ FESC</h2>
-          <p className="muted">Sắp xếp số dư từ cao xuống thấp, bao gồm ví và hợp đồng. Chọn địa chỉ để xem lịch sử giao dịch.</p>
           {holders && !loading && !error && <>
             <div className="holders-summary">
               <span><strong>{holders.totalHolders}</strong> địa chỉ đang giữ FESC</span>
@@ -189,7 +185,7 @@ export default function Explorer() {
             {next ? 'Chưa có giao dịch trong khoảng block vừa kiểm tra. Bạn có thể xem các block cũ hơn.' : 'Chưa có giao dịch FESC đã xác nhận phù hợp.'}
           </p>}
           {transfers.length > 0 && <>
-            <p className="explorer-result">{transfers.length} lượt chuyển FESC · Mới nhất trước · Thời gian theo block xác nhận, giờ Việt Nam (UTC+7)</p>
+            <p className="explorer-result">{transfers.length} lượt chuyển FESC · Mới nhất trước</p>
             <ol className="transfer-list" aria-label="Lịch sử chuyển FESC đã xác nhận">
               {transfers.map(row => <li className="public-transfer" key={`${row.hash}:${row.logIndex}`}>
                 <div className="public-transfer-head"><span className="pill green">Đã xác nhận</span>

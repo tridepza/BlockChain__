@@ -136,15 +136,13 @@ export default function Auth({ onLogin, onDemo, initialMessage }: {
         <div className="auth-intro-body">
           <span className="auth-kicker">Môi trường thử nghiệm</span>
           <p className="auth-tagline">Ký quỹ theo tiến độ dự án.</p>
-          <p>Từ lúc chọn Freelancer đến khi nghiệm thu và thanh toán từng mốc.</p>
         </div>
       </section>
       <section className="auth-content" aria-labelledby="auth-title">
         <div className="auth-card">
           <h1 id="auth-title">{resetToken ? 'Đặt lại mật khẩu' : challenge ? 'Xác nhận email' : mode === 'forgot' ? 'Quên mật khẩu' : mode === 'projects' ? 'Dự án đang mở' : register ? 'Tạo tài khoản' : 'Đăng nhập'}</h1>
-          <p>{resetToken ? 'Chọn mật khẩu mới để bảo vệ tài khoản.' : challenge ? `Nhập mã 6 chữ số gửi tới ${challenge.email} để ${register ? 'hoàn tất đăng ký' : mode === 'forgot' ? 'đặt lại mật khẩu' : 'đăng nhập'}.` : mode === 'forgot' ? 'Nhập Gmail đã đăng ký để nhận mã OTP khôi phục.' : mode === 'projects' ? 'Khám phá các dự án đang tìm Freelancer.' : register
-            ? 'Chọn vai trò phù hợp để bắt đầu.'
-            : 'Dùng email và mật khẩu để vào không gian làm việc.'}</p>
+          {challenge && !resetToken && <p>Nhập mã 6 chữ số đã gửi tới {challenge.email}.</p>}
+          {mode === 'forgot' && !challenge && <p>Nhập email đã đăng ký để nhận mã khôi phục.</p>}
           {message && <p className="form-message" role="status">{message}</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
           {mode === 'projects' ? (

@@ -9,6 +9,8 @@ Demo một dự án có một milestone trị giá **100 FESC**, từ lúc Clien
 - Trong cả hai ví, chọn **Hardhat Local**, RPC `http://127.0.0.1:8545`, Chain ID `31337`. Mỗi ví cần ETH thử để trả phí gas. Ví Client cần ít nhất 100 FESC của token đang dùng trong dự án.
 - Vào **Ví & giao dịch → Kết nối MetaMask** ở từng hồ sơ rồi ký thông điệp liên kết ví. Chuẩn bị một tệp PDF xem trước dưới 2 MiB để gửi bàn giao.
 
+FESC được ký quỹ trực tiếp từ MetaMask vào hợp đồng dự án và giải ngân về MetaMask của Freelancer. Không cần nạp vào tài khoản trung gian. Nếu còn tiền đã nạp vào FescVault trước đây, trang **Ví & giao dịch** hiển thị **FESC đã nạp trước đây** để rút về ví; mục này ẩn khi không còn số dư. Giao diện không còn chức năng nạp vào vault hoặc bài thử ký quỹ độc lập. Hợp đồng và lịch sử nạp/rút cũ vẫn được giữ nguyên.
+
 ## Trình diễn
 
 | Bước | Thao tác | Kết quả cần chỉ cho giảng viên |

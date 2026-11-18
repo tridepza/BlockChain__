@@ -25,13 +25,6 @@ const navigation = [
   { id: 'profile', label: 'Hồ sơ', Icon: Settings },
 ] as const;
 type Page = typeof navigation[number]['id'] | 'detail';
-const pageDescription = {
-  overview: 'Theo dõi những dự án bạn tham gia và các mốc đang chờ nghiệm thu.',
-  projects: 'Ký quỹ, theo dõi bàn giao và thanh toán theo từng mốc.',
-  wallet: 'Quản lý ví và xem lịch sử thanh toán của các dự án.',
-  disputes: 'Xem các dự án đang chờ phân xử trong bản demo.',
-  profile: 'Quản lý tên hiển thị và xem thông tin tài khoản.',
-};
 type Dialog = { kind: 'create' } | { kind: 'action'; projectId: number; action: ProjectAction };
 async function encodeDeliveryFile(file: File, limit: number) {
   if (file.size > limit) throw new WorkflowError(413, `Tệp ${file.name} vượt giới hạn ${limit / (1024 * 1024)} MiB.`);
@@ -359,7 +352,7 @@ function Workspace(props: WorkspaceProps) {
         <div className="page-header">
           <div>{page === 'detail'
             ? <button className="back" onClick={() => navigate('projects')}><ArrowLeft size={16}/> Quay lại dự án</button>
-            : <><h1>{page === 'overview' ? `Chào ${actor.name.trim().split(/\s+/)[0]}` : title}</h1><p>{pageDescription[page]}</p></>}
+            : <h1>{page === 'overview' ? `Chào ${actor.name.trim().split(/\s+/)[0]}` : title}</h1>}
           </div>
           <div className="page-actions">
             {demo && <label className="role-select">Vai trò demo
@@ -399,9 +392,9 @@ function Workspace(props: WorkspaceProps) {
             onFescChanged={refreshFescWorkspace}
             onAction={action => openDialog({ kind: 'action', projectId: current.id, action })}/> :
           <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/></div>)}
-        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id} isClient={actor.role === 'Client'}>
+        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id}>
           {mockWallet && <section className="panel wallet-card">
-          <div className="panel-head"><div><h2>Số dư MOCK</h2><p>Dành cho dự án mô phỏng, không cần MetaMask.</p></div><span className="stat-icon"><Wallet size={19}/></span></div>
+          <div className="panel-head"><h2>Số dư MOCK <small>· Mô phỏng</small></h2><span className="stat-icon"><Wallet size={19}/></span></div>
           <div className="balance">{money(mockWallet.cents / 100)}</div>
           {actor.role === 'Client' && !mockWallet.claimed && <button className="primary" disabled={busy}
             onClick={() => void run(async () => {
@@ -477,7 +470,6 @@ function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClos
           <label>Ngân sách ({budgetCurrency})<input name="budget" type="number" min="0.01" step="0.01" required placeholder="100"/></label>
           <label>Tên milestone, cách nhau bằng dấu phẩy<input name="milestones" required maxLength={800} placeholder="Thiết kế, Frontend, Backend"/></label>
           <label>Số tiền từng milestone, cách nhau bằng dấu phẩy<input name="amounts" required maxLength={120} placeholder="30,40,30"/></label>
-          <p className="hint">Ví dụ ngân sách 100 {budgetCurrency} chia thành 3 milestone có số tiền 30, 40 và 30.</p>
         </> : action === 'assign' && !demo ? (
           <label>Email của Freelancer<input name="email" type="email" required autoFocus maxLength={254}/></label>
         ) : needsNote ? (
@@ -491,13 +483,12 @@ function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClos
               <label>Bản gốc thử (tùy chọn, tối đa 10 MiB)
                 <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
               </label>
-              <p className="hint">Client xem được bản xem trước ngay. Bản gốc thử mở sau khi milestone được giải ngân bằng {currency ?? 'MOCK'}.
-                {currency === 'FESC' && ' Sau khi lưu tệp, xác nhận bàn giao trong MetaMask.'}</p>
+              <p className="hint">Bản gốc mở sau khi giải ngân.{currency === 'FESC' && ' Lưu tệp xong, xác nhận bàn giao trong MetaMask.'}</p>
             </>}
           </>
         ) : <p className="hint">{action === 'approve' && !demo
-          ? 'Giải ngân MOCK cho milestone này và mở bản gốc của phiên bản đang nghiệm thu nếu có.'
-          : action === 'confirmCancel' ? 'Dự án sẽ đóng và số dư chưa phân bổ sẽ được hoàn lại cho Client.' : 'Xác nhận thao tác trên dự án mô phỏng.'}</p>}
+          ? 'Giải ngân milestone và mở bản gốc bàn giao.'
+          : action === 'confirmCancel' ? 'Đóng dự án và hoàn số dư chưa phân bổ cho Client.' : 'Xác nhận thao tác này?'}</p>}
         <button className="primary full" type="submit" autoFocus={!create && action !== 'assign' && !needsNote}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
       </fieldset>
     </form>
@@ -664,7 +655,6 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
       <details className="project-terms">
         <summary>Điều khoản và thông tin dự án</summary>
         <p>Mã dự án: #{p.id} · Ngày tạo: {p.created}</p>
-        <p>Thực hiện và nghiệm thu các mốc theo thứ tự. {fesc ? 'Client xác nhận giải ngân FESC trong MetaMask.' : 'Thanh toán bằng số dư MOCK mô phỏng.'}</p>
       </details>
     </section>
   </>;

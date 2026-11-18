@@ -172,6 +172,119 @@ test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ c
   await expect(page.getByText(hash)).toBeVisible();
 });
 
+for (const scenario of [
+  { failAt: 'eth_accounts', outcome: 'approve' },
+  { failAt: 'wallet_switchEthereumChain', outcome: 'approve' },
+  { failAt: 'personal_sign', outcome: 'approve' },
+  { failAt: 'personal_sign', outcome: 'reject' },
+  { failAt: 'personal_sign', outcome: 'still-unauthorized' },
+]) {
+  test(`kết nối MetaMask xử lý 4100 tại ${scenario.failAt}: ${scenario.outcome}`, async ({ page }) => {
+    const originalAddress = '0x1000000000000000000000000000000000000001';
+    const selectedAddress = '0x2000000000000000000000000000000000000002';
+    const signature = '0x' + 'a'.repeat(130);
+    const calls: { method: string; params?: unknown[] }[] = [];
+    const challenges: { address: string; chainId: number }[] = [];
+    let permitted = false, chainId = '0x1', verified = false;
+    await page.exposeFunction('connectRpc', (method: string, params?: unknown[]) => {
+      calls.push({ method, params });
+      if (method === 'wallet_requestPermissions') {
+        if (scenario.outcome === 'reject') return { failure: 4001 };
+        permitted = true;
+        return [];
+      }
+      if (method === scenario.failAt && (!permitted || scenario.outcome === 'still-unauthorized')) return { failure: 4100 };
+      if (method === 'eth_accounts' || method === 'eth_requestAccounts') return [permitted ? selectedAddress : originalAddress];
+      if (method === 'eth_chainId') return chainId;
+      if (method === 'wallet_switchEthereumChain') { chainId = '0x7a69'; return null; }
+      if (method === 'personal_sign') return signature;
+      throw new Error('Unexpected RPC: ' + method);
+    });
+    await page.addInitScript(() => {
+      const { connectRpc } = window as unknown as { connectRpc: (method: string, params?: unknown[]) => Promise<unknown> };
+      Object.defineProperty(window, 'ethereum', { value: {
+        isMetaMask: true, on() {}, removeListener() {},
+        async request({ method, params }: { method: string; params?: unknown[] }) {
+          const result = await connectRpc(method, params);
+          if (result && typeof result === 'object' && 'failure' in result) {
+            throw Object.assign(new Error('Permission denied'), { code: result.failure });
+          }
+          return result;
+        },
+      } });
+    });
+    await register(page, 'Ví quyền thử', `connect-${scenario.failAt}-${scenario.outcome}@example.test`.toLowerCase(), 'Freelancer');
+    await login(page);
+    await page.route('**/api/wallet', route => route.fulfill({ json: { wallet: null } }));
+    await page.route('**/api/wallet/challenges', route => {
+      challenges.push(route.request().postDataJSON());
+      return route.fulfill({ json: { challengeId: 'challenge-' + challenges.length, message: 'Link wallet to Freelancer Escrow' } });
+    });
+    await page.route('**/api/wallet/verify', route => {
+      expect(route.request().postDataJSON()).toEqual({ challengeId: 'challenge-' + challenges.length, signature });
+      verified = true;
+      return route.fulfill({ json: { wallet: { address: selectedAddress, chainId: 31337, verifiedAt: new Date().toISOString() } } });
+    });
+    await page.route('**/api/wallet/fesc-balance', route => route.fulfill({ json: { balance: '0', token: originalAddress } }));
+    await page.route('**/api/wallet/fesc-account', route => route.fulfill({ json: { walletBalance: '0', accountBalance: '0', history: [] } }));
+    await click(page, 'Ví & giao dịch');
+    await click(page, 'Kết nối MetaMask');
+    if (scenario.outcome === 'approve') {
+      await expect(page.getByRole('status').filter({ hasText: 'Đã xác minh và lưu địa chỉ ví.' })).toBeVisible();
+      expect(verified).toBe(true);
+      expect(challenges.at(-1)).toEqual({ address: selectedAddress, chainId: 31337 });
+      expect(calls.filter(call => call.method === 'personal_sign').at(-1)?.params?.[1]).toBe(selectedAddress);
+    } else {
+      await expect(page.getByRole('alert')).toContainText(scenario.outcome === 'reject' ? 'Bạn đã hủy yêu cầu' : 'Ký thông điệp trong MetaMask');
+      expect(verified).toBe(false);
+      await expect(page.getByRole('button', { name: 'Kết nối MetaMask', exact: true })).toBeEnabled();
+    }
+    expect(calls.filter(call => call.method === 'wallet_requestPermissions')).toEqual([
+      { method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] },
+    ]);
+    expect(calls.some(call => call.method === 'eth_sendTransaction')).toBe(false);
+  });
+}
+
+for (const delayed of [false, true]) {
+  test(`nhận diện MetaMask qua EIP-6963 ${delayed ? 'sau khi trang đã mở' : 'khi ví khác chiếm window.ethereum'}`, async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'ethereum', { value: {
+        request() { throw new Error('Không được chọn ví khác thay MetaMask'); },
+      } });
+    });
+    const announceMetaMask = () => {
+      const provider = {
+        // Discovery must work even without the legacy isMetaMask flag.
+        async request({ method }: { method: string }) {
+          if (method === 'eth_accounts') return [];
+          if (method === 'eth_requestAccounts') throw Object.assign(new Error('User rejected'), { code: 4001 });
+          throw new Error('Unexpected RPC: ' + method);
+        },
+        on() {}, removeListener() {},
+      };
+      const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', { detail: {
+        info: { uuid: '89e563cc-14ce-4ba1-ae9c-112ec515c954', name: 'MetaMask', rdns: 'io.metamask', icon: '' }, provider,
+      } }));
+      window.addEventListener('eip6963:requestProvider', announce);
+      announce();
+    };
+    if (!delayed) await page.addInitScript(announceMetaMask);
+    await register(page, 'Ví thử', `discovery-${delayed}@example.test`, 'Freelancer');
+    await login(page);
+    await click(page, 'Ví & giao dịch');
+    if (delayed) {
+      await click(page, 'Kết nối MetaMask');
+      await expect(page.getByRole('alert')).toContainText('nhấn Ctrl+R');
+      await page.evaluate(announceMetaMask);
+      await expect(page.getByRole('alert')).toHaveCount(0);
+    }
+    await click(page, 'Kết nối MetaMask');
+    await expect(page.getByRole('alert')).toHaveText('Bạn đã hủy yêu cầu trong MetaMask.');
+    await expect(page.getByRole('button', { name: 'Kết nối MetaMask', exact: true })).toBeEnabled();
+  });
+}
+
 test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao lại và giải ngân', async ({ page, browser, baseURL }) => {
   const freelancerContext = await browser.newContext({ baseURL });
   const guestContext = await browser.newContext({ baseURL });
@@ -352,7 +465,6 @@ test.describe('Thời gian giao dịch theo múi giờ Việt Nam', () => {
     await expect(newest.getByText('Giờ giao dịch', { exact: true })).toBeVisible();
     await expect(newest.locator('dl')).toContainText(/Ngày giao dịch\s*18\/11\/2026/);
     await expect(newest.locator('dl')).toContainText(/Giờ giao dịch\s*00:00:01\s*\(UTC\+7\)/);
-    await expect(page.getByText(/Thời gian theo block xác nhận, giờ Việt Nam \(UTC\+7\)/)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
     await page.screenshot({ path: '.local-data/ui-preview/transfer-date-mobile.png', fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -487,60 +599,86 @@ test('quên mật khẩu chỉ hiện hai ô mật khẩu sau khi OTP đúng', a
   await expect(page.getByRole('heading', { name: /Chào / })).toBeVisible();
 });
 
-test('nạp/rút FESC bằng MetaMask cập nhật hai số dư sau xác nhận', async ({ page }) => {
-  const address = '0x1000000000000000000000000000000000000001';
-  const token = '0x2000000000000000000000000000000000000002';
-  const vault = '0x3000000000000000000000000000000000000003';
-  const block = '0x' + 'a'.repeat(64);
-  let walletBalance = 100, accountBalance = 0, approved = false, action = '', amount = 0, sequence = 0;
-  await page.exposeFunction('walletRpc', async (method: string) => {
-    if (method === 'eth_accounts') return [address];
-    if (method === 'eth_chainId') return '0x7a69';
-    if (method === 'eth_getBlockByNumber') return { hash: block };
-    if (method === 'eth_sendTransaction') return '0x' + (++sequence).toString(16).padStart(64, '0');
-    if (method === 'eth_getTransactionReceipt') {
-      if (action === 'approve') approved = true;
-      if (action === 'deposit') { walletBalance -= amount; accountBalance += amount; }
-      if (action === 'withdraw') { walletBalance += amount; accountBalance -= amount; }
-      action = '';
-      return { status: '0x1' };
+for (const initialAccountBalance of [0, 10]) {
+  test(`ví FESC bỏ bước nạp trung gian, số dư cũ ${initialAccountBalance} FESC`, async ({ page }) => {
+    const address = '0x1000000000000000000000000000000000000001';
+    const token = '0x2000000000000000000000000000000000000002';
+    const vault = '0x3000000000000000000000000000000000000003';
+    const block = '0x' + 'a'.repeat(64);
+    let walletBalance = 100 - initialAccountBalance, accountBalance = initialAccountBalance;
+    let amount = 0, sequence = 0, reads = 0, pendingWithdrawal = false;
+    const actions: string[] = [];
+    const sent: unknown[][] = [];
+    await page.exposeFunction('walletRpc', async (method: string, params?: unknown[]) => {
+      if (method === 'eth_accounts') return [address];
+      if (method === 'eth_chainId') return '0x7a69';
+      if (method === 'eth_getBlockByNumber') return { hash: block };
+      if (method === 'eth_sendTransaction') {
+        sent.push(params ?? []);
+        pendingWithdrawal = true;
+        return '0x' + (++sequence).toString(16).padStart(64, '0');
+      }
+      if (method === 'eth_getTransactionReceipt') {
+        if (pendingWithdrawal) { walletBalance += amount; accountBalance -= amount; pendingWithdrawal = false; }
+        return { status: '0x1' };
+      }
+      throw new Error('Unexpected RPC: ' + method);
+    });
+    await page.addInitScript(() => {
+      const rpc = (window as unknown as { walletRpc: (method: string, params?: unknown[]) => Promise<unknown> }).walletRpc;
+      Object.defineProperty(window, 'ethereum', { value: { isMetaMask: true, on() {}, removeListener() {},
+        request: ({ method, params }: { method: string; params?: unknown[] }) => rpc(method, params) } });
+    });
+    await register(page, 'Ví Freelancer', `vault-ui-${initialAccountBalance}@example.test`, 'Freelancer');
+    await login(page);
+    await page.route('**/api/wallet', route => route.fulfill({ json: { wallet: { address, chainId: 31337, verifiedAt: new Date().toISOString() } } }));
+    await page.route('**/api/wallet/fesc-balance', route => route.fulfill({ json: { balance: String(walletBalance), token } }));
+    await page.route('**/api/wallet/fesc-account', async route => {
+      const input = route.request().postDataJSON();
+      if (!input.action) {
+        reads++;
+        return route.fulfill({ json: { token, vault, walletBalance: String(walletBalance), accountBalance: String(accountBalance), history: [] } });
+      }
+      expect(input.action).toBe('withdraw');
+      actions.push(input.action);
+      amount = Number(input.amount);
+      return route.fulfill({ json: { step: 'withdraw', from: address, to: vault,
+        data: '0x1234', deploymentBlock: '0x1', deploymentBlockHash: block } });
+    });
+    await click(page, 'Ví & giao dịch');
+    await expect.poll(() => reads).toBeGreaterThan(0);
+    await expect(page.getByRole('button', { name: 'Nạp FESC vào tài khoản' })).toHaveCount(0);
+    await expect(page.getByText('Bài thử ký quỹ Hardhat độc lập')).toHaveCount(0);
+    const section = page.getByRole('region', { name: 'FESC đã nạp trước đây', exact: true });
+    if (initialAccountBalance === 0) {
+      await expect(section).toHaveCount(0);
+      expect(sent).toEqual([]);
+      return;
     }
+    await expect(section.getByText('10 FESC', { exact: false }).first()).toBeVisible();
+    await section.getByLabel('Số FESC rút').fill('5');
+    await section.getByRole('button', { name: 'Rút FESC về ví' }).click();
+    await expect(section.getByRole('status')).toHaveText('Đã rút FESC về ví MetaMask.');
+    await expect(section.locator('.balance')).toContainText('5 FESC');
+    expect(walletBalance).toBe(95); expect(accountBalance).toBe(5);
+    await expect(page.locator('.wallet-card .balance').first()).toHaveText('95 FESC');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('main')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: '.local-data/ui-preview/fesc-withdraw-mobile.png', fullPage: true });
+    await section.getByRole('button', { name: 'Rút FESC về ví' }).click();
+    await expect(section.locator('.balance')).toContainText('0 FESC');
+    await expect(section.getByRole('button', { name: 'Rút FESC về ví' })).toHaveCount(0);
+    expect(walletBalance).toBe(100); expect(accountBalance).toBe(0);
+    expect(actions).toEqual(['withdraw', 'withdraw']);
+    expect(sent).toEqual(Array.from({ length: 2 }, () => [{ from: address, to: vault, data: '0x1234', value: '0x0' }]));
+    await click(page, 'Mở menu');
+    await click(page, 'Tổng quan');
+    await click(page, 'Mở menu');
+    await click(page, 'Ví & giao dịch');
+    await expect(section).toHaveCount(0);
   });
-  await page.addInitScript(() => {
-    const rpc = (window as unknown as { walletRpc: (method: string) => Promise<unknown> }).walletRpc;
-    Object.defineProperty(window, 'ethereum', { value: { isMetaMask: true, on() {}, removeListener() {},
-      request: ({ method }: { method: string }) => rpc(method) } });
-  });
-  await register(page, 'Ví Freelancer', 'vault-ui@example.test', 'Freelancer');
-  await login(page);
-  await page.route('**/api/wallet', route => route.fulfill({ json: { wallet: { address, chainId: 31337, verifiedAt: new Date().toISOString() } } }));
-  await page.route('**/api/wallet/fesc-balance', route => route.fulfill({ json: { balance: String(walletBalance), token } }));
-  await page.route('**/api/wallet/fesc-account', async route => {
-    const input = route.request().postDataJSON();
-    if (!input.action) return route.fulfill({ json: { token, vault, walletBalance: String(walletBalance), accountBalance: String(accountBalance), history: [] } });
-    amount = Number(input.amount);
-    action = input.action === 'deposit' && !approved ? 'approve' : input.action;
-    return route.fulfill({ json: { step: action, from: address, to: action === 'approve' ? token : vault,
-      data: '0x1234', deploymentBlock: '0x1', deploymentBlockHash: block } });
-  });
-  await click(page, 'Ví & giao dịch');
-  const section = page.getByRole('region', { name: 'Tài khoản FESC', exact: true });
-  await expect(section.getByText('0 FESC', { exact: false }).first()).toBeVisible();
-  await section.getByLabel('Số FESC nạp hoặc rút').fill('10');
-  await section.getByRole('button', { name: 'Nạp FESC vào tài khoản' }).click();
-  await expect(section.getByRole('status')).toContainText('Đã cập nhật quyền token');
-  await section.getByRole('button', { name: 'Nạp FESC vào tài khoản' }).click();
-  await expect(section.getByRole('status')).toHaveText('Đã nạp FESC vào tài khoản.');
-  expect(walletBalance).toBe(90); expect(accountBalance).toBe(10);
-  await section.getByLabel('Số FESC nạp hoặc rút').fill('5');
-  await section.getByRole('button', { name: 'Rút FESC về ví' }).click();
-  await expect(section.getByRole('status')).toHaveText('Đã rút FESC về ví MetaMask.');
-  expect(walletBalance).toBe(95); expect(accountBalance).toBe(5);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('main')).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-  await page.screenshot({ path: '.local-data/ui-preview/fesc-account-mobile.png', fullPage: true });
-});
+}
 
 test('dự án FESC thuộc chain trước chỉ hiện lịch sử và không mời ký giao dịch', async ({ page }) => {
   await register(page, 'Lịch Sử FESC', 'historical-ui@example.test', 'Client');
