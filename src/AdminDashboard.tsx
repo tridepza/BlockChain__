@@ -247,7 +247,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
         <div className="button-row"><button className="secondary" disabled={busy || reply.trim().length < 3} onClick={() => void send('review', reply)}>Gửi phản hồi</button></div>
         <h4>Quyết định cho giai đoạn bị khiếu nại{disputed ? `: ${disputed.title} (${disputed.amount} FESC)` : ''}</h4>
         {details.chain?.unavailable && <p className="form-error">{details.chain.message}</p>}
-        {details.chain?.arbitrator && <p className="hint">Cần ký bằng ví trọng tài: <code>{details.chain.arbitrator}</code>. Quyết định phân bổ quyền rút; các bên tự rút FESC về ví.</p>}
+        {details.chain?.arbitrator && <p className="hint">Cần ký bằng ví trọng tài: <code>{details.chain.arbitrator}</code>. {modes.includes('continue') ? 'FESC được chuyển thẳng về ví hai bên ngay trong giao dịch phân xử.' : 'Hợp đồng theo quy tắc cũ chỉ phân bổ quyền rút; hai bên tự bấm Rút FESC trong dự án.'}</p>}
         <label>Quyết định<select aria-label="Quyết định" value={decision} disabled={busy} onChange={event => { setDecision(event.target.value); setConfirm(false); }}>
           {Object.entries(decisionText).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>

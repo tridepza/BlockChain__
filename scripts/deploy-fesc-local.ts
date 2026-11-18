@@ -60,7 +60,7 @@ try {
       chainId: 31337,
       projectPayments: 1,
       escrowPolicy: 2,
-      factoryRevision: 2,
+      factoryRevision: 3,
       instanceKey,
       token: token.address,
       tokenCodeHash: keccak256(tokenCode),

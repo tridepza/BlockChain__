@@ -194,7 +194,8 @@ export function DisputeRecordView({ project, accountId, onChanged }: { project: 
           <small>{vnTime(item.at)} · {item.action === 'review' ? 'Phản hồi' : 'Quyết định'}</small>
           <p>{item.note}</p>
           {item.arbitration && <p className="hint">Freelancer nhận {item.arbitration.toFreelancer} FESC · Client nhận {item.arbitration.toClient} FESC ·
-            {item.arbitration.mode === 'continue' ? ' tiếp tục giai đoạn sau' : ' chấm dứt hợp đồng'}</p>}
+            {item.arbitration.mode === 'continue' ? ' tiếp tục giai đoạn sau' : ' chấm dứt hợp đồng'}
+            {item.arbitration.paidOut ? ' · đã chuyển về ví' : ' · bấm Rút FESC để nhận'}</p>}
         </li>)}
       </ol>
     </>}

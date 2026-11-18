@@ -17,9 +17,11 @@ export async function checkLocalDeployment(root, address, currency = 'MockUSDC',
   try {
     const manifest = currency === 'FESC' ? 'local-fesc-deployment.json' : 'local-deployment.json';
     deployment = pinned ?? JSON.parse(await readFile(resolve(root, '.hardhat', manifest), 'utf8'));
+    // Parse before starting RPC calls so a malformed manifest cannot leave a request unhandled.
+    const startBlockNumber = BigInt(deployment.startBlock);
     const [chainId, startBlock, factoryCode, instanceKey] = await Promise.all([
       rpc.getChainId(),
-      rpc.getBlock({ blockNumber: BigInt(deployment.startBlock) }),
+      rpc.getBlock({ blockNumber: startBlockNumber }),
       rpc.getCode({ address: deployment.factory }),
       rpc.readContract({ address: deployment.factory, abi: factoryAbi, functionName: 'instanceKey' }),
     ]);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -132,6 +132,19 @@ test('admin APIs protect private disputes, count visitors, share replies and rej
   const workerView = await request('workspace', 'worker');
   assert.equal(workerView.body.projects.find(item => item.id === 1).adminReview.history[0].note, 'Please add the chat log');
   assert.equal(workerView.body.mockWallet, undefined);
+
+  // A contract pinned to another machine's chain explains why it cannot be decided here.
+  const noContract = await request('admin/case?projectId=1', 'admin');
+  assert.equal(noContract.body.chain.unavailable, true);
+  assert.match(noContract.body.chain.message, /chưa tạo hợp đồng/);
+  await mkdir(join(root, '.hardhat'), { recursive: true });
+  await writeFile(join(root, '.hardhat/local-fesc-deployment.json'), JSON.stringify({ instanceKey: '0x' + '1'.repeat(64) }));
+  db.prepare('INSERT INTO projects VALUES (?, ?)').run(3, JSON.stringify({ ...project, id: 3, title: 'Other chain',
+    fesc: { deployment: { chainId: 31337, instanceKey: '0x' + '7'.repeat(64), startBlock: '1', startBlockHash: '0x' + '8'.repeat(64),
+      factory: '0x' + '9'.repeat(40) }, client: '0x' + '2'.repeat(40), freelancer: '0x' + '3'.repeat(40) } }));
+  const otherChain = await request('admin/case?projectId=3', 'admin');
+  assert.equal(otherChain.status, 200);
+  assert.match(otherChain.body.chain.message, /blockchain local khác \(mã triển khai 0x77777777/);
 
   // MOCK projects can no longer be settled; FESC decisions need a verified chain transaction.
   assert.equal((await request('admin/case', 'admin', { projectId: 2, action: 'release', note: 'Legacy', revision: 0 })).status, 409);

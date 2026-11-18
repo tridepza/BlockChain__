@@ -147,16 +147,18 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   const resumed = await request('admin/case', 'admin', { ...split, hash: splitReceipt.transactionHash });
   assert.equal(resumed.emailed, 'sent');
   assert.equal(resumed.project.status, 'In progress');
-  assert.deepEqual(resumed.project.milestones[0].arbitration, { decision: 'split', mode: 'continue', toFreelancer: 0.05, toClient: 0.05 });
+  assert.deepEqual(resumed.project.milestones[0].arbitration, { decision: 'split', mode: 'continue', toFreelancer: 0.05, toClient: 0.05, paidOut: true });
   assert.equal(resumed.project.milestones[1].status, 'In progress');
   assert.equal(resumed.project.paid, 0.05);
   assert.equal(notices.length, 2);
   assert.match(notices[0].text, /Chia đều 50\/50/);
   assert.match(notices[0].text, /tiếp tục giai đoạn tiếp theo/);
+  assert.match(notices[0].text, /chuyển thẳng về ví/);
   status = await state('worker');
   assert.equal(status.step, 'upload');
-  assert.equal(status.claimable, '0.05');
-  await execute('withdraw', 'worker');
+  // The decision itself transferred both halves; nothing waits to be withdrawn.
+  assert.equal(status.claimable, '0');
+  await request('projects/fesc', 'worker', { projectId: 1, action: 'withdraw' }, 409);
   assert.equal(await rpc.readContract({ address: token, abi: tokenArtifact.abi, functionName: 'balanceOf', args: [wallets.worker.account.address] }), parseUnits('0.05', 18));
 
   // Client complains for another reason and asks admin to end the contract.
@@ -175,8 +177,11 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(closed.project.disputeHistory.length, 2);
   assert.equal(notices.length, 4);
   const escrowAbi = parseAbi(['function claimable(address beneficiary) view returns (uint256)']);
-  assert.equal(await rpc.readContract({ address: info.chain.escrow, abi: escrowAbi, functionName: 'claimable', args: [wallets.client.account.address] }), parseUnits('0.25', 18));
-  assert.equal((await state('client')).step, 'withdraw');
+  assert.equal(await rpc.readContract({ address: info.chain.escrow, abi: escrowAbi, functionName: 'claimable', args: [wallets.client.account.address] }), 0n);
+  // Client paid 0.3 into escrow and got back 0.05 (split) + 0.2 (terminated milestone) directly.
+  assert.equal(await rpc.readContract({ address: token, abi: tokenArtifact.abi, functionName: 'balanceOf', args: [wallets.client.account.address] }), parseUnits('999.95', 18));
+  assert.equal((await state('client')).step, 'complete');
+  assert.equal(closed.project.milestones[1].arbitration.paidOut, true);
 
   // Resending the result email records the delivery outcome.
   const decisionAt = closed.project.adminReview.history.at(-1).at;

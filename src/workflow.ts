@@ -60,7 +60,7 @@ export type Project = {
   fesc?: { policyVersion?: number };
 };
 
-export type Arbitration = { decision: 'release' | 'split' | 'refund'; mode: 'continue' | 'terminate'; toFreelancer: number; toClient: number };
+export type Arbitration = { decision: 'release' | 'split' | 'refund'; mode: 'continue' | 'terminate'; toFreelancer: number; toClient: number; paidOut?: boolean };
 export type EvidenceRecord = {
   id: string; kind: 'file' | 'link'; name?: string; url?: string; size?: number; sha256?: string;
   by?: string; byId?: string; at?: string; used?: boolean; note?: string; added?: boolean;

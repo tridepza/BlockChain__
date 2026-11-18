@@ -18,7 +18,7 @@ import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
 import { fescVault } from './fesc-vault.mjs';
 import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from './admin-analytics.mjs';
 import { discardEvidence, markEvidenceUsed, pickEvidence, receiveEvidence, sendEvidence } from './evidence.mjs';
-import { adminAccounts, dueSeconds } from './project-fesc.mjs';
+import { adminAccounts, chainUnavailableMessage, dueSeconds } from './project-fesc.mjs';
 
 const decisionLabels = { release: 'Giải ngân 100% cho Freelancer', split: 'Chia đều 50/50 cho hai bên', refund: 'Hoàn 100% cho Client' };
 
@@ -47,7 +47,8 @@ function resolutionEmail(project, entry, url) {
         result.mode === 'continue' ? 'Hợp đồng: tiếp tục giai đoạn tiếp theo.' : 'Hợp đồng: chấm dứt, các giai đoạn còn lại hoàn cho Client.'] : []),
       `Lý do của admin: ${entry.note}`,
       ...(entry.hash ? [`Mã giao dịch: ${entry.hash}`] : []), '',
-      'Phần FESC được phân bổ nằm trong hợp đồng. Mở dự án và bấm "Rút FESC được phân xử về ví" để nhận.',
+      result?.paidOut ? 'FESC đã được chuyển thẳng về ví của hai bên trong giao dịch phân xử.'
+        : 'Phần FESC được phân bổ nằm trong hợp đồng. Mở dự án và bấm "Rút FESC được phân xử" để nhận về ví.',
       ...(url ? [url] : []),
     ].join('\n'),
   };
@@ -270,7 +271,7 @@ function createDatabaseApi(store, root, options = {}) {
             let chain;
             if (project.currency === 'FESC') {
               try { chain = await adminFescCase(root, project); }
-              catch { chain = { unavailable: true, message: 'Chưa xác minh được hợp đồng trên chain hiện tại.' }; }
+              catch { chain = { unavailable: true, message: await chainUnavailableMessage(root, project) }; }
             }
             return { project, chain };
           }

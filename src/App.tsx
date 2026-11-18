@@ -597,7 +597,7 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
               <b className="mile-amount">{money(m.amount)}</b>
             </div>
             {m.dueAt && <p className={late ? 'hint late' : 'hint'}>{late ? 'Đã quá hạn bàn giao' : 'Hạn bàn giao'} · <time dateTime={m.dueAt}>{vnTime(m.dueAt)}</time></p>}
-            {m.arbitration && <p className="hint">Admin đã phân xử: Freelancer nhận {m.arbitration.toFreelancer} FESC, Client nhận {m.arbitration.toClient} FESC.</p>}
+            {m.arbitration && <p className="hint">Admin đã phân xử: Freelancer nhận {m.arbitration.toFreelancer} FESC, Client nhận {m.arbitration.toClient} FESC{m.arbitration.paidOut ? ' (đã chuyển về ví)' : ' (bấm Rút FESC trong mục Ký quỹ để nhận)'}.</p>}
             {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
             {privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
               <summary>Lịch sử bàn giao ({m.deliveries.length})</summary>

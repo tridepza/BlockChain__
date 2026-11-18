@@ -77,6 +77,7 @@ const escrowAbi = parseAbi([
   'event Resolved(bytes32 decisionHash, uint256 evidenceCount)',
   'event Funded(uint256 amount)',
   'event MilestonePaid(uint256 indexed milestone, bytes32 evidenceHash, uint256 amount)',
+  'event Withdrawn(address indexed beneficiary, uint256 amount)',
 ]);
 
 export const fescActions = ['create', 'accept', 'reset', 'allow', 'fund', 'start', 'submit', 'approve', 'dispute', 'withdraw', 'extend'];
@@ -182,7 +183,9 @@ export async function adminFescCase(root, project, input = {}) {
     }
   }
   const toFreelancer = Number(formatUnits(amount, 18));
-  const arbitration = { decision: input.decision, mode, toFreelancer, toClient: Number(formatUnits(whole - amount, 18)) };
+  // Factories from revision 3 pay policy-2 decisions straight to both wallets in the same transaction.
+  const paidOut = events.some(event => event.eventName === 'Withdrawn');
+  const arbitration = { decision: input.decision, mode, toFreelancer, toClient: Number(formatUnits(whole - amount, 18)), paidOut };
   const milestones = project.milestones.map((m, i) => {
     if (i < index) return m;
     if (i === index) return { ...m, status: amount > 0n ? 'Paid' : 'Refunded', arbitration };
@@ -207,6 +210,18 @@ async function readDeployment(root, pinned) {
     throw new WorkflowError(503, 'Không xác minh được hợp đồng token FESC.');
   }
   return deployment;
+}
+
+// Explains why an admin cannot verify a project's contract from this machine.
+export async function chainUnavailableMessage(root, project) {
+  let configured;
+  try { configured = JSON.parse(await readFile(resolve(root, '.hardhat/local-fesc-deployment.json'), 'utf8')); } catch { configured = undefined; }
+  const pinned = project.fesc?.deployment?.instanceKey;
+  if (!project.fesc) return 'Dự án chưa tạo hợp đồng FESC nên chưa có giao dịch để phân xử.';
+  if (configured?.instanceKey && pinned && configured.instanceKey !== pinned) {
+    return `Dự án này nằm trên một blockchain local khác (mã triển khai ${pinned.slice(0, 10)}…), thường là máy của thành viên đã tạo dự án hoặc chain đã triển khai lại. Hãy mở trang quản trị trên máy đang chạy blockchain đó để phân xử; ở đây chỉ gửi được phản hồi.`;
+  }
+  return 'Không kết nối được Hardhat Local hoặc hợp đồng chưa khớp. Chạy npm.cmd run chain:node rồi mở lại hồ sơ.';
 }
 
 async function belongsToPreviousChain(root, pinned) {

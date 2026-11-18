@@ -454,13 +454,28 @@ test('policy 2 arbitration splits only the disputed milestone and continues the 
   await escrow.write.resolveAndContinue([units('20'), 0n, hash('half')], { account: arbitrator });
   assert.equal(await escrow.read.state(), 3);
   assert.equal(await escrow.read.current(), 1n);
-  assert.equal(await escrow.read.claimable([freelancer.address]), units('20'));
-  assert.equal(await escrow.read.claimable([owner.address]), units('20'));
+  // Policy 2 pays both shares straight to the wallets; nothing is left to withdraw.
+  assert.equal(await escrow.read.claimable([freelancer.address]), 0n);
+  assert.equal(await escrow.read.claimable([owner.address]), 0n);
+  assert.equal(await escrow.read.withdrawn([freelancer.address]), units('20'));
+  assert.equal(await escrow.read.withdrawn([owner.address]), units('20'));
   const [, , , stage] = await escrow.read.milestones([1n]);
   assert.equal(stage, 1);
-  await escrow.write.withdraw({ account: freelancer });
   await escrow.write.submit([1n, await escrow.read.version(), hash('second')], { account: freelancer });
   await escrow.write.approveAndPayMilestone([1n, await escrow.read.version()]);
   assert.equal(await escrow.read.state(), 5);
   assert.equal(await escrow.read.withdrawn([freelancer.address]), units('80'));
+});
+
+test('policy 2 termination pays the disputed share and refunds future milestones directly', async t => {
+  const { owner, freelancer, arbitrator, token, escrow } = await activePolicy2(t);
+  const ownerBefore = await token.read.balanceOf([owner.address]);
+  await escrow.write.submit([0n, await escrow.read.version(), hash('delivery')], { account: freelancer });
+  await escrow.write.openDispute([0n, await escrow.read.version(), 0, hash('not as requested')]);
+  await escrow.write.resolve([units('10'), 0n, hash('terminate')], { account: arbitrator });
+  assert.equal(await escrow.read.state(), 5);
+  assert.equal(await token.read.balanceOf([freelancer.address]), units('10'));
+  assert.equal(await token.read.balanceOf([owner.address]), ownerBefore + units('90'));
+  assert.equal(await token.read.balanceOf([escrow.address]), 0n);
+  assert.equal(await escrow.read.claimable([owner.address]), 0n);
 });

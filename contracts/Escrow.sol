@@ -279,7 +279,7 @@ contract Escrow is ReentrancyGuard {
         emit EvidenceAdded(++evidenceCount, evidenceHash, msg.sender);
     }
 
-    function resolve(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash) external only(arbitrator) {
+    function resolve(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash) external only(arbitrator) nonReentrant {
         if (state != State.Disputed) revert InvalidState();
         if (expectedEvidenceCount != evidenceCount) revert StaleAction();
         if (decisionHash == bytes32(0)) revert InvalidTerms();
@@ -287,10 +287,11 @@ contract Escrow is ReentrancyGuard {
         for (uint256 i = current + 1; i < milestones.length; ++i) allocate(i, 0, Outcome.Refunded);
         emit Resolved(decisionHash, evidenceCount);
         close(Closure.Arbitrated);
+        if (policyVersion == 2) payOut();
     }
 
     // Policy 2: arbitrates only the disputed milestone and resumes work on the next one.
-    function resolveAndContinue(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash) external only(arbitrator) {
+    function resolveAndContinue(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash) external only(arbitrator) nonReentrant {
         if (policyVersion != 2 || state != State.Disputed) revert InvalidState();
         if (expectedEvidenceCount != evidenceCount) revert StaleAction();
         if (decisionHash == bytes32(0)) revert InvalidTerms();
@@ -302,6 +303,15 @@ contract Escrow is ReentrancyGuard {
             activate();
             advance(State.Active);
         }
+        payOut();
+    }
+
+    // Policy 2 sends arbitrated FESC straight to both wallets instead of waiting for withdraw().
+    function payOut() private {
+        uint256 toFreelancer = claimable[freelancer];
+        uint256 toClient = claimable[client];
+        if (toFreelancer > 0) pay(freelancer, toFreelancer);
+        if (toClient > 0) pay(client, toClient);
     }
 
     // Policy 2, Client only. A single milestone pushes later ones only as far as needed to keep due
@@ -463,7 +473,7 @@ contract Escrow is ReentrancyGuard {
 contract EscrowFactory {
     uint32 public constant LATEST_POLICY_VERSION = 2;
     // Bumped when policy 2 gains features, so the upgrade script replaces an older policy-2 factory.
-    uint32 public constant FACTORY_REVISION = 2;
+    uint32 public constant FACTORY_REVISION = 3;
     bytes32 private constant TERMS_TAG = keccak256("FreelancerEscrow/Terms/v1");
     IERC20 public immutable token;
     bytes32 public immutable instanceKey;
