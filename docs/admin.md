@@ -34,6 +34,8 @@ Admin không được phân xử dự án mà chính tài khoản đó là Clien
 - **Email kết quả** được gửi tới Client và Freelancer qua SMTP trong `.env.mail.local`. Nếu gửi lỗi, quyết định vẫn giữ nguyên; lịch sử hiện "gửi lỗi" và nút **Gửi lại email**.
 - Nếu giao dịch phân xử đã gửi nhưng chưa ghi nhận, giữ nguyên quyết định, lựa chọn sau quyết định, lý do và mã hash, rồi dùng **Kiểm tra và ghi nhận**.
 
+Với mạng local đã có factory cũ, chạy `npm.cmd run chain:upgrade:fesc-factory` khi node đang chạy để tạo factory hỗ trợ chính sách 2 trên cùng token. Server đọc `LATEST_POLICY_VERSION` và `FACTORY_REVISION` trên chain; dự án có hạn sẽ báo lỗi thay vì dùng quy tắc cũ khi factory chưa nâng cấp. Hợp đồng đã tạo giữ nguyên điều khoản, kể cả 72 giờ nghiệm thu của chính sách 1.
+
 ## Tài khoản và giao dịch
 
 - Tab **Tài khoản**: tổng số tài khoản đã đăng ký, số tài khoản hoạt động (ví đã liên kết đang giữ FESC > 0), số đã liên kết ví và bảng FESC sở hữu của từng tài khoản, đọc tại block hiện tại. Khi RPC lỗi, số dư hiện "—" thay vì 0.
