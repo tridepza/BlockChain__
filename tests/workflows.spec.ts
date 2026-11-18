@@ -307,11 +307,15 @@ test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao l�
     await dialog.getByLabel('Ngân sách (MOCK)').fill('100');
     await dialog.getByLabel('Tên milestone', { exact: false }).fill('Bàn giao website');
     await dialog.getByLabel('Số tiền từng milestone', { exact: false }).fill('90');
+    const deadline = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+    await dialog.getByLabel('Hạn toàn dự án').fill(deadline);
+    await dialog.getByLabel('Hạn milestone 1').fill(deadline);
     await dialog.getByRole('button', { name: 'Tạo dự án', exact: true }).click();
     await expect(dialog.getByRole('alert')).toHaveText('Tổng số tiền milestone phải bằng ngân sách.');
     await dialog.getByLabel('Số tiền từng milestone', { exact: false }).fill('100');
     await dialog.getByRole('button', { name: 'Tạo dự án', exact: true }).click();
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
+    await expect(page.getByText('Hạn toàn dự án', { exact: true })).toBeVisible();
     await guest.goto('/');
     await click(guest, 'Xem dự án công khai');
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
@@ -375,7 +379,7 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await page.goto('/');
   await click(page, 'Thử bản demo');
   await openProject(page, title);
-  await perform(page, 'Mở tranh chấp', { label: 'Lý do', value: 'Kiểm tra nhánh hoàn tiền' });
+  await perform(page, 'Gửi khiếu nại', { label: 'Lý do', value: 'Kiểm tra nhánh hoàn tiền' });
   await expect(page.getByRole('button', { name: 'Đề nghị hủy' })).toHaveCount(0);
   await page.getByLabel('Vai trò demo').selectOption('Arbitrator');
   await page.getByRole('button', { name: /^Tranh chấp/ }).click();
@@ -398,6 +402,25 @@ test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async (
   await click(page, 'Thử bản demo');
   await openProject(page, title);
   await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
+});
+
+test('Freelancer có thể gửi khiếu nại sau 5 ngày chờ nghiệm thu', async ({ page }) => {
+  const title = 'Thiết kế website thương mại điện tử';
+  const start = new Date('2026-11-18T10:00:00+07:00');
+  await page.clock.install({ time: start });
+  await page.goto('/');
+  await click(page, 'Thử bản demo');
+  await openProject(page, title);
+  await perform(page, 'Yêu cầu sửa', { label: 'Lý do', value: 'Bổ sung bản mobile' });
+  await page.getByLabel('Vai trò demo').selectOption('Freelancer');
+  await openProject(page, title);
+  await perform(page, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Bản mobile đã sửa' });
+  const complaint = page.getByRole('button', { name: 'Gửi khiếu nại', exact: true });
+  await expect(complaint).toHaveCount(0);
+  await page.clock.fastForward(5 * 86_400_000 + 60_000);
+  await expect(complaint).toBeVisible();
+  await perform(page, 'Gửi khiếu nại', { label: 'Lý do', value: 'Client chưa nghiệm thu sau 5 ngày' });
+  await expect(page.getByText('Khiếu nại của Freelancer', { exact: true })).toBeVisible();
 });
 
 test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', async ({ page }) => {

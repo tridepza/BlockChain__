@@ -8,6 +8,34 @@ import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import { createApi } from '../server/api.mjs';
 import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from '../server/admin-analytics.mjs';
+import { applyProjectAction, createProject, reviewWindowMs } from '../src/workflow.ts';
+
+test('MOCK validates project dates and enforces work and five-day review deadlines', t => {
+  const now = Date.parse('2026-11-18T10:00:00+07:00');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const client = { id: 'client', name: 'Client', role: 'Client' };
+  const worker = { id: 'worker', name: 'Worker', role: 'Freelancer' };
+  const input = { title: 'Scheduled', description: 'Test handoff', category: 'Web Development',
+    budget: '100', milestones: 'Design, Build', amounts: '40,60', projectDue: '2026-12-05', milestoneDues: '2026-11-20,2026-12-04' };
+  for (const milestoneDues of ['2026-11-20', '2026-11-31,2026-12-04', '2026-12-04,2026-11-20', '2026-11-20,2026-12-06']) {
+    assert.throws(() => createProject(client, { ...input, milestoneDues }, 1), { status: 400 });
+  }
+  const schedule = createProject(client, input, 1);
+  assert.equal(schedule.dueAt, '2026-12-05T16:59:59.000Z');
+  const project = { ...schedule, freelancerId: worker.id, funded: 100, status: 'Funded' };
+  const submit = { action: 'submit', milestoneId: 1, note: 'Delivered' };
+  const submitted = applyProjectAction(project, worker, submit).project;
+  const complaint = { action: 'dispute', milestoneId: 1, submissionVersion: 1, note: 'Review is overdue' };
+  assert.equal(applyProjectAction(submitted, client, complaint).project.disputeOpenedBy, 'Client');
+  assert.throws(() => applyProjectAction(submitted, { ...worker, id: 'outsider' }, complaint), { status: 403 });
+  t.mock.timers.setTime(now + reviewWindowMs);
+  assert.throws(() => applyProjectAction(submitted, worker, complaint), { status: 409 });
+  t.mock.timers.setTime(now + reviewWindowMs + 1);
+  assert.equal(applyProjectAction(submitted, worker, complaint).project.disputeOpenedBy, 'Freelancer');
+  assert.throws(() => applyProjectAction(submitted, client, { ...complaint, action: 'revision' }), { status: 409 });
+  assert.throws(() => applyProjectAction(project, worker, submit), { status: 409 });
+  assert.equal(applyProjectAction(project, client, { ...complaint, submissionVersion: 0 }).project.status, 'Disputed');
+});
 
 test('admin calendar uses Vietnam midnight, Monday weeks, leap months and year transitions', () => {
   assert.equal(adminPeriod('day', '2026-11-18').start, '2026-11-17T17:00:00.000Z');

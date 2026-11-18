@@ -166,7 +166,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     {!details && !error && <p role="status">Đang mở hồ sơ…</p>}
     {error && <p className="form-error" role="alert">{error}</p>}
     {project && <>
-      <p><b>Lý do tranh chấp:</b> {project.disputeReason}</p><p>{project.description}</p>
+      <p><b>Khiếu nại{project.disputeOpenedBy ? ` của ${project.disputeOpenedBy}` : ''}</b> · {project.disputeReason}</p><p>{project.description}</p>
       <ul>{project.milestones.map(milestone => <li key={milestone.id}>{milestone.title} · {milestone.amount} {project.currency} · {milestone.status}
         {milestone.deliveries?.map(delivery => <p key={delivery.id}>Bản {delivery.version}: {delivery.note}
           {delivery.preview && <> · <a href={`/api/admin/projects/${project.id}/milestones/${milestone.id}/deliveries/${delivery.id}/preview`}>Tải bản xem trước: {delivery.preview.name}</a></>}</p>)}</li>)}</ul>

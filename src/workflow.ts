@@ -9,6 +9,7 @@ export type Milestone = {
   title: string;
   amount: number;
   status: MilestoneStatus;
+  dueAt?: string;
   submission?: string;
   submissionVersion?: number;
   deliveries?: Delivery[];
@@ -46,7 +47,9 @@ export type Project = {
   paid: number;
   created: string;
   createdAt?: string;
+  dueAt?: string;
   disputeReason?: string;
+  disputeOpenedBy?: 'Client' | 'Freelancer';
   decision?: string;
   cancellation?: CancellationRequest;
   adminReview?: { revision: number; status: 'reviewing' | 'resolved'; history: { actorId: string; action: string; note: string; at: string; hash?: string }[] };
@@ -92,8 +95,25 @@ export function getSubmissionVersion(milestone: Milestone) {
   return milestone.submissionVersion ?? (milestone.submission || milestone.status === 'Submitted' ? 1 : 0);
 }
 
-export const canRequestRevision = (milestone: Milestone) =>
-  milestone.status === 'Submitted' && getSubmissionVersion(milestone) < 3;
+export const reviewWindowMs = 5 * 24 * 60 * 60 * 1000;
+export function reviewDueAt(milestone: Milestone) {
+  const submittedAt = Date.parse(milestone.deliveries?.slice(-1)[0]?.submittedAt ?? '');
+  return Number.isFinite(submittedAt) ? submittedAt + reviewWindowMs : undefined;
+}
+
+export const canRequestRevision = (milestone: Milestone, now = Date.now()) =>
+  milestone.status === 'Submitted' && getSubmissionVersion(milestone) < 3 && now <= (reviewDueAt(milestone) ?? Infinity);
+
+export const workDueAt = (project: Project, milestone: Milestone) =>
+  Math.min(milestone.dueAt ? Date.parse(milestone.dueAt) : Infinity, project.dueAt ? Date.parse(project.dueAt) : Infinity);
+
+export function mockComplaintAvailable(project: Project, milestone: Milestone, role: Role, now = Date.now()) {
+  if (milestone.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(project.status)) {
+    return role === 'Client' || role === 'Freelancer' && now > (reviewDueAt(milestone) ?? Infinity);
+  }
+  return role === 'Client' && ['Funded', 'In progress', 'Revision requested'].includes(project.status) &&
+    ['Pending', 'In progress', 'Revision requested'].includes(milestone.status) && now > workDueAt(project, milestone);
+}
 
 export function escrowBalance(project: Project) {
   if (project.status === 'Cancelled') return 0;
@@ -123,9 +143,9 @@ export function visibleWorkspace(data: WorkspaceData, actor: Account): Workspace
     projects: data.projects.flatMap(p => {
       if (ids.has(p.id)) return [p];
       if (actor.role !== 'Freelancer' || p.status !== 'Open') return [];
-      const { id, title, category, description, client, budget, currency, status, created } = p;
-      const milestones = p.milestones.map(({ id, title, amount, status }) => ({ id, title, amount, status }));
-      return [{ id, title, category, description, client, budget, currency, status, created, milestones,
+      const { id, title, category, description, client, budget, currency, status, created, dueAt } = p;
+      const milestones = p.milestones.map(({ id, title, amount, status, dueAt }) => ({ id, title, amount, status, dueAt }));
+      return [{ id, title, category, description, client, budget, currency, status, created, dueAt, milestones,
         ownerId: '', freelancer: '', funded: 0, paid: 0 }];
     }),
     txs: data.txs.filter(t => t.projectId !== undefined && ids.has(t.projectId)),
@@ -139,6 +159,12 @@ function text(value: unknown, max: number) {
 function readCents(value: unknown) {
   if (typeof value !== 'string' || !/^\d{1,7}(\.\d{1,2})?$/.test(value.trim())) return 0;
   return cents(Number(value));
+}
+
+function localDue(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return NaN;
+  const utc = Date.parse(`${value}T23:59:59Z`);
+  return Number.isFinite(utc) && new Date(utc).toISOString().startsWith(value) ? utc - 7 * 3_600_000 : NaN;
 }
 
 export function createProject(actor: Account, input: Record<string, unknown>, id: number): Project {
@@ -162,12 +188,30 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   if (amounts.reduce((sum, amount) => sum + amount, 0) !== budget) {
     throw new WorkflowError(400, 'Tổng số tiền milestone phải bằng ngân sách.');
   }
+  const now = Date.now();
+  let projectDue: number | undefined;
+  let milestoneDues: number[] = [];
+  if (input.projectDue !== undefined || input.milestoneDues !== undefined) {
+    const requestedDue = localDue(text(input.projectDue, 10));
+    milestoneDues = text(input.milestoneDues, 140).split(',').map(value => localDue(value.trim()));
+    const startBuffer = input.currency === 'FESC' ? 9 * 24 * 3_600_000 : 0;
+    if (!Number.isFinite(requestedDue) || milestoneDues.length !== names.length ||
+        milestoneDues.some((due, index) => !Number.isFinite(due) || due > requestedDue ||
+          due <= (index === 0 ? now + startBuffer : milestoneDues[index - 1]))) {
+      throw new WorkflowError(400, input.currency === 'FESC'
+        ? 'Nhập đúng số ngày hạn mốc theo thứ tự tăng dần. Hạn mốc đầu cần cách hiện tại hơn 9 ngày và tất cả các mốc phải nằm trong hạn dự án.'
+        : 'Nhập đúng số ngày hạn mốc trong tương lai, theo thứ tự tăng dần và trong hạn dự án.');
+    }
+    projectDue = requestedDue;
+  }
   return {
     id, title, category, description, client: actor.name, ownerId: actor.id, freelancer: '',
     budget: budget / 100, currency: input.currency, status: 'Open', funded: 0, paid: 0,
     created: new Date(Date.now() + 7 * 3_600_000).toISOString().slice(0, 10),
     createdAt: new Date().toISOString(),
-    milestones: names.map((name, index) => ({ id: index + 1, title: name, amount: amounts[index] / 100, status: 'Pending' })),
+    ...(projectDue === undefined ? {} : { dueAt: new Date(projectDue).toISOString() }),
+    milestones: names.map((name, index) => ({ id: index + 1, title: name, amount: amounts[index] / 100, status: 'Pending',
+      ...(projectDue === undefined ? {} : { dueAt: new Date(milestoneDues[index]).toISOString() }) })),
   };
 }
 
@@ -186,13 +230,13 @@ export function applyProjectAction(
   attachments?: Pick<Delivery, 'preview' | 'original'>,
 ): ActionResult {
   const clientActions = ['assign', 'fund', 'approve', 'revision'];
-  const ownerAction = clientActions.includes(input.action) ||
-    input.action === 'dispute';
+  const ownerAction = clientActions.includes(input.action);
   const owner = actor.role === 'Client' && actor.id === p.ownerId;
   const assignee = actor.role === 'Freelancer' && actor.id === p.freelancerId;
   const cancellationAction = ['requestCancel', 'confirmCancel'].includes(input.action);
   const allowed = ownerAction && owner ||
     input.action === 'submit' && assignee ||
+    input.action === 'dispute' && (owner || assignee) ||
     cancellationAction && (owner || assignee) ||
     ['release', 'refund'].includes(input.action) && actor.id === demoAccounts.Arbitrator.id;
   if (!allowed) throw new WorkflowError(403, 'Bạn không có quyền thực hiện thao tác này.');
@@ -210,6 +254,9 @@ export function applyProjectAction(
       return { project: { ...p, status: 'Proposal sent', freelancer: freelancer.name, freelancerId: freelancer.id } };
     case 'fund':
       if (p.status !== 'Proposal sent' || !p.freelancerId || p.funded !== 0) throw invalidState();
+      if (p.currency !== 'FESC' && milestone && Date.now() > workDueAt(p, milestone)) {
+        throw new WorkflowError(409, 'Hạn bàn giao mốc đầu đã hết.');
+      }
       return { project: { ...p, status: 'Funded', funded: p.budget }, transactions: [{ action: 'Ký quỹ', amount: p.budget }] };
     case 'requestCancel': {
       if (!canRequestCancellation(p)) throw invalidState();
@@ -245,6 +292,7 @@ export function applyProjectAction(
     case 'submit':
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
         !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
+      if (p.currency !== 'FESC' && Date.now() > workDueAt(p, milestone)) throw new WorkflowError(409, 'Đã hết hạn bàn giao mốc.');
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
       const submittedAt = new Date().toISOString();
       const history = milestone.deliveries ?? (milestone.submission
@@ -260,13 +308,16 @@ export function applyProjectAction(
           }),
         },
       };
-    case 'revision':
     case 'dispute': {
+      if (!mockComplaintAvailable(p, milestone, actor.role)) throw new WorkflowError(409, 'Mốc này chưa đủ điều kiện khiếu nại.');
+      if (!note) throw new WorkflowError(400, 'Nhập lý do khiếu nại.');
+      return { project: { ...updatedProject, status: 'Disputed', disputeReason: note,
+        disputeOpenedBy: assignee ? 'Freelancer' : 'Client', milestones: updateMilestone({ status: 'Disputed' }) } };
+    }
+    case 'revision': {
       if (milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập lý do để tiếp tục.');
-      if (input.action === 'dispute') {
-        return { project: { ...updatedProject, status: 'Disputed', disputeReason: note, milestones: updateMilestone({ status: 'Disputed' }) } };
-      }
+      if (Date.now() > (reviewDueAt(milestone) ?? Infinity)) throw new WorkflowError(409, 'Đã hết 5 ngày yêu cầu sửa bản bàn giao.');
       if (!canRequestRevision(milestone)) throw new WorkflowError(409, 'Milestone đã đạt giới hạn hai lần yêu cầu sửa.');
       return { project: { ...updatedProject, status: 'Revision requested', milestones: updateMilestone({ status: 'Revision requested', revisionReason: note }) } };
     }

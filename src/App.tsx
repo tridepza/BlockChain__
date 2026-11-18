@@ -15,6 +15,7 @@ import { loadDemo, saveDemo } from './demo';
 import {
   applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
   cents, deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, mockGrantCents, money, pendingCancellation, visibleWorkspace, WorkflowError,
+  mockComplaintAvailable, reviewDueAt, workDueAt,
 } from './workflow';
 import type { Account, Currency, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
@@ -47,7 +48,7 @@ const actionLabels: Record<string, string> = {
   submit: 'Gửi bàn giao',
   revision: 'Yêu cầu sửa',
   approve: 'Nghiệm thu & giải ngân',
-  dispute: 'Mở tranh chấp',
+  dispute: 'Gửi khiếu nại',
   release: 'Quyết định giải ngân',
   refund: 'Quyết định hoàn tiền',
   requestCancel: 'Đề nghị hủy',
@@ -347,7 +348,7 @@ function Workspace(props: WorkspaceProps) {
     <aside id="workspace-menu" className={mobile ? 'sidebar show' : 'sidebar'}>
       <div className="brand"><span className="brandmark"><ShieldCheck size={21}/></span><b>FreelanceEscrow</b><button ref={menuClose} className="mobile-close icon-btn" aria-label="Đóng menu" onClick={() => setMobile(false)}><X size={20}/></button></div>
       <nav aria-label="Không gian làm việc">
-        {navigation.filter(item => demo ? item.id !== 'profile' : item.id !== 'disputes').map(({ id, label, Icon }) =>
+        {navigation.filter(item => !demo || item.id !== 'profile').map(({ id, label, Icon }) =>
           <button key={id} className={`nav-item ${activePage === id ? 'selected' : ''}`} aria-current={activePage === id ? 'page' : undefined} disabled={busy} onClick={() => navigate(id)}>
             <Icon size={18}/>{label}{id === 'disputes' && disputes.length > 0 && <span className="count">{disputes.length}</span>}
           </button>)}
@@ -457,6 +458,10 @@ function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClos
   const ref = useRef<HTMLDialogElement>(null);
   const create = dialog.kind === 'create';
   const [budgetCurrency, setBudgetCurrency] = useState<Currency>(demo ? 'MOCK' : 'FESC');
+  const [milestoneNames, setMilestoneNames] = useState('');
+  const [milestoneDates, setMilestoneDates] = useState<string[]>([]);
+  const [projectDate, setProjectDate] = useState('');
+  const milestoneCount = Math.min(10, milestoneNames.split(',').length);
   const action = create ? '' : dialog.action.action;
   const title = create ? 'Tạo dự án mới' : actionLabels[action];
   const needsNote = ['submit', 'revision', 'dispute', 'requestCancel'].includes(action);
@@ -484,8 +489,17 @@ function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClos
             <option value="FESC">FESC · Hardhat Local</option><option value="MOCK">MOCK · Mô phỏng</option>
           </select></label>}
           <label>Ngân sách ({budgetCurrency})<input name="budget" type="number" min="0.01" step="0.01" required placeholder="100"/></label>
-          <label>Tên milestone, cách nhau bằng dấu phẩy<input name="milestones" required maxLength={800} placeholder="Thiết kế, Frontend, Backend"/></label>
+          <label>Tên milestone, cách nhau bằng dấu phẩy<input name="milestones" required maxLength={800}
+            placeholder="Thiết kế, Frontend, Backend" value={milestoneNames} onChange={event => setMilestoneNames(event.target.value)}/></label>
           <label>Số tiền từng milestone, cách nhau bằng dấu phẩy<input name="amounts" required maxLength={120} placeholder="30,40,30"/></label>
+          <label>Hạn toàn dự án<input type="date" name="projectDue" value={projectDate} required onChange={event => setProjectDate(event.target.value)}/></label>
+          {Array.from({ length: milestoneCount }, (_, index) => <label key={index}>Hạn milestone {index + 1}
+            <input type="date" required max={projectDate || undefined} value={milestoneDates[index] ?? ''}
+              onChange={event => setMilestoneDates(current => Object.assign([...current], { [index]: event.target.value }))}/>
+          </label>)}
+          <input type="hidden" name="milestoneDues" value={milestoneDates.slice(0, milestoneCount).join(',')}/>
+          <p className="hint">Hạn tính đến cuối ngày theo giờ Việt Nam. Hạn các mốc tăng dần.
+            {budgetCurrency === 'FESC' && ' Hạn mốc đầu phải cách hiện tại hơn 9 ngày để đủ thời gian ký quỹ và bắt đầu.'}</p>
         </> : action === 'assign' && !demo ? (
           <label>Email của Freelancer<input name="email" type="email" required autoFocus maxLength={254}/></label>
         ) : needsNote ? (
@@ -578,6 +592,12 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
   const fesc = !demo && p.currency === 'FESC';
   const canCancel = !fesc && (owner || freelancer) && canRequestCancellation(p);
   const cancellation = canCancel ? pendingCancellation(p) : undefined;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const formatDeadline = (value: string | number) => new Date(value).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
 
   function actionButton(action: ProjectAction, label = actionLabels[action.action], style = 'primary') {
     return <button className={style} onClick={() => onAction(action)}>{label}</button>;
@@ -588,6 +608,7 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
       <div className="detail-head">
         <div><div className="eyebrow">{categoryLabel(p.category)} · {fesc ? 'Hardhat Local' : 'Mô phỏng'}</div><h1>{p.title}</h1><p>{p.description}</p>
           <div className="detail-meta"><Status value={p.status}/><span>Client: {p.client}</span><span>Freelancer: {p.freelancer || 'Đang tuyển'}</span></div>
+          {p.dueAt && <p><b>Hạn toàn dự án</b> · <time dateTime={p.dueAt}>{formatDeadline(p.dueAt)}</time></p>}
         </div>
         <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG</small><b>{money(p.budget, p.currency)}</b>
           {privateProject && !fesc && <small>Còn ký quỹ: {money(escrowBalance(p))} · Đã trả: {money(p.paid)}</small>}
@@ -618,6 +639,8 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
         <h2 id="milestone-title">Các mốc thực hiện <span className="result-count">{p.milestones.length}</span></h2>
         {p.milestones.map(m => {
         const review = { milestoneId: m.id, submissionVersion: getSubmissionVersion(m) };
+        const reviewDeadline = !fesc && m.status === 'Submitted' ? reviewDueAt(m) : undefined;
+        const late = now > workDueAt(p, m);
         return <div className="milestone" key={m.id}>
           <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
           <div className="mile-content">
@@ -625,6 +648,10 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
               <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
               <b className="mile-amount">{money(m.amount, p.currency)}</b>
             </div>
+            {m.dueAt && <p className="hint">Hạn bàn giao · <time dateTime={m.dueAt}>{formatDeadline(m.dueAt)}</time></p>}
+            {privateProject && reviewDeadline !== undefined && <p className="hint">
+              {now > reviewDeadline ? 'Đã quá hạn nghiệm thu' : 'Hạn nghiệm thu'} · {formatDeadline(reviewDeadline)}
+            </p>}
             {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
             {!demo && privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
               <summary>Lịch sử bàn giao ({m.deliveries.length})</summary>
@@ -652,13 +679,14 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
             </details>}
             {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
             {!fesc && current?.id === m.id && <div className="mile-buttons">
-              {freelancer && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
+              {freelancer && !late && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
                 ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton({ action: 'submit', milestoneId: m.id }, undefined, 'primary small')}
               {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
                 {actionButton({ ...review, action: 'approve' }, undefined, 'primary small')}
-                {canRequestRevision(m) && actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
-                {!fesc && actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
+                {canRequestRevision(m, now) && actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
               </>}
+              {(owner || freelancer) && mockComplaintAvailable(p, m, actor.role, now) &&
+                actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
               {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>
                 {actionButton({ action: 'release', milestoneId: m.id }, undefined, 'primary small')}
                 {actionButton({ action: 'refund', milestoneId: m.id }, undefined, 'secondary small')}
@@ -667,6 +695,7 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
           </div>
         </div>;
       })}</section>
+      {privateProject && p.disputeReason && <p className="hint"><b>Khiếu nại{p.disputeOpenedBy ? ` của ${p.disputeOpenedBy}` : ''}</b> · {p.disputeReason}</p>}
       {privateProject && p.decision && <p className="hint"><b>Quyết định phân xử:</b> {p.decision}</p>}
       <details className="project-terms">
         <summary>Điều khoản và thông tin dự án</summary>
