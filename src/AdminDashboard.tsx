@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from './api';
-import { sendLocalTransaction, walletError } from './WalletLink';
+import { connectLocalTransactionWallet, sendLocalTransaction, walletError } from './WalletLink';
 import type { LocalTransaction } from './WalletLink';
 import type { Project } from './workflow';
 import { EvidenceList } from './ProjectDisputes';
@@ -172,6 +172,16 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     }).catch(reason => { if (active) setError(errorMessage(reason)); });
     return () => { active = false; };
   }, [projectId, reload]);
+  async function connectArbitrator() {
+    if (!details?.chain?.arbitrator) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await connectLocalTransactionWallet(details.chain.arbitrator, setNotice);
+      setNotice('Đã chọn đúng ví trọng tài và mạng Hardhat Local. Bạn có thể xem lại quyết định trước khi ký.');
+    } catch (reason) {
+      setNotice(''); setError(walletError(reason, 'Kết nối ví trọng tài'));
+    } finally { setBusy(false); }
+  }
   async function send(action: string, text: string) {
     if (!details) return;
     setBusy(true); setError(''); setNotice('');
@@ -218,6 +228,15 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     {!details && !error && <p role="status">Đang mở hồ sơ…</p>}
     {error && <p className="form-error" role="alert">{error}</p>}
     {project && <>
+      {project.status === 'Disputed' && details.chain?.arbitrator && !details.chain.unavailable &&
+        <section className="case-summary" aria-label="Ví ký phân xử">
+          <b>Ví trọng tài của hợp đồng #{project.id}</b>
+          <p><code>{details.chain.arbitrator}</code></p>
+          <p className="hint">Địa chỉ này đã cố định khi tạo hợp đồng. Đổi ví mặc định chỉ áp dụng cho hợp đồng tạo sau đó.</p>
+          <button type="button" className="secondary" disabled={busy} onClick={() => void connectArbitrator()}>
+            Chọn ví trọng tài trong MetaMask
+          </button>
+        </section>}
       {project.dispute ? <div className="case-summary">
         <p><b>{project.dispute.label}</b> · do {project.dispute.by} gửi lúc {vnTime(project.dispute.openedAt)}
           {project.dispute.terminate && <> · <b>yêu cầu chấm dứt hợp đồng</b></>}</p>

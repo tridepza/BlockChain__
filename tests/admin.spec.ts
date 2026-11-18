@@ -92,11 +92,15 @@ test('admin logs in with OTP, selects all periods and reviews a dispute on deskt
   await expect(page.getByText('Đã phân xử', { exact: true })).toBeVisible();
 
   await page.route('**/api/admin/case?projectId=902', route => route.fulfill({
-    json: { project: fescCase, chain: { evidenceCount: '1' } },
+    json: { project: fescCase, chain: { evidenceCount: '1', arbitrator: '0x1000000000000000000000000000000000000001' } },
   }));
   reopenFesc = true;
   await page.getByRole('button', { name: 'Làm mới', exact: true }).click();
   await page.getByRole('article').filter({ hasText: 'FESC dispute' }).getByRole('button', { name: 'Mở hồ sơ' }).click();
+  const signingWallet = page.getByRole('region', { name: 'Ví ký phân xử' });
+  await expect(signingWallet).toContainText('0x1000000000000000000000000000000000000001');
+  await expect(signingWallet.getByRole('button', { name: 'Chọn ví trọng tài trong MetaMask' })).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   const hash = '0x' + '1'.repeat(64);
   await page.getByLabel('Mã giao dịch phân xử đã gửi').fill(hash);
   await page.getByLabel('Ghi chú / lý do quyết định').fill('Ghi nhận quyết định đã ký');
