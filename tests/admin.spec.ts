@@ -27,8 +27,10 @@ test('admin logs in with OTP, selects all periods and reviews a dispute on deskt
     created: '2026-11-18', disputeReason: 'Milestone needs independent review',
     milestones: [{ id: 1, title: 'Delivery', amount: 100, status: 'Disputed' }],
     adminReview: { revision: 0, status: 'reviewing', history: [] as { actorId: string; action: string; note: string; at: string }[] } };
+  const fescCase = { ...project, id: 902, title: 'FESC dispute', currency: 'FESC', adminReview: null };
   const periods: string[] = [];
   const dates: string[] = [];
+  let reopenFesc = false;
   await page.route('**/api/admin/overview?*', route => {
     const params = new URL(route.request().url()).searchParams;
     periods.push(params.get('period')!); dates.push(params.get('date')!);
@@ -37,7 +39,8 @@ test('admin logs in with OTP, selects all periods and reviews a dispute on deskt
       traffic: { pageViews: 180, uniqueVisitors: 25, startedAt: '2026-11-18T01:00:00Z',
         series: weekly ? [{ key: '2026-11-16', pageViews: 100, uniqueVisitors: 20 }, { key: '2026-11-17', pageViews: 80, uniqueVisitors: 9 }] : [] },
       projectCount: 12, projectSeries: weekly ? [{ key: '2026-11-17', created: 2 }] : [],
-      projectCounts: { created: 2, completed: 5 }, disputes: project.status === 'Disputed' ? [project] : [],
+      projectCounts: { created: 2, completed: 5 },
+      disputes: reopenFesc ? [fescCase] : project.status === 'Disputed' ? [project] : [],
       resolvedDisputes: project.status === 'Completed' ? [project] : [],
       fesc: { available: true, volume: '123.000000000000000001', transfers: 8, totalSupply: '10000', walletBalance: '250', walletAddress: '0x' + '1'.repeat(40), block: '180',
         series: weekly ? [{ key: '2026-11-17', volume: '123.000000000000000001', transfers: 8 }] : [] } } });
@@ -86,6 +89,20 @@ test('admin logs in with OTP, selects all periods and reviews a dispute on deskt
   await expect(page.getByRole('group', { name: 'Xác nhận quyết định' })).toBeVisible();
   await page.getByRole('button', { name: 'Xác nhận quyết định', exact: true }).click();
   await expect(page.getByText('Đã phân xử', { exact: true })).toBeVisible();
+
+  await page.route('**/api/admin/case?projectId=902', route => route.fulfill({
+    json: { project: fescCase, chain: { evidenceCount: '1' } },
+  }));
+  reopenFesc = true;
+  await page.getByRole('button', { name: 'Làm mới', exact: true }).click();
+  await page.getByRole('article').filter({ hasText: 'FESC dispute' }).getByRole('button', { name: 'Mở hồ sơ' }).click();
+  const hash = '0x' + '1'.repeat(64);
+  await page.getByLabel('Mã giao dịch phân xử đã gửi').fill(hash);
+  await page.getByLabel('Ghi chú / lý do quyết định').fill('Ghi nhận quyết định đã ký');
+  await page.getByLabel('Quyết định', { exact: true }).selectOption('refund');
+  await page.getByRole('button', { name: 'Xem lại quyết định' }).click();
+  await expect(page.getByRole('button', { name: 'Kiểm tra và ghi nhận' })).toBeEnabled();
+
   await page.route('**/api/admin/overview?*', route => route.fulfill({ status: 403, json: { error: 'Tài khoản không có quyền quản trị.' } }));
   await page.getByRole('button', { name: 'Làm mới', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('không có quyền quản trị');

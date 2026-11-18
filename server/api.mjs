@@ -203,9 +203,9 @@ function createDatabaseApi(store, root, options = {}) {
           const revision = project.adminReview?.revision ?? 0;
           if (input.revision !== revision) throw new WorkflowError(409, 'Hồ sơ đã thay đổi. Hãy tải lại trước khi xử lý.');
           if (!['review', 'release', 'refund'].includes(input.action)) throw new WorkflowError(400, 'Thao tác quản trị không hợp lệ.');
+          if (project.status !== 'Disputed') throw new WorkflowError(409, 'Dự án không còn tranh chấp.');
           if (input.action !== 'review') {
             if (current.id === project.ownerId || current.id === project.freelancerId) throw new WorkflowError(403, 'Admin không được phân xử dự án của chính mình.');
-            if (project.status !== 'Disputed') throw new WorkflowError(409, 'Dự án không còn tranh chấp.');
             if (project.currency === 'FESC') {
               const resolution = await adminFescCase(root, project, { ...input, action: input.hash ? 'confirm' : 'prepare', decision: input.action });
               if (!input.hash) return { transaction: resolution };

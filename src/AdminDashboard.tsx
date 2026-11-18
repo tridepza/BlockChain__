@@ -112,7 +112,7 @@ export default function AdminDashboard() {
       </section>
       <Breakdown data={data}/>
       <section className="panel"><h2>Quản lý dự án tranh chấp</h2>
-        {data.disputes.length === 0 && <p className="muted">Hiện chưa có dự án tranh chấp.</p>}
+        {data.disputes.length === 0 && <p className="muted">Hiện không có tranh chấp đang mở.</p>}
         {[...data.disputes, ...(data.resolvedDisputes ?? [])].map(project =>
           <article className="admin-dispute" key={project.id}>
             <div><h3>#{project.id} · {project.title}</h3><p>{project.client} · {project.freelancer}</p><strong>{project.budget} {project.currency}</strong>
@@ -174,13 +174,16 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
       {project.status === 'Disputed' && <>
         {details.chain?.unavailable && <p className="form-error">{details.chain.message}</p>}
         {details.chain?.arbitrator && <p className="hint">Cần ký bằng ví trọng tài: <code>{details.chain.arbitrator}</code>. Quyết định phân bổ quyền rút; các bên tự rút FESC về ví.</p>}
-        <label>Ghi chú / lý do quyết định<textarea value={note} minLength={3} maxLength={2000} disabled={busy || !!hash} onChange={event => setNote(event.target.value)}/></label>
+        <label>Ghi chú / lý do quyết định<textarea value={note} minLength={3} maxLength={2000} disabled={busy} onChange={event => { setNote(event.target.value); setConfirm(false); }}/></label>
         <div className="button-row"><button className="secondary" disabled={busy || !!hash || note.trim().length < 3} onClick={() => void save('review')}>Lưu ghi chú xem xét</button></div>
-        <label>Quyết định<select aria-label="Quyết định" value={decision} disabled={busy || !!hash} onChange={event => { setDecision(event.target.value); setConfirm(false); }}>
+        <label>Quyết định<select aria-label="Quyết định" value={decision} disabled={busy} onChange={event => { setDecision(event.target.value); setConfirm(false); }}>
           <option value="release">Giải ngân milestone tranh chấp cho Freelancer</option><option value="refund">Hoàn tiền milestone tranh chấp cho Client</option>
         </select></label>
         <p className="hint">Các milestone chưa thực hiện còn lại được hoàn cho Client. Quyết định đã xác nhận không thể sửa lại.</p>
-        {project.currency === 'FESC' && <label>Mã giao dịch phân xử đã gửi (nếu có)<input value={hash} disabled={busy} onChange={event => setHash(event.target.value.trim())} placeholder="0x…"/></label>}
+        {project.currency === 'FESC' && <>
+          <label>Mã giao dịch phân xử đã gửi (nếu có)<input value={hash} disabled={busy} onChange={event => { setHash(event.target.value.trim()); setConfirm(false); }} placeholder="0x…"/></label>
+          {hash && <p className="hint">Nhập đúng quyết định và lý do đã dùng khi ký giao dịch này.</p>}
+        </>}
         {!confirm ? <button className="primary" disabled={busy || note.trim().length < 3 || details.chain?.unavailable}
           onClick={() => setConfirm(true)}>Xem lại quyết định</button> : <div className="admin-confirm" role="group" aria-label="Xác nhận quyết định">
           <p>{decision === 'release' ? 'Giải ngân milestone đang tranh chấp cho Freelancer.' : 'Hoàn tiền milestone đang tranh chấp cho Client.'} Nội dung: {note}</p>

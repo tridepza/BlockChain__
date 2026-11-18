@@ -8,6 +8,8 @@ Tạo `.env.admin.local` từ `.env.admin.example`, đặt `ESCROW_ADMIN_EMAILS`
 
 Chạy `npm.cmd run admin:check` để kiểm tra cấu hình: lệnh chỉ đọc, báo từng email đã có tài khoản hay chưa, còn là email mẫu hay không. Tệp lưu bằng Notepad/PowerShell (UTF-8 có BOM) vẫn được đọc đúng.
 
+Chạy lệnh kiểm tra với cùng cấu hình database như terminal chạy website. Nếu website dùng MongoDB Atlas theo hướng dẫn chạy local, đặt `$env:ESCROW_DB = 'mongodb'` trong terminal kiểm tra trước khi chạy `npm.cmd run admin:check`.
+
 ## Số liệu
 
 - Chọn **Ngày / Tuần / Tháng / Năm** và một ngày nằm trong kỳ. Mọi kỳ dùng múi giờ Việt Nam; tuần bắt đầu thứ Hai. Điểm đầu được tính, điểm cuối thuộc kỳ tiếp theo.

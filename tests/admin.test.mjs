@@ -102,6 +102,11 @@ test('admin APIs protect private disputes, count visitors and settle MOCK exactl
   assert.equal(db.prepare('SELECT cents FROM mock_balances WHERE user_id = ?').get('worker').cents, 4000);
   assert.equal(db.prepare('SELECT cents FROM mock_balances WHERE user_id = ?').get('client').cents, 6000);
   assert.equal((await request('admin/case', 'admin', { ...decision, revision: 2 })).status, 409);
+  assert.equal((await request('admin/case', 'admin', { ...note, revision: 2 })).status, 409);
+  const closed = await request('admin/overview', 'admin');
+  assert.equal(closed.body.disputes.length, 0);
+  assert.equal(closed.body.resolvedDisputes[0].adminReview.status, 'resolved');
+  assert.equal(closed.body.resolvedDisputes[0].adminReview.history.length, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n, 2);
   db.prepare('DELETE FROM sessions WHERE user_id = ?').run('admin');
   assert.equal((await request('admin/case?projectId=1', 'admin')).status, 401);
