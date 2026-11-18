@@ -41,6 +41,8 @@ const factoryAbi = parseAbi([
   'function escrowFor(address client, bytes32 agreementRef) view returns (address)',
   'function hashTerms(address client, Terms terms) view returns (bytes32)',
   'function createEscrow(Terms terms, bytes32 expectedTermsHash) returns (address)',
+  'function LATEST_POLICY_VERSION() view returns (uint32)',
+  'function FACTORY_REVISION() view returns (uint32)',
 ]);
 const tokenAbi = parseAbi([
   'function balanceOf(address owner) view returns (uint256)',
@@ -656,11 +658,29 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
     read(token, tokenAbi, 'balanceOf', [wallet.address]), rpc.getBalance({ address: wallet.address, blockNumber }),
   ]);
   Object.assign(status, { token, balance: formatUnits(balance, 18), gas: formatEther(gas) });
-  // Policy 2 (agreed due dates, 5-day review, extensions) needs an upgraded factory and dated milestones.
-  const dated = project.milestones.every(item => item.dueAt);
-  const fesc = project.fesc ?? { deployment, client, freelancer, createBy: (block.timestamp + 7n * day).toString(),
-    ...(deployment.escrowPolicy === 2 && dated ? { policyVersion: 2,
-      baseDues: project.milestones.map(item => String(Math.floor(Date.parse(item.dueAt) / 1000))) } : {}) };
+  // Policy 2 (agreed due dates, 5-day review, extensions, continue-arbitration) needs a factory that
+  // reports it on chain; dated projects refuse to fall back to the old rules.
+  let fesc = project.fesc;
+  if (!fesc) {
+    const dated = project.milestones.every(item => item.dueAt);
+    const [policySupport, revision] = await Promise.all(['LATEST_POLICY_VERSION', 'FACTORY_REVISION'].map(name =>
+      read(factory, factoryAbi, name).catch(error => {
+        if (error.walk?.(cause => ['ContractFunctionZeroDataError', 'ContractFunctionRevertedError'].includes(cause.name))) return 1;
+        throw error;
+      })));
+    const supported = policySupport >= 2 && revision >= 2;
+    if (dated && !supported) {
+      throw new WorkflowError(409, 'Factory FESC hiện tại chưa hỗ trợ thời hạn mới. Chạy npm.cmd run chain:upgrade:fesc-factory.');
+    }
+    let createBy = block.timestamp + 7n * day;
+    if (dated) {
+      // The contract must be created ≥ 9 days (48h funding + 7 days to start) before the first due date.
+      const latest = BigInt(Math.floor(Date.parse(project.milestones[0].dueAt) / 1000)) - 9n * day - 1n;
+      if (latest < createBy && latest > block.timestamp) createBy = latest;
+    }
+    fesc = { deployment, client, freelancer, createBy: createBy.toString(),
+      ...(dated ? { policyVersion: 2, baseDues: project.milestones.map(item => String(Math.floor(Date.parse(item.dueAt) / 1000))) } : {}) };
+  }
   const policy = fesc.policyVersion ?? 1;
   status.policyVersion = policy;
   if (fesc.client !== client || fesc.freelancer !== freelancer) throw new WorkflowError(409, 'Ví dự án không còn khớp với hợp đồng FESC.');
@@ -724,13 +744,14 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
         throw new WorkflowError(409, 'Milestone hiện hành không khớp với hợp đồng FESC.');
       }
       const [, , deadline, stage, , , evidence] = await read(escrow, escrowAbi, 'milestones', [current]);
-      status.disputeOptions = disputeOptions(owner, policy, stage, deadline, block.timestamp);
+      const nextTime = (await rpc.getBlock({ blockTag: 'pending' })).timestamp;
+      status.disputeOptions = disputeOptions(owner, policy, stage, deadline, nextTime);
       status.canDispute = status.disputeOptions.some(option => option.available);
       status.deadline = isoTime(deadline);
       status.reviewing = stage === 2;
       status.milestoneId = milestone.id;
       status.submissionVersion = getSubmissionVersion(milestone);
-      const late = block.timestamp > deadline;
+      const late = nextTime > deadline;
       if (stage === 1 && milestone.status !== 'Submitted') {
         if (assignee && late) step('waiting', 'Đã quá hạn giai đoạn này. Gửi yêu cầu gia hạn để Client xem xét.');
         else if (assignee) step('upload', 'Tải bản bàn giao để Client xem và nghiệm thu.');
@@ -750,9 +771,17 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
         const events = await rpc.getContractEvents({ address: escrow, abi: escrowAbi, eventName: 'DisputeOpened',
           fromBlock: BigInt(deployment.startBlock), toBlock: blockNumber });
         const opened = events.findLast(event => event.args.milestone === current);
-        const legacy = project.fesc.disputeDraft;
-        const draft = project.fesc.disputeDrafts?.[opened?.args.reasonHash] ??
-          (legacy && opened?.args.reasonHash === legacy.hash ? { note: legacy.note, evidence: [] } : undefined);
+        if (!opened) throw new WorkflowError(503, 'Chưa xác minh được sự kiện khiếu nại FESC.');
+        const openedReceipt = await rpc.getTransactionReceipt({ hash: opened.transactionHash });
+        if (openedReceipt.status !== 'success' || openedReceipt.blockHash !== opened.blockHash) {
+          throw new WorkflowError(503, 'Chưa xác minh được giao dịch khiếu nại FESC.');
+        }
+        // Drafts are keyed by reason hash; older builds stored a single draft or an array of drafts.
+        const stored = project.fesc.disputeDrafts;
+        const legacy = [...(Array.isArray(stored) ? stored : []), project.fesc.disputeDraft]
+          .find(item => item?.hash === opened.args.reasonHash);
+        const draft = (!Array.isArray(stored) ? stored?.[opened.args.reasonHash] : undefined) ??
+          (legacy ? { note: legacy.note, evidence: legacy.evidence ?? [] } : undefined);
         const by = opened && isAddressEqual(opened.args.author, project.fesc.client) ? 'Client' : 'Freelancer';
         const kind = opened ? Number(opened.args.reason) : 4;
         const openedAt = opened ? isoTime((await rpc.getBlock({ blockNumber: opened.blockNumber })).timestamp) : new Date().toISOString();
@@ -822,14 +851,14 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
   }
   if (!gas) throw new WorkflowError(409, 'Ví cần ETH thử để trả phí gas trên Hardhat.');
   try {
-    await rpc.simulateContract({ ...call, account: wallet.address });
+    await rpc.simulateContract({ ...call, account: wallet.address, blockTag: 'pending' });
   } catch {
     throw new WorkflowError(409, 'Hardhat chưa chấp nhận giao dịch. Hãy làm mới và kiểm tra trạng thái, hạn thao tác và số dư.');
   }
   if (!project.fesc) await writes.saveProject({ ...project, fesc });
   else if (saveDraft) {
     // Keyed by reason hash so drafts from both parties can coexist until one is confirmed on chain.
-    const drafts = Object.entries(project.fesc.disputeDrafts ?? {}).slice(-4);
+    const drafts = Array.isArray(project.fesc.disputeDrafts) ? [] : Object.entries(project.fesc.disputeDrafts ?? {}).slice(-4);
     await writes.saveProject({ ...project, fesc: { ...project.fesc,
       disputeDrafts: Object.fromEntries([...drafts, [saveDraft.hash, saveDraft]]) } });
   }
