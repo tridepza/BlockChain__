@@ -387,3 +387,80 @@ test('arbitration allocates the disputed milestone once and refunds future miles
   assert.equal(await escrow.read.withdrawn([owner.address]), units('55'));
   assert.equal(await token.read.balanceOf([escrow.address]), 0n);
 });
+
+async function activePolicy2(t: TestContext) {
+  const context = await setup(t);
+  const { freelancer, token, terms, offChainHash, create } = context;
+  const agreement = { ...terms, policyVersion: 2, amounts: [units('40'), units('60')] };
+  const { escrow } = await create(agreement);
+  await escrow.write.accept([offChainHash(agreement)], { account: freelancer });
+  await token.write.approve([escrow.address, terms.budgetUnits]);
+  await escrow.write.fund();
+  await escrow.write.start({ account: freelancer });
+  return { ...context, agreement, escrow };
+}
+
+test('policy 2 Client extends one milestone or the whole project; later due dates stay ordered', async t => {
+  const { connection, freelancer, agreement, escrow } = await activePolicy2(t);
+  const { assertions } = connection.viem;
+  const [first, second] = agreement.baseDues;
+  const day = 86400n;
+  await assertions.revertWithCustomError(
+    escrow.write.extendDeadline([0n, first + day, false, await escrow.read.version()], { account: freelancer }), escrow, 'Unauthorized');
+  await assertions.revertWithCustomError(
+    escrow.write.extendDeadline([0n, first - day, false, await escrow.read.version()]), escrow, 'InvalidTime');
+  await assertions.revertWithCustomError(escrow.write.extendDeadline([0n, first + day, false, 0n]), escrow, 'StaleAction');
+
+  // Pushing milestone 1 past milestone 2 moves milestone 2 by the same delta.
+  await escrow.write.extendDeadline([0n, second + day, false, await escrow.read.version()]);
+  const delta = second + day - first;
+  let [, base0, deadline0] = await escrow.read.milestones([0n]);
+  let [, base1] = await escrow.read.milestones([1n]);
+  assert.equal(base0, second + day);
+  assert.equal(deadline0, second + day);
+  assert.equal(base1, second + delta);
+
+  await escrow.write.extendDeadline([0n, base1 + 7n * day, true, await escrow.read.version()]);
+  [, base0, deadline0] = await escrow.read.milestones([0n]);
+  [, base1] = await escrow.read.milestones([1n]);
+  assert.equal(base1, second + delta + 7n * day);
+  assert.equal(base0, second + day + 7n * day);
+  assert.equal(deadline0, base0);
+});
+
+test('policy 2 lets either party complain for another reason; policy 1 rejects it', async t => {
+  const { connection, freelancer, escrow } = await activePolicy2(t);
+  await escrow.write.openDispute([0n, await escrow.read.version(), 4, hash('freelancer other reason')], { account: freelancer });
+  assert.equal(await escrow.read.state(), 4);
+
+  const legacy = await setup(t);
+  const { escrow: old } = await legacy.create();
+  await old.write.accept([legacy.offChainHash()], { account: legacy.freelancer });
+  await legacy.token.write.approve([old.address, legacy.terms.budgetUnits]);
+  await old.write.fund();
+  await old.write.start({ account: legacy.freelancer });
+  await connection.viem.assertions.revertWithCustomError(
+    old.write.openDispute([0n, await old.read.version(), 4, hash('other')]), old, 'InvalidState');
+  await connection.viem.assertions.revertWithCustomError(
+    old.write.extendDeadline([0n, legacy.terms.baseDues[0] + 86400n, false, await old.read.version()]), old, 'InvalidState');
+});
+
+test('policy 2 arbitration splits only the disputed milestone and continues the contract', async t => {
+  const { connection, owner, freelancer, arbitrator, escrow } = await activePolicy2(t);
+  await escrow.write.submit([0n, await escrow.read.version(), hash('delivery')], { account: freelancer });
+  await escrow.write.openDispute([0n, await escrow.read.version(), 0, hash('not as requested')]);
+  await connection.viem.assertions.revertWithCustomError(
+    escrow.write.resolveAndContinue([units('20'), 0n, hash('half')], { account: owner }), escrow, 'Unauthorized');
+  await escrow.write.resolveAndContinue([units('20'), 0n, hash('half')], { account: arbitrator });
+  assert.equal(await escrow.read.state(), 3);
+  assert.equal(await escrow.read.current(), 1n);
+  assert.equal(await escrow.read.claimable([freelancer.address]), units('20'));
+  assert.equal(await escrow.read.claimable([owner.address]), units('20'));
+  const [, , , stage] = await escrow.read.milestones([1n]);
+  assert.equal(stage, 1);
+  await escrow.write.withdraw({ account: freelancer });
+  await escrow.write.submit([1n, await escrow.read.version(), hash('second')], { account: freelancer });
+  await escrow.write.approveAndPayMilestone([1n, await escrow.read.version()]);
+  assert.equal(await escrow.read.state(), 5);
+  assert.equal(await escrow.read.withdrawn([freelancer.address]), units('80'));
+});

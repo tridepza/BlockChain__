@@ -26,12 +26,18 @@ Mở hồ sơ để xem nội dung dự án, lý do, milestone, mô tả bản b
 
 Admin không được phân xử dự án mà chính tài khoản đó là Client hoặc Freelancer. Hồ sơ thay đổi khi đang mở sẽ yêu cầu tải lại. Các API workspace, tệp và explorer vẫn giữ phân quyền riêng; quyền admin không được gửi từ trình duyệt để bỏ qua kiểm tra server.
 
-- **MOCK:** Client có thể mở tranh chấp khi đang nghiệm thu bản bàn giao. Admin chọn giải ngân milestone đang tranh chấp cho Freelancer hoặc hoàn tiền cho Client. Milestone chưa thực hiện còn lại được hoàn cho Client. Ghi kết quả, cộng số dư và ghi giao dịch trong cùng transaction database, không giải ngân lại khi gửi lặp.
-- **FESC:** Client mở tranh chấp bản bàn giao bằng MetaMask; Freelancer có thể mở khi quá hạn nghiệm thu. Trạng thái chỉ được ghi nhận khi đọc được trạng thái tranh chấp trên contract. Quyết định phải ký bằng ví `arbitrator` đã cố định trong hợp đồng, không phải bất kỳ ví nào của tài khoản admin. Trang không lưu private key hoặc tự ký. Server kiểm tra đúng deployment, điều khoản, số bằng chứng hiện hành, receipt thành công, block, người ký, nội dung và các sự kiện phân bổ trước khi ghi kết quả.
-- Sau phân xử FESC, contract phân bổ **quyền rút**; chưa phải chuyển token vào ví ngay. Client và Freelancer vào dự án, bấm **Rút FESC được phân xử về ví** để nhận phần của mình. Phần milestone tương lai về Client. Số liệu chuyển token chỉ tăng khi các giao dịch chuyển FESC đã xác nhận.
-- Nếu giao dịch phân xử đã gửi nhưng chưa ghi nhận, giữ nguyên quyết định và mã hash, dùng **Kiểm tra và ghi nhận**. Có thể nhập lại hash sau khi tải lại trang; không gửi một giao dịch khác để thay thế kết quả đã xác nhận.
+- **Hồ sơ khiếu nại:** loại lý do, người gửi, thời điểm, yêu cầu chấm dứt hợp đồng (nếu có) và danh sách bằng chứng. Ảnh xem trực tiếp, tệp tải xuống, link mở trong tab mới. Hai bên có thể bổ sung bằng chứng khi đang tranh chấp.
+- **Phản hồi:** nội dung trong ô **Phản hồi cho hai bên** hiển thị trong dự án của Client và Freelancer, không đổi số tiền.
+- **Quyết định** chỉ áp dụng cho giai đoạn bị khiếu nại: giải ngân 100% cho Freelancer, chia đều 50/50 hoặc hoàn 100% cho Client. Sau đó chọn **Tiếp tục giai đoạn sau** (hợp đồng chạy tiếp) hoặc **Chấm dứt hợp đồng** (các giai đoạn còn lại hoàn cho Client). Dự án tạo trước khi nâng cấp factory chỉ hỗ trợ chấm dứt.
+- Khiếu nại được ghi lên contract bằng MetaMask; trạng thái chỉ được ghi nhận khi đọc được tranh chấp trên chain. Quyết định phải ký bằng ví `arbitrator` cố định trong hợp đồng. Trang không lưu private key hoặc tự ký. Server kiểm tra deployment, điều khoản, số bằng chứng on-chain, receipt, người ký, nội dung và các sự kiện phân bổ trước khi ghi kết quả.
+- Sau phân xử, contract phân bổ **quyền rút**. Client và Freelancer vào dự án, bấm **Rút FESC được phân xử** để nhận phần của mình, kể cả khi hợp đồng tiếp tục giai đoạn sau.
+- **Email kết quả** được gửi tới Client và Freelancer qua SMTP trong `.env.mail.local`. Nếu gửi lỗi, quyết định vẫn giữ nguyên; lịch sử hiện "gửi lỗi" và nút **Gửi lại email**.
+- Nếu giao dịch phân xử đã gửi nhưng chưa ghi nhận, giữ nguyên quyết định, lựa chọn sau quyết định, lý do và mã hash, rồi dùng **Kiểm tra và ghi nhận**.
 
-Thiết kế giai đoạn 3/4 quy định trọng tài theo hợp đồng. Triển khai trước đây chỉ có trọng tài ở demo, còn trang này bổ sung quyền quản trị qua email và nối phân xử FESC vào hàm `resolve` hiện có; không thay đổi Solidity hoặc quy tắc phân bổ của hợp đồng.
+## Tài khoản và giao dịch
+
+- Tab **Tài khoản**: tổng số tài khoản đã đăng ký, số tài khoản hoạt động (ví đã liên kết đang giữ FESC > 0), số đã liên kết ví và bảng FESC sở hữu của từng tài khoản, đọc tại block hiện tại. Khi RPC lỗi, số dư hiện "—" thay vì 0.
+- Tab **Giao dịch**: toàn bộ giao dịch FESC đã ghi nhận của mọi dự án, có tìm kiếm, phân trang và liên kết sang trình tra cứu on-chain.
 
 ## Kiểm thử
 

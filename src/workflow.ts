@@ -1,5 +1,5 @@
-export type Role = 'Client' | 'Freelancer' | 'Arbitrator';
-export type Currency = 'MOCK' | 'FESC';
+export type Role = 'Client' | 'Freelancer';
+export type Currency = 'FESC';
 export type Account = { id: string; name: string; email: string; role: Role };
 type Status = 'Open' | 'Proposal sent' | 'Funded' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Completed' | 'Cancelled';
 type MilestoneStatus = 'Pending' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Paid' | 'Refunded';
@@ -14,6 +14,7 @@ export type Milestone = {
   submissionVersion?: number;
   deliveries?: Delivery[];
   revisionReason?: string;
+  arbitration?: Arbitration;
 };
 
 export type Delivery = {
@@ -28,7 +29,6 @@ export type Delivery = {
 export const deliveryFileLimit = 10 * 1024 * 1024;
 export const deliveryPreviewLimit = 2 * 1024 * 1024;
 
-type CancellationRequest = { id: string; proposerId: string; reason: string; expiresAt: number };
 
 export type Project = {
   id: number;
@@ -51,8 +51,28 @@ export type Project = {
   disputeReason?: string;
   disputeOpenedBy?: 'Client' | 'Freelancer';
   decision?: string;
-  cancellation?: CancellationRequest;
-  adminReview?: { revision: number; status: 'reviewing' | 'resolved'; history: { actorId: string; action: string; note: string; at: string; hash?: string }[] };
+  adminReview?: { revision: number; status: 'reviewing' | 'resolved'; history: AdminReviewEntry[] };
+  dispute?: DisputeRecord;
+  disputeHistory?: (DisputeRecord & { resolution?: Arbitration; decision?: string; resolvedAt?: string })[];
+  evidenceUploads?: EvidenceRecord[];
+  extensionRequest?: ExtensionRequest;
+  extensionHistory?: (ExtensionRequest & { result: string })[];
+  fesc?: { policyVersion?: number };
+};
+
+export type Arbitration = { decision: 'release' | 'split' | 'refund'; mode: 'continue' | 'terminate'; toFreelancer: number; toClient: number };
+export type EvidenceRecord = {
+  id: string; kind: 'file' | 'link'; name?: string; url?: string; size?: number; sha256?: string;
+  by?: string; byId?: string; at?: string; used?: boolean; note?: string; added?: boolean;
+};
+export type DisputeRecord = {
+  kind: number; label: string; note: string; terminate: boolean; evidence: EvidenceRecord[];
+  by: 'Client' | 'Freelancer'; openedAt: string; milestoneId?: number;
+};
+export type ExtensionRequest = { id: string; whole: boolean; milestoneId: number; dueDate: string; dueAt: string; note: string; at: string };
+export type AdminReviewEntry = {
+  actorId: string; actor?: string; action: string; note: string; at: string; hash?: string;
+  arbitration?: Arbitration; emailed?: 'sent' | 'failed'; emailedAt?: string;
 };
 
 export type Tx = {
@@ -66,16 +86,9 @@ export type Tx = {
   currency?: Currency;
 };
 
-export type MockBalance = { cents: number; claimed: boolean };
-export type WorkspaceData = { projects: Project[]; txs: Tx[]; mockWallet?: MockBalance };
-export const mockGrantCents = 100_000;
-export const money = (amount: number, currency: Currency = 'MOCK') => `${amount.toFixed(2)} ${currency}`;
+export type WorkspaceData = { projects: Project[]; txs: Tx[] };
+export const money = (amount: number, currency: Currency = 'FESC') => `${amount.toFixed(2)} ${currency}`;
 export const categories = ['Web Development', 'UI/UX Design', 'Data Analytics', 'Mobile App'];
-export const demoAccounts: Record<Role, Account> = {
-  Client: { id: 'demo-client', name: 'An Nguyen', email: '', role: 'Client' },
-  Freelancer: { id: 'demo-freelancer', name: 'Minh Tran', email: '', role: 'Freelancer' },
-  Arbitrator: { id: 'demo-arbitrator', name: 'Trọng tài demo', email: '', role: 'Arbitrator' },
-};
 
 export class WorkflowError extends Error {
   status: number;
@@ -95,45 +108,17 @@ export function getSubmissionVersion(milestone: Milestone) {
   return milestone.submissionVersion ?? (milestone.submission || milestone.status === 'Submitted' ? 1 : 0);
 }
 
-export const reviewWindowMs = 5 * 24 * 60 * 60 * 1000;
-export function reviewDueAt(milestone: Milestone) {
-  const submittedAt = Date.parse(milestone.deliveries?.slice(-1)[0]?.submittedAt ?? '');
-  return Number.isFinite(submittedAt) ? submittedAt + reviewWindowMs : undefined;
-}
-
-export const canRequestRevision = (milestone: Milestone, now = Date.now()) =>
-  milestone.status === 'Submitted' && getSubmissionVersion(milestone) < 3 && now <= (reviewDueAt(milestone) ?? Infinity);
-
-export const workDueAt = (project: Project, milestone: Milestone) =>
-  Math.min(milestone.dueAt ? Date.parse(milestone.dueAt) : Infinity, project.dueAt ? Date.parse(project.dueAt) : Infinity);
-
-export function mockComplaintAvailable(project: Project, milestone: Milestone, role: Role, now = Date.now()) {
-  if (milestone.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(project.status)) {
-    return role === 'Client' || role === 'Freelancer' && now > (reviewDueAt(milestone) ?? Infinity);
-  }
-  return role === 'Client' && ['Funded', 'In progress', 'Revision requested'].includes(project.status) &&
-    ['Pending', 'In progress', 'Revision requested'].includes(milestone.status) && now > workDueAt(project, milestone);
-}
-
+// FESC still held by the contract for this project (funded minus paid out and refunded).
 export function escrowBalance(project: Project) {
   if (project.status === 'Cancelled') return 0;
-  const refunded = project.milestones.reduce((sum, m) => sum + (m.status === 'Refunded' ? cents(m.amount) : 0), 0);
-  return (cents(project.funded) - cents(project.paid) - refunded) / 100;
-}
-
-export function canRequestCancellation(project: Project) {
-  return Boolean(project.freelancerId) && escrowBalance(project) > 0 &&
-    ['Funded', 'In progress', 'Submitted', 'Revision requested'].includes(project.status);
-}
-
-export function pendingCancellation(project: Project, now = Date.now()) {
-  const request = project.cancellation;
-  return request && now <= request.expiresAt ? request : undefined;
+  // Arbitrated milestones may be split; only the Client's share left the escrow as a refund.
+  const refunded = project.milestones.reduce((sum, m) => sum +
+    (m.arbitration ? cents(m.arbitration.toClient) : m.status === 'Refunded' ? cents(m.amount) : 0), 0);
+  return Math.max(0, cents(project.funded) - cents(project.paid) - refunded) / 100;
 }
 
 export function canSeePrivate(project: Project, actor: Account) {
-  return project.ownerId === actor.id || project.freelancerId === actor.id ||
-    (actor.id === demoAccounts.Arbitrator.id && Boolean(project.disputeReason));
+  return project.ownerId === actor.id || project.freelancerId === actor.id;
 }
 
 export function visibleWorkspace(data: WorkspaceData, actor: Account): WorkspaceData {
@@ -167,11 +152,12 @@ function localDue(value: string) {
   return Number.isFinite(utc) && new Date(utc).toISOString().startsWith(value) ? utc - 7 * 3_600_000 : NaN;
 }
 
+// The first due date leaves 48h to fund and 7 days to start the FESC contract.
+export const firstDueBufferMs = 9 * 24 * 3_600_000;
+
 export function createProject(actor: Account, input: Record<string, unknown>, id: number): Project {
   if (actor.role !== 'Client') throw new WorkflowError(403, 'Chỉ Client được tạo dự án.');
-  if (input.currency !== undefined && input.currency !== 'MOCK' && input.currency !== 'FESC') {
-    throw new WorkflowError(400, 'Đơn vị ngân sách không hợp lệ.');
-  }
+  if (input.currency !== undefined && input.currency !== 'FESC') throw new WorkflowError(400, 'Dự án chỉ dùng FESC.');
   const title = text(input.title, 120);
   const description = text(input.description, 2000);
   const category = text(input.category, 40);
@@ -189,29 +175,21 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
     throw new WorkflowError(400, 'Tổng số tiền milestone phải bằng ngân sách.');
   }
   const now = Date.now();
-  let projectDue: number | undefined;
-  let milestoneDues: number[] = [];
-  if (input.projectDue !== undefined || input.milestoneDues !== undefined) {
-    const requestedDue = localDue(text(input.projectDue, 10));
-    milestoneDues = text(input.milestoneDues, 140).split(',').map(value => localDue(value.trim()));
-    const startBuffer = input.currency === 'FESC' ? 9 * 24 * 3_600_000 : 0;
-    if (!Number.isFinite(requestedDue) || milestoneDues.length !== names.length ||
-        milestoneDues.some((due, index) => !Number.isFinite(due) || due > requestedDue ||
-          due <= (index === 0 ? now + startBuffer : milestoneDues[index - 1]))) {
-      throw new WorkflowError(400, input.currency === 'FESC'
-        ? 'Nhập đúng số ngày hạn mốc theo thứ tự tăng dần. Hạn mốc đầu cần cách hiện tại hơn 9 ngày và tất cả các mốc phải nằm trong hạn dự án.'
-        : 'Nhập đúng số ngày hạn mốc trong tương lai, theo thứ tự tăng dần và trong hạn dự án.');
-    }
-    projectDue = requestedDue;
+  const projectDue = localDue(text(input.projectDue, 10));
+  const milestoneDues = text(input.milestoneDues, 140).split(',').map(value => localDue(value.trim()));
+  if (!Number.isFinite(projectDue) || milestoneDues.length !== names.length ||
+      milestoneDues.some((due, index) => !Number.isFinite(due) || due > projectDue ||
+        due <= (index === 0 ? now + firstDueBufferMs : milestoneDues[index - 1]))) {
+    throw new WorkflowError(400, 'Nhập hạn cho từng mốc theo thứ tự tăng dần. Hạn mốc đầu cần cách hiện tại hơn 9 ngày và tất cả các mốc phải nằm trong hạn dự án.');
   }
   return {
     id, title, category, description, client: actor.name, ownerId: actor.id, freelancer: '',
-    budget: budget / 100, currency: input.currency, status: 'Open', funded: 0, paid: 0,
-    created: new Date(Date.now() + 7 * 3_600_000).toISOString().slice(0, 10),
-    createdAt: new Date().toISOString(),
-    ...(projectDue === undefined ? {} : { dueAt: new Date(projectDue).toISOString() }),
+    budget: budget / 100, currency: 'FESC', status: 'Open', funded: 0, paid: 0,
+    created: new Date(now + 7 * 3_600_000).toISOString().slice(0, 10),
+    createdAt: new Date(now).toISOString(),
+    dueAt: new Date(projectDue).toISOString(),
     milestones: names.map((name, index) => ({ id: index + 1, title: name, amount: amounts[index] / 100, status: 'Pending',
-      ...(projectDue === undefined ? {} : { dueAt: new Date(milestoneDues[index]).toISOString() }) })),
+      dueAt: new Date(milestoneDues[index]).toISOString() })),
   };
 }
 
@@ -221,24 +199,18 @@ export type ProjectAction = {
   submissionVersion?: number;
   note?: string;
   email?: string;
-  cancellationId?: string;
 };
 type ActionResult = { project: Project; transactions?: Pick<Tx, 'action' | 'amount'>[] };
 
+// Client picks a Freelancer and the Freelancer stores deliveries; funding and approval are recorded
+// here only after the matching FESC transactions are verified on chain.
 export function applyProjectAction(
   p: Project, actor: Account, input: ProjectAction, freelancer?: Account,
   attachments?: Pick<Delivery, 'preview' | 'original'>,
 ): ActionResult {
-  const clientActions = ['assign', 'fund', 'approve', 'revision'];
-  const ownerAction = clientActions.includes(input.action);
   const owner = actor.role === 'Client' && actor.id === p.ownerId;
   const assignee = actor.role === 'Freelancer' && actor.id === p.freelancerId;
-  const cancellationAction = ['requestCancel', 'confirmCancel'].includes(input.action);
-  const allowed = ownerAction && owner ||
-    input.action === 'submit' && assignee ||
-    input.action === 'dispute' && (owner || assignee) ||
-    cancellationAction && (owner || assignee) ||
-    ['release', 'refund'].includes(input.action) && actor.id === demoAccounts.Arbitrator.id;
+  const allowed = ['assign', 'fund', 'approve'].includes(input.action) && owner || input.action === 'submit' && assignee;
   if (!allowed) throw new WorkflowError(403, 'Bạn không có quyền thực hiện thao tác này.');
 
   const invalidState = () => new WorkflowError(409, 'Trạng thái dự án đã thay đổi hoặc chưa cho phép thao tác này.');
@@ -254,94 +226,41 @@ export function applyProjectAction(
       return { project: { ...p, status: 'Proposal sent', freelancer: freelancer.name, freelancerId: freelancer.id } };
     case 'fund':
       if (p.status !== 'Proposal sent' || !p.freelancerId || p.funded !== 0) throw invalidState();
-      if (p.currency !== 'FESC' && milestone && Date.now() > workDueAt(p, milestone)) {
-        throw new WorkflowError(409, 'Hạn bàn giao mốc đầu đã hết.');
-      }
       return { project: { ...p, status: 'Funded', funded: p.budget }, transactions: [{ action: 'Ký quỹ', amount: p.budget }] };
-    case 'requestCancel': {
-      if (!canRequestCancellation(p)) throw invalidState();
-      const now = Date.now();
-      if (pendingCancellation(p, now)) throw new WorkflowError(409, 'Đã có đề nghị hủy còn hiệu lực.');
-      if (!note) throw new WorkflowError(400, 'Nhập lý do đề nghị hủy.');
-      const cancellation = { id: crypto.randomUUID(), proposerId: actor.id, reason: note, expiresAt: now + 72 * 60 * 60 * 1000 };
-      return { project: { ...p, cancellation } };
-    }
-    case 'confirmCancel': {
-      const request = pendingCancellation(p);
-      if (!canRequestCancellation(p) || !request || request.id !== input.cancellationId) {
-        throw new WorkflowError(409, 'Đề nghị hủy đã hết hạn hoặc không còn hiệu lực.');
-      }
-      if (request.proposerId === actor.id) throw new WorkflowError(403, 'Đề nghị cần xác nhận của bên còn lại.');
-      const amount = escrowBalance(p);
-      const milestones = p.milestones.map(m => isSettled(m) ? m : { ...m, status: 'Refunded' as const });
-      return {
-        project: { ...p, milestones, status: 'Cancelled', cancellation: undefined },
-        transactions: [{ action: 'Hoàn tiền khi hủy', amount }],
-      };
-    }
   }
 
   if (!milestone || milestone.id !== input.milestoneId || p.funded !== p.budget) throw invalidState();
   const submissionVersion = getSubmissionVersion(milestone);
-  if (['approve', 'revision', 'dispute'].includes(input.action) && input.submissionVersion !== submissionVersion) {
+  if (input.action === 'approve' && input.submissionVersion !== submissionVersion) {
     throw new WorkflowError(409, 'Bản bàn giao đã thay đổi. Hãy làm mới dự án và xem lại bản hiện hành.');
   }
-  // Work changes invalidate the pending request, even when the balance stays the same.
-  const updatedProject = { ...p, cancellation: undefined };
   switch (input.action) {
-    case 'submit':
+    case 'submit': {
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
         !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
-      if (p.currency !== 'FESC' && Date.now() > workDueAt(p, milestone)) throw new WorkflowError(409, 'Đã hết hạn bàn giao mốc.');
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
-      const submittedAt = new Date().toISOString();
       const history = milestone.deliveries ?? (milestone.submission
         ? [{ id: crypto.randomUUID(), version: submissionVersion, note: milestone.submission }]
         : []);
-      const delivery = { id: crypto.randomUUID(), version: submissionVersion + 1, note, submittedAt, ...attachments };
+      const delivery = { id: crypto.randomUUID(), version: submissionVersion + 1, note, submittedAt: new Date().toISOString(), ...attachments };
       return {
         project: {
-          ...updatedProject,
+          ...p,
           status: 'Submitted',
           milestones: updateMilestone({
             status: 'Submitted', submission: note, submissionVersion: delivery.version, deliveries: [...history, delivery],
           }),
         },
       };
-    case 'dispute': {
-      if (!mockComplaintAvailable(p, milestone, actor.role)) throw new WorkflowError(409, 'Mốc này chưa đủ điều kiện khiếu nại.');
-      if (!note) throw new WorkflowError(400, 'Nhập lý do khiếu nại.');
-      return { project: { ...updatedProject, status: 'Disputed', disputeReason: note,
-        disputeOpenedBy: assignee ? 'Freelancer' : 'Client', milestones: updateMilestone({ status: 'Disputed' }) } };
     }
-    case 'revision': {
+    case 'approve': {
       if (milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();
-      if (!note) throw new WorkflowError(400, 'Nhập lý do để tiếp tục.');
-      if (Date.now() > (reviewDueAt(milestone) ?? Infinity)) throw new WorkflowError(409, 'Đã hết 5 ngày yêu cầu sửa bản bàn giao.');
-      if (!canRequestRevision(milestone)) throw new WorkflowError(409, 'Milestone đã đạt giới hạn hai lần yêu cầu sửa.');
-      return { project: { ...updatedProject, status: 'Revision requested', milestones: updateMilestone({ status: 'Revision requested', revisionReason: note }) } };
-    }
-    case 'approve':
-    case 'release':
-    case 'refund': {
-      const dispute = input.action !== 'approve';
-      const refund = input.action === 'refund';
-      if (dispute ? p.status !== 'Disputed' || milestone.status !== 'Disputed' :
-        milestone.status !== 'Submitted' || ['Disputed', 'Cancelled', 'Completed'].includes(p.status)) throw invalidState();
       if (cents(escrowBalance(p)) < cents(milestone.amount)) throw invalidState();
-      let milestones = updateMilestone({ status: refund ? 'Refunded' : 'Paid' });
-      const paid = (cents(p.paid) + (refund ? 0 : cents(milestone.amount))) / 100;
-      const decision = dispute ? (refund ? 'Hoàn trả Client' : 'Giải ngân cho Freelancer') : p.decision;
-      const action = dispute ? (refund ? 'Phân xử: hoàn tiền' : 'Phân xử: giải ngân') : `Giải ngân milestone ${milestone.id}`;
-      const transactions = [{ action, amount: milestone.amount }];
-      if (dispute) {
-        const futureRefund = milestones.filter(m => !isSettled(m)).reduce((sum, m) => sum + cents(m.amount), 0);
-        milestones = milestones.map(m => isSettled(m) ? m : { ...m, status: 'Refunded' });
-        if (futureRefund > 0) transactions.push({ action: 'Hoàn tiền các milestone còn lại', amount: futureRefund / 100 });
-      }
+      const milestones = updateMilestone({ status: 'Paid' });
       return {
-        project: { ...updatedProject, paid, decision, milestones, status: milestones.every(isSettled) ? 'Completed' : 'In progress' },
-        transactions,
+        project: { ...p, paid: (cents(p.paid) + cents(milestone.amount)) / 100, milestones,
+          status: milestones.every(isSettled) ? 'Completed' : 'In progress' },
+        transactions: [{ action: `Giải ngân milestone ${milestone.id}`, amount: milestone.amount }],
       };
     }
     default:

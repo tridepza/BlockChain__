@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 import { localChain } from '../src/local-chain.ts';
 import { applyProjectAction, cents, currentMilestone, getSubmissionVersion, WorkflowError } from '../src/workflow.ts';
 import { checkLocalDeployment } from './wallet.mjs';
+import { evidenceFingerprint, markEvidenceUsed, pickEvidence } from './evidence.mjs';
 
 const rpc = createPublicClient({ chain: hardhat, transport: http(localChain.rpcUrl, { timeout: 3500, retryCount: 0 }) });
 const publicSync = new WeakMap();
@@ -66,17 +67,48 @@ const escrowAbi = parseAbi([
   'function claimable(address beneficiary) view returns (uint256)',
   'function withdraw()',
   'function resolve(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash)',
+  'function resolveAndContinue(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash)',
+  'function extendDeadline(uint256 index, uint64 newDeadline, bool wholeProject, uint256 expectedVersion)',
   'event DisputeOpened(uint256 indexed milestone, uint8 reason, bytes32 reasonHash, address indexed author)',
+  'event DeadlineExtended(uint256 indexed milestone, bool wholeProject, uint64 newDeadline, uint64 delta)',
   'event Allocated(uint256 indexed milestone, uint8 outcome, uint256 toFreelancer, uint256 toClient)',
   'event Resolved(bytes32 decisionHash, uint256 evidenceCount)',
   'event Funded(uint256 amount)',
   'event MilestonePaid(uint256 indexed milestone, bytes32 evidenceHash, uint256 amount)',
 ]);
 
-export const fescActions = ['create', 'accept', 'reset', 'allow', 'fund', 'start', 'submit', 'approve', 'dispute', 'withdraw'];
+export const fescActions = ['create', 'accept', 'reset', 'allow', 'fund', 'start', 'submit', 'approve', 'dispute', 'withdraw', 'extend'];
 
-function escrowCallForDispute(address, index, version, kind, note) {
-  return { address, abi: escrowAbi, functionName: 'openDispute', args: [index, version, kind, hash(['dispute', note])] };
+const reviewTimeoutLabel = policy => `Client quá hạn nghiệm thu (${policy === 2 ? '5 ngày' : '3 ngày'})`;
+export const disputeLabels = {
+  0: 'Bản bàn giao không đúng yêu cầu', 1: 'Client quá hạn nghiệm thu', 2: 'Quá hạn thời gian dự án', 3: 'Bế tắc khi hủy hợp đồng', 4: 'Lý do khác',
+};
+const timeText = seconds => new Date(Number(seconds) * 1000).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+const isoTime = seconds => new Date(Number(seconds) * 1000).toISOString();
+
+// End of the chosen day in Vietnam time, as Unix seconds.
+export function dueSeconds(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return NaN;
+  const utc = Date.parse(`${value}T23:59:59Z`);
+  return Number.isFinite(utc) && new Date(utc).toISOString().startsWith(value) ? (utc - 7 * 3_600_000) / 1000 : NaN;
+}
+
+// Applies an extension to stored due dates exactly as Escrow.extendDeadline does on chain.
+export function shiftDues(dues, index, newDeadline, whole, first = 0) {
+  const next = dues.map(Number);
+  if (whole) index = next.length - 1;
+  const delta = newDeadline - next[index];
+  if (whole) for (let i = first; i < next.length; i++) next[i] += delta;
+  else {
+    next[index] = newDeadline;
+    for (let i = index + 1; i < next.length && next[i] <= next[i - 1]; i++) next[i] += delta;
+  }
+  return next;
+}
+
+function withDues(project, seconds) {
+  const milestones = project.milestones.map((item, index) => ({ ...item, dueAt: isoTime(seconds[index]) }));
+  return { ...project, milestones, dueAt: milestones.at(-1).dueAt };
 }
 
 // Admin authorization is enforced by the caller. Only the contract's immutable
@@ -96,16 +128,25 @@ export async function adminFescCase(root, project, input = {}) {
     read('state'), read('current'), read('evidenceCount'), read('arbitrator'),
   ]);
   if (!isAddressEqual(arbitrator, deployment.accounts.arbitrator)) throw new WorkflowError(409, 'Ví trọng tài không khớp.');
-  const info = { escrow, arbitrator, state, evidenceCount: evidenceCount.toString(), current: Number(ordinal) };
+  const policy = project.fesc.policyVersion ?? 1;
+  const info = { escrow, arbitrator, state, evidenceCount: evidenceCount.toString(), current: Number(ordinal),
+    modes: policy === 2 ? ['continue', 'terminate'] : ['terminate'] };
   if (!input.action) return info;
-  if (!['prepare', 'confirm'].includes(input.action) || !['release', 'refund'].includes(input.decision) ||
+  const mode = input.mode ?? 'terminate';
+  if (!['prepare', 'confirm'].includes(input.action) || !['release', 'split', 'refund'].includes(input.decision) ||
+      !info.modes.includes(mode) ||
       typeof input.note !== 'string' || input.note.trim().length < 3 || input.note.length > 2000 ||
       !/^\d{1,20}$/.test(String(input.evidenceCount))) throw new WorkflowError(400, 'Quyết định trọng tài không hợp lệ.');
   const index = project.milestones.findIndex(m => !['Paid', 'Refunded'].includes(m.status));
   if (index < 0) throw new WorkflowError(409, 'Dự án đã được xử lý.');
-  const amount = input.decision === 'release' ? units(project.milestones[index].amount) : 0n;
-  const decisionHash = hash(['admin-resolution', project.id, input.decision, input.note.trim()]);
-  const call = { address: escrow, abi: escrowAbi, functionName: 'resolve', args: [amount, BigInt(input.evidenceCount), decisionHash] };
+  const whole = units(project.milestones[index].amount);
+  const amount = input.decision === 'release' ? whole : input.decision === 'split' ? whole / 2n : 0n;
+  // v1 decisions (release/refund + terminate) keep their original hash so pending transactions still verify.
+  const decisionHash = input.decision !== 'split' && mode === 'terminate'
+    ? hash(['admin-resolution', project.id, input.decision, input.note.trim()])
+    : hash(['admin-resolution', project.id, input.decision, mode, input.note.trim()]);
+  const call = { address: escrow, abi: escrowAbi, functionName: mode === 'continue' ? 'resolveAndContinue' : 'resolve',
+    args: [amount, BigInt(input.evidenceCount), decisionHash] };
   const data = encodeFunctionData(call);
   if (input.action === 'prepare') {
     if (state !== 4 || ordinal !== BigInt(index) || evidenceCount !== BigInt(input.evidenceCount)) {
@@ -122,24 +163,36 @@ export async function adminFescCase(root, project, input = {}) {
     logs: receipt.logs.filter(log => isAddressEqual(log.address, escrow)) });
   const resolved = events.find(event => event.eventName === 'Resolved');
   const allocations = events.filter(event => event.eventName === 'Allocated');
+  const last = index === project.milestones.length - 1;
+  const allocated = mode === 'continue' ? 1 : project.milestones.length - index;
+  const expectedState = mode === 'continue' && !last ? 3 : 5;
   if (receipt.status !== 'success' || receipt.blockHash !== block.hash || tx.blockHash !== block.hash ||
       !tx.to || !isAddressEqual(tx.to, escrow) || !isAddressEqual(tx.from, arbitrator) || tx.input !== data ||
       resolved?.args.decisionHash !== decisionHash || resolved.args.evidenceCount !== BigInt(input.evidenceCount) ||
-      allocations.length !== project.milestones.length - index || state !== 5) {
+      allocations.length !== allocated || state !== expectedState) {
     throw new WorkflowError(409, 'Chưa xác minh được quyết định trên đúng blockchain.');
   }
-  for (let i = index; i < project.milestones.length; i++) {
+  for (let i = index; i < index + allocated; i++) {
     const event = allocations.find(event => event.args.milestone === BigInt(i));
     const share = i === index ? amount : 0n;
     if (!event || event.args.toFreelancer !== share || event.args.toClient !== units(project.milestones[i].amount) - share) {
       throw new WorkflowError(409, 'Phân bổ FESC không khớp với quyết định.');
     }
   }
-  return { project: { ...project, status: 'Completed',
-    paid: (cents(project.paid) + (input.decision === 'release' ? cents(project.milestones[index].amount) : 0)) / 100,
-    decision: input.note.trim(), milestones: project.milestones.map((m, i) => i < index ? m :
-      { ...m, status: i === index && amount > 0n ? 'Paid' : 'Refunded' }) },
-    transaction: { id: receipt.transactionHash, time: new Date(Number(block.timestamp) * 1000).toISOString() } };
+  const toFreelancer = Number(formatUnits(amount, 18));
+  const arbitration = { decision: input.decision, mode, toFreelancer, toClient: Number(formatUnits(whole - amount, 18)) };
+  const milestones = project.milestones.map((m, i) => {
+    if (i < index) return m;
+    if (i === index) return { ...m, status: amount > 0n ? 'Paid' : 'Refunded', arbitration };
+    if (mode === 'terminate') return { ...m, status: 'Refunded' };
+    return i === index + 1 ? { ...m, status: 'In progress' } : m;
+  });
+  const history = [...(project.disputeHistory ?? []), ...(project.dispute ? [{ ...project.dispute, resolution: arbitration,
+    note: project.dispute.note, decision: input.note.trim(), resolvedAt: isoTime(block.timestamp) }] : [])];
+  return { project: { ...project, status: expectedState === 3 ? 'In progress' : 'Completed',
+    paid: Math.round((project.paid + toFreelancer) * 1e6) / 1e6, decision: input.note.trim(), milestones,
+    dispute: undefined, disputeHistory: history, ...(expectedState === 3 ? { disputeReason: undefined, disputeOpenedBy: undefined } : {}) },
+    arbitration, transaction: { id: receipt.transactionHash, time: isoTime(block.timestamp) } };
 }
 
 async function readDeployment(root, pinned) {
@@ -305,6 +358,24 @@ export async function adminFescStatistics(root, range, walletAddress, buckets = 
     series: series.map(({ key, volume: amount, transfers: count }) => ({ key, volume: formatUnits(amount, 18), transfers: count })) };
 }
 
+// Admin account table: an account is "active" when its linked wallet currently holds FESC.
+export async function adminAccounts(root, accounts) {
+  const rows = accounts.map(({ id, name, email, role, address }) => ({ id, name, email, role, address: address ?? null, balance: null }));
+  const summary = { total: rows.length, linked: rows.filter(row => row.address).length };
+  try {
+    const { token } = await readDeployment(root);
+    const head = (await rpc.getBlock({ blockTag: 'latest' })).number;
+    const balances = await mapPublicReads(rows.filter(row => row.address), async row => ({ row,
+      units: await rpc.readContract({ address: token, abi: tokenAbi, functionName: 'balanceOf', args: [row.address], blockNumber: head }) }));
+    for (const { row, units: value } of balances) row.balance = formatUnits(value, 18);
+    const active = balances.filter(item => item.units > 0n);
+    return { ...summary, available: true, block: head.toString(), active: active.length,
+      held: formatUnits(active.reduce((sum, item) => sum + item.units, 0n), 18), accounts: rows };
+  } catch {
+    return { ...summary, available: false, active: null, error: 'Không đọc được số dư FESC. Kiểm tra Hardhat Local rồi thử lại.', accounts: rows };
+  }
+}
+
 export async function publicFescTransfers(root, params) {
   const query = (params.get('q') ?? '').trim().toLowerCase();
   const address = /^0x[0-9a-f]{40}$/.test(query) ? query : undefined;
@@ -417,7 +488,7 @@ export async function fescWalletBalance(root, wallet) {
   return { token, balance: formatUnits(balance, 18) };
 }
 
-function buildTerms(project, { deployment, client, freelancer, createBy, reference }) {
+function buildTerms(project, { deployment, client, freelancer, createBy, reference, policyVersion = 1, baseDues }) {
   const projectRef = hash(['FESC project', reference?.ownerId ?? project.ownerId, reference?.projectId ?? project.id]);
   return {
     projectRef,
@@ -427,8 +498,10 @@ function buildTerms(project, { deployment, client, freelancer, createBy, referen
     arbitrator: deployment.accounts.arbitrator,
     budgetUnits: units(project.budget),
     amounts: project.milestones.map(item => units(item.amount)),
-    baseDues: project.milestones.map((_, index) => BigInt(createBy) + day * BigInt(30 + 7 * index)),
-    policyVersion: 1,
+    // Policy 2 pins the Client's due dates at contract creation; later extensions happen on chain.
+    baseDues: policyVersion === 2 ? baseDues.map(BigInt)
+      : project.milestones.map((_, index) => BigInt(createBy) + day * BigInt(30 + 7 * index)),
+    policyVersion,
     documentHash: hash([client, freelancer, project.title, project.description, project.category,
       project.milestones.map(({ id, title, amount }) => [id, title, cents(amount)])]),
   };
@@ -504,10 +577,42 @@ async function reconcile(writes, project, chain) {
       milestones: project.milestones.map(item => item === active ? { ...item, status: 'In progress' } : item) };
     await writes.saveProject(project);
   }
+  if (project.fesc.policyVersion === 2) {
+    // Extensions are signed on chain; mirror the contract's due dates into the project.
+    const onChain = await Promise.all(project.milestones.map((_, index) => rpc.readContract({ address: escrow, abi: escrowAbi,
+      functionName: 'milestones', args: [BigInt(index)], blockNumber })));
+    const seconds = onChain.map(([, baseDeadline]) => Number(baseDeadline));
+    if (seconds.some((value, index) => isoTime(value) !== project.milestones[index].dueAt)) {
+      project = { ...withDues(project, seconds), extensionRequest: undefined };
+      await writes.saveProject(project);
+    }
+  }
   return project;
 }
 
-export async function projectFesc(root, writes, project, actor, { action, milestoneId, submissionVersion, note } = {}) {
+function disputeOptions(owner, policy, stage, deadline, now) {
+  const open = stage === 1 || stage === 3;
+  const working = open || stage === 2;
+  const other = policy === 2 ? [{ kind: 4, label: disputeLabels[4], available: working,
+    hint: working ? '' : 'Chỉ áp dụng khi giai đoạn đang thực hiện hoặc chờ nghiệm thu.' }] : [];
+  if (owner) {
+    const lateAfter = deadline + (policy === 2 ? 0n : 259_200n);
+    return [
+      { kind: 0, label: disputeLabels[0], available: stage === 2, hint: stage === 2 ? '' : 'Chỉ áp dụng khi có bản bàn giao chờ nghiệm thu.' },
+      { kind: 2, label: disputeLabels[2], available: open && now > lateAfter, terminable: true,
+        hint: open ? `Có thể khiếu nại sau ${timeText(lateAfter)} nếu Freelancer chưa bàn giao.` : 'Chỉ áp dụng khi Freelancer chưa bàn giao.' },
+      ...other,
+    ];
+  }
+  return [
+    { kind: 1, label: reviewTimeoutLabel(policy), available: stage === 2 && now > deadline,
+      hint: stage === 2 ? `Có thể khiếu nại sau ${timeText(deadline)} nếu Client chưa nghiệm thu.` : 'Chỉ áp dụng sau khi bạn đã bàn giao.' },
+    ...other,
+  ];
+}
+
+export async function projectFesc(root, writes, project, actor, input = {}) {
+  const { action, milestoneId, submissionVersion, note } = input;
   const owner = actor.role === 'Client' && actor.id === project.ownerId;
   const assignee = actor.role === 'Freelancer' && actor.id === project.freelancerId;
   if (project.currency !== 'FESC' || (!owner && !assignee)) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
@@ -551,7 +656,13 @@ export async function projectFesc(root, writes, project, actor, { action, milest
     read(token, tokenAbi, 'balanceOf', [wallet.address]), rpc.getBalance({ address: wallet.address, blockNumber }),
   ]);
   Object.assign(status, { token, balance: formatUnits(balance, 18), gas: formatEther(gas) });
-  const fesc = project.fesc ?? { deployment, client, freelancer, createBy: (block.timestamp + 7n * day).toString() };
+  // Policy 2 (agreed due dates, 5-day review, extensions) needs an upgraded factory and dated milestones.
+  const dated = project.milestones.every(item => item.dueAt);
+  const fesc = project.fesc ?? { deployment, client, freelancer, createBy: (block.timestamp + 7n * day).toString(),
+    ...(deployment.escrowPolicy === 2 && dated ? { policyVersion: 2,
+      baseDues: project.milestones.map(item => String(Math.floor(Date.parse(item.dueAt) / 1000))) } : {}) };
+  const policy = fesc.policyVersion ?? 1;
+  status.policyVersion = policy;
   if (fesc.client !== client || fesc.freelancer !== freelancer) throw new WorkflowError(409, 'Ví dự án không còn khớp với hợp đồng FESC.');
   const terms = buildTerms(project, fesc);
   const [escrow, termsHash] = await Promise.all([
@@ -560,6 +671,7 @@ export async function projectFesc(root, writes, project, actor, { action, milest
   ]);
 
   let call;
+  let chainState;
   function step(next, message, transaction) {
     status.step = next;
     status.message = message;
@@ -570,18 +682,27 @@ export async function projectFesc(root, writes, project, actor, { action, milest
   }
 
   if (escrow === zeroAddress) {
+    // Contract creation needs ≥ 48h funding + 7 days to start before the first agreed due date.
+    const tooSoon = policy === 2 && BigInt(fesc.baseDues[0]) <= block.timestamp + 9n * day;
     if (block.timestamp > terms.createBy) throw new WorkflowError(409, 'Hạn tạo hợp đồng đã hết. Hãy tạo dự án FESC mới.');
-    if (owner) step('create', 'Tạo hợp đồng theo ngân sách và milestone của dự án.',
+    if (tooSoon) step('waiting', owner ? 'Hạn mốc đầu cần cách hiện tại hơn 9 ngày để đủ thời gian ký quỹ và bắt đầu. Hãy gia hạn mốc đầu bên dưới.'
+      : 'Đang chờ Client cập nhật hạn mốc đầu trước khi tạo hợp đồng.');
+    else if (owner) step('create', 'Tạo hợp đồng theo ngân sách, milestone và thời hạn của dự án.',
       { address: factory, abi: factoryAbi, functionName: 'createEscrow', args: [terms, termsHash] });
     else step('waiting', 'Đang chờ Client tạo hợp đồng FESC.');
+    status.canExtend = owner && policy === 2;
   } else {
-    const [actualTermsHash, state, current, version, funded, held] = await Promise.all([
+    const [actualTermsHash, state, current, version, funded, held, claimable] = await Promise.all([
       read(escrow, escrowAbi, 'termsHash'), read(escrow, escrowAbi, 'state'), read(escrow, escrowAbi, 'current'),
       read(escrow, escrowAbi, 'version'), read(escrow, escrowAbi, 'funded'), read(token, tokenAbi, 'balanceOf', [escrow]),
+      read(escrow, escrowAbi, 'claimable', [wallet.address]),
     ]);
+    chainState = { state, current, version, claimable };
     if (!project.fesc || actualTermsHash !== termsHash) throw new WorkflowError(409, 'Điều khoản trên Hardhat không khớp với dự án FESC.');
     project = await reconcile(writes, project, { escrow, funded, state, current, blockNumber });
-    Object.assign(status, { escrow, held: formatUnits(held, 18), projectStatus: project.status, paid: project.paid });
+    Object.assign(status, { escrow, held: formatUnits(held, 18), projectStatus: project.status, paid: project.paid,
+      claimable: formatUnits(claimable, 18) });
+    status.canExtend = owner && policy === 2 && (state === 2 || state === 3);
     if (state === 0) {
       if (assignee) step('accept', 'Xác nhận điều khoản trước khi Client ký quỹ.', escrowCall('accept', [termsHash]));
       else step('waiting', 'Đang chờ Freelancer chấp nhận hợp đồng.');
@@ -603,51 +724,96 @@ export async function projectFesc(root, writes, project, actor, { action, milest
         throw new WorkflowError(409, 'Milestone hiện hành không khớp với hợp đồng FESC.');
       }
       const [, , deadline, stage, , , evidence] = await read(escrow, escrowAbi, 'milestones', [current]);
-      status.canDispute = owner && stage === 2 || assignee && stage === 2 && block.timestamp > deadline;
-      status.disputeKind = owner ? 0 : 1;
+      status.disputeOptions = disputeOptions(owner, policy, stage, deadline, block.timestamp);
+      status.canDispute = status.disputeOptions.some(option => option.available);
+      status.deadline = isoTime(deadline);
+      status.reviewing = stage === 2;
       status.milestoneId = milestone.id;
       status.submissionVersion = getSubmissionVersion(milestone);
+      const late = block.timestamp > deadline;
       if (stage === 1 && milestone.status !== 'Submitted') {
-        if (assignee) step('upload', 'Tải bản bàn giao để Client xem và nghiệm thu.');
-        else step('waiting', 'Đang chờ Freelancer bàn giao milestone.');
+        if (assignee && late) step('waiting', 'Đã quá hạn giai đoạn này. Gửi yêu cầu gia hạn để Client xem xét.');
+        else if (assignee) step('upload', 'Tải bản bàn giao để Client xem và nghiệm thu.');
+        else step('waiting', late ? 'Freelancer đã quá hạn giai đoạn. Bạn có thể gia hạn hoặc khiếu nại.' : 'Đang chờ Freelancer bàn giao milestone.');
       } else if (stage === 1 && milestone.status === 'Submitted') {
         if (assignee) step('submit', 'Đã lưu tệp. Xác nhận bàn giao trong MetaMask.',
           escrowCall('submit', [current, version, deliveryHash(project, milestone)]));
         else step('waiting', 'Đang chờ Freelancer xác nhận bàn giao trên Hardhat.');
       } else if (stage === 2 && evidence === deliveryHash(project, milestone)) {
         if (owner) {
-          step('approve', `Xem bản bàn giao bên dưới. Nghiệm thu sẽ chuyển ${milestone.amount} FESC vào ví Freelancer.`,
+          step('approve', `Xem bản bàn giao bên dưới và nghiệm thu trước ${timeText(deadline)}. Nghiệm thu sẽ chuyển ${milestone.amount} FESC vào ví Freelancer.`,
             escrowCall('approveAndPayMilestone', [current, version]));
-        } else step('waiting', 'Đã bàn giao. Đang chờ Client nghiệm thu và giải ngân.');
+        } else step('waiting', `Đã bàn giao. Client cần nghiệm thu trước ${timeText(deadline)}.`);
       } else throw new WorkflowError(409, 'Bản bàn giao trên Hardhat không khớp với dữ liệu dự án.');
     } else if (state === 4) {
       if (project.status !== 'Disputed') {
         const events = await rpc.getContractEvents({ address: escrow, abi: escrowAbi, eventName: 'DisputeOpened',
           fromBlock: BigInt(deployment.startBlock), toBlock: blockNumber });
         const opened = events.findLast(event => event.args.milestone === current);
-        const draft = project.fesc.disputeDraft;
-        const reason = draft && opened?.args.reasonHash === draft.hash ? draft.note : 'Tranh chấp đã được xác nhận trên blockchain.';
-        project = { ...project, status: 'Disputed', disputeReason: reason,
-          milestones: project.milestones.map((item, index) => index === Number(current) ? { ...item, status: 'Disputed' } : item) };
+        const legacy = project.fesc.disputeDraft;
+        const draft = project.fesc.disputeDrafts?.[opened?.args.reasonHash] ??
+          (legacy && opened?.args.reasonHash === legacy.hash ? { note: legacy.note, evidence: [] } : undefined);
+        const by = opened && isAddressEqual(opened.args.author, project.fesc.client) ? 'Client' : 'Freelancer';
+        const kind = opened ? Number(opened.args.reason) : 4;
+        const openedAt = opened ? isoTime((await rpc.getBlock({ blockNumber: opened.blockNumber })).timestamp) : new Date().toISOString();
+        project = markEvidenceUsed({ ...project, status: 'Disputed', disputeOpenedBy: by,
+          disputeReason: draft?.note ?? 'Tranh chấp đã được xác nhận trên blockchain.',
+          dispute: { kind, label: draft?.label ?? disputeLabels[kind] ?? disputeLabels[4], note: draft?.note ?? '',
+            terminate: draft?.terminate ?? false, evidence: draft?.evidence ?? [], by, openedAt,
+            milestoneId: project.milestones[Number(current)]?.id, reasonHash: opened?.args.reasonHash },
+          ...(project.adminReview ? { adminReview: { ...project.adminReview, status: 'reviewing' } } : {}),
+          fesc: { ...project.fesc, disputeDrafts: undefined, disputeDraft: undefined },
+          milestones: project.milestones.map((item, index) => index === Number(current) ? { ...item, status: 'Disputed' } : item) },
+        draft?.evidence ?? []);
         await writes.saveProject(project);
       }
       status.projectStatus = 'Disputed';
-      step('waiting', 'Dự án đang tranh chấp. Trọng tài sẽ xem hồ sơ và quyết định trên blockchain.');
+      step('waiting', 'Dự án đang tranh chấp. Admin sẽ xem bằng chứng và quyết định trên blockchain.');
     } else if (state === 5 && project.status === 'Completed') {
-      const claimable = await read(escrow, escrowAbi, 'claimable', [wallet.address]);
       if (claimable > 0n) step('withdraw', `Bạn được rút ${formatUnits(claimable, 18)} FESC theo quyết định phân xử.`, escrowCall('withdraw'));
       else step('complete', 'Dự án đã hoàn tất và không còn FESC chờ rút cho ví này.');
     } else step('waiting', 'Hợp đồng FESC đã ngừng nhận thao tác cho dự án.');
   }
 
   if (!action) return status;
+  if (action === 'withdraw' && status.step !== 'withdraw') {
+    // After a "continue" arbitration the contract stays active while a share waits to be withdrawn.
+    if (!chainState || chainState.claimable === 0n) throw new WorkflowError(409, 'Không có FESC chờ rút cho ví này.');
+    step('withdraw', status.message, escrowCall('withdraw'));
+  }
+  let saveDraft;
   if (action === 'dispute') {
-    if (!status.canDispute || typeof note !== 'string' || note.trim().length < 3 || note.length > 2000 || milestoneId !== status.milestoneId) {
-      throw new WorkflowError(409, 'Kiểm tra milestone và nhập lý do tranh chấp (3–2000 ký tự).');
+    const option = status.disputeOptions?.find(item => item.kind === input.reason && item.available);
+    if (!option || typeof note !== 'string' || note.trim().length < 3 || note.length > 2000 || milestoneId !== status.milestoneId) {
+      throw new WorkflowError(409, 'Chọn lý do hợp lệ và nhập mô tả khiếu nại (3–2000 ký tự).');
     }
-    const version = await read(escrow, escrowAbi, 'version');
-    call = escrowCallForDispute(escrow, BigInt(project.milestones.findIndex(item => item.id === status.milestoneId)), version, status.disputeKind, note.trim());
+    const evidence = pickEvidence(project, actor, input.evidenceIds, input.links);
+    const terminate = Boolean(option.terminable && input.terminate === true);
+    const reasonHash = hash(['dispute', option.kind, note.trim(), terminate, evidenceFingerprint(evidence)]);
+    saveDraft = { kind: option.kind, label: option.label, note: note.trim(), terminate, evidence, hash: reasonHash };
+    call = escrowCall('openDispute', [chainState.current, chainState.version, option.kind, reasonHash]);
     status.step = 'dispute';
+  }
+  if (action === 'extend') {
+    if (!status.canExtend) throw new WorkflowError(409, 'Chỉ Client gia hạn được dự án FESC đang thực hiện theo quy tắc thời hạn mới.');
+    const newDeadline = dueSeconds(input.dueDate);
+    const whole = input.whole === true;
+    const index = whole ? project.milestones.length - 1 : project.milestones.findIndex(item => item.id === milestoneId);
+    const first = chainState?.state === 3 ? Number(chainState.current) : 0;
+    const dues = (escrow === zeroAddress ? fesc.baseDues : project.milestones.map(item => Date.parse(item.dueAt) / 1000)).map(Number);
+    if (!Number.isFinite(newDeadline) || index < first || newDeadline <= dues[index] || newDeadline <= Number(block.timestamp)) {
+      throw new WorkflowError(400, 'Chọn ngày gia hạn sau hạn hiện tại của giai đoạn đã chọn.');
+    }
+    if (escrow === zeroAddress) {
+      // No contract yet: the agreed dates are still off chain and can simply be rescheduled.
+      const next = shiftDues(dues, index, newDeadline, whole);
+      const updated = { ...withDues(project, next), extensionRequest: undefined,
+        ...(project.fesc ? { fesc: { ...project.fesc, baseDues: next.map(String) } } : {}) };
+      await writes.saveProject(updated);
+      return { updated: true };
+    }
+    call = escrowCall('extendDeadline', [BigInt(index), BigInt(newDeadline), whole, chainState.version]);
+    status.step = 'extend';
   }
   const targetsDelivery = action === 'submit' || action === 'approve';
   if (action !== status.step || !call || (targetsDelivery &&
@@ -661,8 +827,12 @@ export async function projectFesc(root, writes, project, actor, { action, milest
     throw new WorkflowError(409, 'Hardhat chưa chấp nhận giao dịch. Hãy làm mới và kiểm tra trạng thái, hạn thao tác và số dư.');
   }
   if (!project.fesc) await writes.saveProject({ ...project, fesc });
-  else if (action === 'dispute') await writes.saveProject({ ...project, fesc: { ...project.fesc,
-    disputeDraft: { note: note.trim(), hash: hash(['dispute', note.trim()]) } } });
+  else if (saveDraft) {
+    // Keyed by reason hash so drafts from both parties can coexist until one is confirmed on chain.
+    const drafts = Object.entries(project.fesc.disputeDrafts ?? {}).slice(-4);
+    await writes.saveProject({ ...project, fesc: { ...project.fesc,
+      disputeDrafts: Object.fromEntries([...drafts, [saveDraft.hash, saveDraft]]) } });
+  }
   return { from: wallet.address, to: call.address, data: encodeFunctionData(call),
     deploymentBlock: numberToHex(BigInt(deployment.startBlock)), deploymentBlockHash: deployment.startBlockHash };
 }

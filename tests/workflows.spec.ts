@@ -3,6 +3,10 @@ import type { Page } from '@playwright/test';
 
 const password = 'mat-khau-demo-2026';
 const click = (page: Page, name: string) => page.getByRole('button', { name, exact: true }).click();
+// Due dates in Vietnam time; the first milestone must be more than 9 days away.
+const vnDay = (days: number) => new Date(Date.now() + days * 86_400_000 + 7 * 3_600_000).toISOString().slice(0, 10);
+const dues = (count = 1) => ({ milestoneDues: Array.from({ length: count }, (_, index) => vnDay(20 + index * 5)).join(','),
+  projectDue: vnDay(20 + (count - 1) * 5) });
 async function confirmOtp(page: Page, email: string) {
   await expect(page.getByRole('heading', { name: 'Xác nhận email' })).toBeVisible();
   const { code } = await (await page.request.get('/__test/otp?email=' + encodeURIComponent(email))).json();
@@ -53,7 +57,7 @@ async function deliver(page: Page, note: string, original: string) {
     name: 'xem-truoc.png', mimeType: 'image/png',
     buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/X6UAAAAASUVORK5CYII=', 'base64'),
   });
-  await dialog.getByLabel(/Bản gốc thử/).setInputFiles({
+  await dialog.getByLabel(/Bản gốc/).setInputFiles({
     name: 'ban-goc.txt', mimeType: 'text/plain', buffer: Buffer.from(original),
   });
   await dialog.getByRole('button', { name: 'Xác nhận', exact: true }).click();
@@ -144,7 +148,7 @@ test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ c
   await login(page);
   const title = 'Kiểm thử quyền Hardhat';
   const creation = await page.request.post('/api/projects', { data: {
-    title, currency: 'FESC', description: 'Dự án thử', category: 'Web Development', budget: '20', milestones: 'Bàn giao', amounts: '20',
+    title, currency: 'FESC', description: 'Dự án thử', category: 'Web Development', budget: '20', milestones: 'Bàn giao', amounts: '20', ...dues(),
   } });
   expect(creation.status()).toBe(201);
   const { project } = await creation.json();
@@ -285,142 +289,133 @@ for (const delayed of [false, true]) {
   });
 }
 
-test('Client và Freelancer đăng nhập riêng, ký quỹ, sửa, bàn giao lại và giải ngân', async ({ page, browser, baseURL }) => {
+test('Client tạo dự án FESC theo từng giai đoạn có hạn, chọn Freelancer và hai bên thấy tiến trình', async ({ page, browser, baseURL }) => {
   const freelancerContext = await browser.newContext({ baseURL });
   const guestContext = await browser.newContext({ baseURL });
   try {
     const freelancer = await freelancerContext.newPage();
     const guest = await guestContext.newPage();
-    const title = 'Website thử nghiệm';
-    const workerEmail = 'freelancer@example.test';
-    await register(freelancer, 'Freelancer Kiểm Thử', workerEmail, 'Freelancer');
+    const title = 'Website theo giai đoạn';
+    const workerEmail = 'stage-worker@example.test';
+    await register(freelancer, 'Freelancer Giai Đoạn', workerEmail, 'Freelancer');
     await login(freelancer);
-    await register(page, 'Client Kiểm Thử', 'client@example.test', 'Client');
+    await register(page, 'Client Giai Đoạn', 'stage-client@example.test', 'Client');
     await login(page);
+    await expect(page.getByRole('button', { name: 'Thử bản demo' })).toHaveCount(0);
     await click(page, 'Dự án');
     await click(page, 'Tạo dự án');
     const dialog = page.getByRole('dialog');
+    await expect(dialog.getByLabel('Đơn vị ngân sách')).toHaveCount(0);
     await dialog.getByLabel('Tên dự án').fill(title);
-    await dialog.getByLabel('Mô tả').fill('Phát triển website thử nghiệm');
-    await dialog.getByLabel('Đơn vị ngân sách').selectOption('MOCK');
-    await dialog.getByLabel('Đơn vị ngân sách').selectOption('MOCK');
-    await dialog.getByLabel('Ngân sách (MOCK)').fill('100');
-    await dialog.getByLabel('Tên milestone', { exact: false }).fill('Bàn giao website');
-    await dialog.getByLabel('Số tiền từng milestone', { exact: false }).fill('90');
-    const deadline = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
-    await dialog.getByLabel('Hạn toàn dự án').fill(deadline);
-    await dialog.getByLabel('Hạn milestone 1').fill(deadline);
-    await dialog.getByRole('button', { name: 'Tạo dự án', exact: true }).click();
-    await expect(dialog.getByRole('alert')).toHaveText('Tổng số tiền milestone phải bằng ngân sách.');
-    await dialog.getByLabel('Số tiền từng milestone', { exact: false }).fill('100');
+    await dialog.getByLabel('Mô tả').fill('Phát triển website theo hai giai đoạn');
+    await dialog.getByLabel('Tên giai đoạn').first().fill('Thiết kế, giao diện');
+    await expect(dialog.getByLabel('Tên giai đoạn').first()).toHaveValue('Thiết kế  giao diện');
+    await dialog.getByLabel('Số FESC').first().fill('40');
+    const firstDue = dialog.getByLabel('Hạn bàn giao').first();
+    expect(await firstDue.getAttribute('min')).toBe(vnDay(10));
+    await firstDue.fill(vnDay(15));
+    await click(page, 'Thêm giai đoạn');
+    await dialog.getByLabel('Tên giai đoạn').nth(1).fill('Lập trình');
+    await dialog.getByLabel('Số FESC').nth(1).fill('60');
+    await dialog.getByLabel('Hạn bàn giao').nth(1).fill(vnDay(30));
+    await expect(dialog.getByText('100.00 FESC', { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: '.local-data/ui-preview/create-project-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 900 });
     await dialog.getByRole('button', { name: 'Tạo dự án', exact: true }).click();
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
-    await expect(page.getByText('Hạn toàn dự án', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Hạn toàn dự án:/)).toBeVisible();
+    await expect(page.getByRole('list', { name: 'Tiến trình dự án' }).locator('[aria-current="step"]')).toHaveText(/Chọn Freelancer/);
     await guest.goto('/');
     await click(guest, 'Xem dự án công khai');
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
-    await expect(guest.getByText(/100\.00 MOCK/)).toBeVisible();
+    await expect(guest.getByText(/100\.00 FESC/)).toBeVisible();
     await perform(page, 'Chọn Freelancer', { label: 'Email của Freelancer', value: workerEmail });
-    await expect(page.getByText('Số dư 0.00 MOCK. Cần 100.00 MOCK để ký quỹ dự án.')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Ký quỹ 100.00 MOCK', exact: true })).toHaveCount(0);
-    await click(page, 'Mở ví MOCK');
-    await click(page, 'Nhận 1000.00 MOCK thử');
-    await openProject(page, title);
-    await perform(page, 'Ký quỹ 100.00 MOCK');
+    await expect(page.getByRole('list', { name: 'Tiến trình dự án' }).locator('[aria-current="step"]')).toHaveText(/Tạo & ký quỹ hợp đồng/);
+    await expect(page.getByRole('heading', { name: 'Ký quỹ FESC' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Mở ví MetaMask' })).toBeVisible();
+    await page.screenshot({ path: '.local-data/ui-preview/project-detail.png', fullPage: true });
     await openProject(freelancer, title);
-    await expect(freelancer.getByRole('button', { name: 'Nghiệm thu & giải ngân' })).toHaveCount(0);
-    await deliver(freelancer, 'Bản đầu tiên', 'Nội dung bản một');
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await expect(page.getByText('Bản đầu tiên', { exact: true })).toBeVisible();
-    const preview = page.getByRole('link', { name: /Tải bản xem trước/ });
-    const previewUrl = (await preview.getAttribute('href'))!;
-    const originalV1 = previewUrl.replace(/preview$/, 'original');
-    expect((await page.request.get(previewUrl)).status()).toBe(200);
-    expect((await page.request.get(originalV1)).status()).toBe(403);
-    expect((await guest.request.get(previewUrl)).status()).toBe(401);
-    expect(await (await freelancer.request.get(originalV1)).text()).toBe('Nội dung bản một');
-    await expect(page.getByText('Bản gốc đang khóa', { exact: true })).toBeVisible();
-    const staleTab = await page.context().newPage();
-    await staleTab.goto('/');
-    await openProject(staleTab, title);
-    await click(staleTab, 'Nghiệm thu & giải ngân');
-    await perform(page, 'Yêu cầu sửa', { label: 'Lý do', value: 'Bổ sung bản mobile' });
-    await click(freelancer, 'Làm mới');
-    await expect(freelancer.getByText('Yêu cầu sửa: Bổ sung bản mobile')).toBeVisible();
-    await deliver(freelancer, 'Đã bổ sung bản mobile', 'Nội dung bản hai');
-    await staleTab.getByRole('dialog').getByRole('button', { name: 'Xác nhận', exact: true }).click();
-    await expect(staleTab.getByRole('dialog').getByRole('alert')).toContainText('Bản bàn giao đã thay đổi.');
-    await staleTab.close();
-    await click(page, 'Làm mới');
-    await expect(page.getByText('Đã bổ sung bản mobile', { exact: true })).toBeVisible();
-    const previewV2 = page.getByRole('link', { name: /Tải bản xem trước/ }).first();
-    const originalV2 = (await previewV2.getAttribute('href'))!.replace(/preview$/, 'original');
-    expect((await page.request.get(originalV2)).status()).toBe(403);
-    await perform(page, 'Nghiệm thu & giải ngân');
-    await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
-    await expect(page.getByText('Còn ký quỹ: 0.00 MOCK · Đã trả: 100.00 MOCK')).toBeVisible();
-    expect((await page.request.get(originalV1)).status()).toBe(403);
-    const paidDownload = await page.request.get(originalV2);
-    expect(paidDownload.status()).toBe(200);
-    expect(paidDownload.headers()['content-disposition']).toContain('attachment');
-    expect(await paidDownload.text()).toBe('Nội dung bản hai');
-    await expect(page.getByRole('link', { name: /Tải bản gốc/ })).toHaveCount(1);
-    await click(page, 'Ví & giao dịch');
-    await expect(page.getByRole('row')).toHaveCount(3);
-    await expect(page.getByRole('row', { name: /Giải ngân milestone 1.*100.00 MOCK/ })).toBeVisible();
+    await expect(freelancer.getByText('Thiết kế  giao diện')).toBeVisible();
+    await expect(freelancer.getByText(/Hạn bàn giao ·/).first()).toBeVisible();
   } finally {
     await freelancerContext.close();
     await guestContext.close();
   }
 });
 
-test('bản demo phân xử, hoàn tiền và lưu tiến độ riêng', async ({ page }) => {
-  const title = 'Thiết kế website thương mại điện tử';
-  await page.goto('/');
-  await click(page, 'Thử bản demo');
-  await openProject(page, title);
-  await perform(page, 'Gửi khiếu nại', { label: 'Lý do', value: 'Kiểm tra nhánh hoàn tiền' });
-  await expect(page.getByRole('button', { name: 'Đề nghị hủy' })).toHaveCount(0);
-  await page.getByLabel('Vai trò demo').selectOption('Arbitrator');
-  await page.getByRole('button', { name: /^Tranh chấp/ }).click();
-  await click(page, 'Xem tranh chấp');
-  await perform(page, 'Quyết định hoàn tiền');
-  await expect(page.getByText('Còn ký quỹ: 0.00 MOCK · Đã trả: 30.00 MOCK')).toBeVisible();
-  await page.getByLabel('Vai trò demo').selectOption('Client');
-  await openProject(page, title);
-  await expect(page.getByRole('button', { name: 'Đề nghị hủy' })).toHaveCount(0);
-  await page.getByLabel('Vai trò demo').selectOption('Freelancer');
-  await openProject(page, title);
-  await expect(page.getByRole('button', { name: 'Gửi bàn giao' })).toHaveCount(0);
-  await expect(page.getByText('Đã hoàn tiền', { exact: true })).toHaveCount(2);
-  await click(page, 'Ví & giao dịch');
-  await expect(page.getByRole('row', { name: /Phân xử: hoàn tiền.*40.00 MOCK/ })).toBeVisible();
-  await expect(page.getByRole('row', { name: /Hoàn tiền các milestone còn lại.*30.00 MOCK/ })).toBeVisible();
-  await click(page, 'Thoát demo');
-  expect((await page.request.get('/api/workspace')).status()).toBe(401);
+test('khiếu nại cần lý do và bằng chứng; Client gia hạn hoặc Freelancer xin gia hạn', async ({ page }) => {
+  await register(page, 'Client Khiếu Nại', 'complaint-client@example.test', 'Client');
+  await login(page);
+  const creation = await page.request.post('/api/projects', { data: {
+    title: 'Dự án có khiếu nại', currency: 'FESC', description: 'Kiểm tra form khiếu nại', category: 'Web Development',
+    budget: '100', milestones: 'Thiết kế,Lập trình', amounts: '40,60', ...dues(2),
+  } });
+  expect(creation.status()).toBe(201);
+  const { project } = await creation.json();
+  const active = { ...project, freelancerId: 'worker-1', freelancer: 'Freelancer A', status: 'In progress', funded: 100,
+    fesc: { policyVersion: 2 }, milestones: project.milestones.map((item: { status: string }, index: number) => index === 0 ? { ...item, status: 'In progress' } : item),
+    extensionRequest: { id: 'r1', whole: false, milestoneId: 1, dueDate: vnDay(25), dueAt: new Date(Date.now() + 25 * 86_400_000).toISOString(),
+      note: 'Cần thêm thời gian kiểm thử', at: new Date().toISOString() } };
+  await page.route('**/api/workspace', route => route.fulfill({ json: { projects: [active], txs: [] } }));
+  const sent: Record<string, unknown>[] = [];
+  await page.route('**/api/projects/fesc', async route => {
+    const body = route.request().postDataJSON();
+    if (body.action) {
+      sent.push(body);
+      return route.fulfill({ status: 409, json: { error: 'Hardhat chưa chấp nhận giao dịch thử.' } });
+    }
+    return route.fulfill({ json: { step: 'waiting', message: 'Freelancer đã quá hạn giai đoạn. Bạn có thể gia hạn hoặc khiếu nại.',
+      projectStatus: 'In progress', paid: 0, balance: '900', gas: '1', policyVersion: 2, canExtend: true, milestoneId: 1, submissionVersion: 0,
+      deadline: new Date(Date.now() - 3_600_000).toISOString(), reviewing: false, claimable: '0',
+      disputeOptions: [
+        { kind: 0, label: 'Bản bàn giao không đúng yêu cầu', available: false, hint: 'Chỉ áp dụng khi có bản bàn giao chờ nghiệm thu.' },
+        { kind: 2, label: 'Quá hạn thời gian dự án', available: true, terminable: true, hint: '' },
+        { kind: 4, label: 'Lý do khác', available: true, hint: '' },
+      ] } });
+  });
   await page.reload();
-  await click(page, 'Thử bản demo');
-  await openProject(page, title);
-  await expect(page.getByText('Đã hoàn tất', { exact: true })).toBeVisible();
-});
+  await expect(page.getByRole('heading', { name: /Chào / })).toBeVisible();
+  await openProject(page, 'Dự án có khiếu nại');
+  await click(page, 'Khiếu nại giai đoạn này');
+  await expect(page.getByRole('radio', { name: /Bản bàn giao không đúng yêu cầu/ })).toBeDisabled();
+  await expect(page.getByText('Chỉ áp dụng khi có bản bàn giao chờ nghiệm thu.')).toBeVisible();
+  await page.getByRole('radio', { name: /Quá hạn thời gian dự án/ }).check();
+  await page.getByLabel('Mô tả chi tiết').fill('Freelancer chưa bàn giao giai đoạn thiết kế đúng hạn');
+  await page.getByLabel(/Yêu cầu chấm dứt hợp đồng/).check();
+  const submit = page.getByRole('button', { name: 'Gửi khiếu nại', exact: true });
+  await expect(submit).toBeDisabled();
+  await page.getByLabel('Link bằng chứng').fill('ftp://example.com/log');
+  await click(page, 'Thêm link');
+  await expect(page.getByRole('alert')).toContainText('http:// hoặc https://');
+  await page.getByLabel('Link bằng chứng').fill('https://example.com/chat');
+  await click(page, 'Thêm link');
+  await page.locator('.evidence-picker input[type="file"]').setInputFiles({
+    name: 'tin-nhan.txt', mimeType: 'text/plain', buffer: Buffer.from('Nhật ký trao đổi với Freelancer'),
+  });
+  await expect(page.getByText(/tin-nhan\.txt/)).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: '.local-data/ui-preview/complaint-mobile.png', fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await submit.click();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toMatchObject({ action: 'dispute', reason: 2, terminate: true, links: ['https://example.com/chat'],
+    note: 'Freelancer chưa bàn giao giai đoạn thiết kế đúng hạn' });
+  expect((sent[0].evidenceIds as string[]).length).toBe(1);
+  await expect(page.getByRole('alert').filter({ hasText: 'Hardhat chưa chấp nhận' })).toBeVisible();
 
-test('Freelancer có thể gửi khiếu nại sau 5 ngày chờ nghiệm thu', async ({ page }) => {
-  const title = 'Thiết kế website thương mại điện tử';
-  const start = new Date('2026-11-18T10:00:00+07:00');
-  await page.clock.install({ time: start });
-  await page.goto('/');
-  await click(page, 'Thử bản demo');
-  await openProject(page, title);
-  await perform(page, 'Yêu cầu sửa', { label: 'Lý do', value: 'Bổ sung bản mobile' });
-  await page.getByLabel('Vai trò demo').selectOption('Freelancer');
-  await openProject(page, title);
-  await perform(page, 'Gửi bàn giao', { label: 'Mô tả bàn giao', value: 'Bản mobile đã sửa' });
-  const complaint = page.getByRole('button', { name: 'Gửi khiếu nại', exact: true });
-  await expect(complaint).toHaveCount(0);
-  await page.clock.fastForward(5 * 86_400_000 + 60_000);
-  await expect(complaint).toBeVisible();
-  await perform(page, 'Gửi khiếu nại', { label: 'Lý do', value: 'Client chưa nghiệm thu sau 5 ngày' });
-  await expect(page.getByText('Khiếu nại của Freelancer', { exact: true })).toBeVisible();
+  // The Freelancer's request is shown with accept/decline; accepting signs the same extension on chain.
+  await expect(page.getByText(/Freelancer xin gia hạn giai đoạn Thiết kế/)).toBeVisible();
+  await click(page, 'Chấp nhận (ký MetaMask)');
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toMatchObject({ action: 'extend', whole: false, milestoneId: 1, dueDate: vnDay(25) });
+  await page.getByLabel('Áp dụng cho').selectOption('whole');
+  await page.getByLabel('Hạn mới').fill(vnDay(40));
+  await click(page, 'Gia hạn');
+  await expect.poll(() => sent.length).toBe(3);
+  expect(sent[2]).toMatchObject({ action: 'extend', whole: true, dueDate: vnDay(40) });
 });
 
 test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', async ({ page }) => {
@@ -708,7 +703,7 @@ test('dự án FESC thuộc chain trước chỉ hiện lịch sử và không m
   await login(page);
   const creation = await page.request.post('/api/projects', { data: {
     title: 'Dự án trên chain trước', currency: 'FESC', description: 'Lịch sử vẫn được giữ',
-    category: 'Web Development', budget: '100', milestones: 'Bàn giao', amounts: '100',
+    category: 'Web Development', budget: '100', milestones: 'Bàn giao', amounts: '100', ...dues(),
   } });
   expect(creation.status()).toBe(201);
   const { project } = await creation.json();

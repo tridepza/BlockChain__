@@ -53,6 +53,10 @@ export function otpMailer(root = process.cwd()) {
         `Mã xác nhận ${purpose === 'register' ? 'đăng ký' : purpose === 'reset' ? 'đặt lại mật khẩu' : 'đăng nhập'} Freelancer Escrow`,
         `Mã OTP của bạn là: ${code}\n\nMã có hiệu lực 5 phút và chỉ dùng một lần. Không chia sẻ mã này với người khác.\nNếu bạn không yêu cầu, hãy bỏ qua email này.`);
     },
+    // Dispute results and other account notices; the caller records failures instead of rolling back.
+    async sendNotice({ email, subject, text }) {
+      return deliver(email, 'notice', subject, text);
+    },
     async sendTest(email) {
       return deliver(email, 'diagnostic', 'Kiểm tra nhận email — Freelancer Escrow',
         'Đây là email kiểm tra kết nối gửi thư của Freelancer Escrow theo yêu cầu của quản trị viên.\n\nEmail này không chứa mã OTP và không tạo hoặc thay đổi tài khoản. Nếu nhận được thư, đường gửi SMTP tới hộp thư này đã hoạt động.');
