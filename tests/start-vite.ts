@@ -6,7 +6,9 @@ export default async function startVite() {
   process.env.ESCROW_DB_PATH = ':memory:';
   process.env.ESCROW_DB = 'sqlite';
   const inbox = new Map<string, string>();
-  const api = createApi(':memory:', process.cwd(), { sendOtp: async ({ email, code }: { email: string; code: string }) => {
+  const api = createApi(':memory:', process.cwd(), { adminEmails: 'admin-ui@example.test',
+    // Every e2e test signs in from 127.0.0.1; keep the production per-IP OTP limit out of the shared test server.
+    attemptLimit: 1000, sendOtp: async ({ email, code }: { email: string; code: string }) => {
     inbox.set(email, code);
   } });
   const server = await createServer({

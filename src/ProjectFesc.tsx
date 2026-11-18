@@ -14,6 +14,8 @@ const labels = {
   start: 'Bắt đầu milestone',
   submit: 'Xác nhận bàn giao trong MetaMask',
   approve: 'Nghiệm thu & giải ngân FESC',
+  dispute: 'Mở tranh chấp FESC',
+  withdraw: 'Rút FESC được phân xử về ví',
 };
 type Action = keyof typeof labels;
 type FescStatus = {
@@ -29,6 +31,7 @@ type FescStatus = {
   paid: number;
   milestoneId?: number;
   submissionVersion?: number;
+  canDispute?: boolean;
 };
 
 export default function ProjectFesc({ project, accountId, onWallet, onDelivery, onChanged }: {
@@ -45,6 +48,7 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
   const [readError, setReadError] = useState('');
   const [notice, setNotice] = useState('');
   const [submitted, setSubmitted] = useState('');
+  const [reason, setReason] = useState('');
   const { id, freelancerId, paid, status: projectStatus } = project;
 
   useEffect(() => {
@@ -76,6 +80,7 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
     try {
       const tx = await api<LocalTransaction>('projects/fesc', {
         projectId: id, action, milestoneId: status?.milestoneId, submissionVersion: status?.submissionVersion,
+        ...(action === 'dispute' ? { note: reason } : {}),
       }, accountId);
       setNotice('Mở MetaMask để kiểm tra và xác nhận giao dịch.');
       const result = await sendLocalTransaction(tx, setNotice);
@@ -140,5 +145,10 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
     {action && <button className="primary" type="button" disabled={busy || loading || status?.gas === '0' ||
       ((action === 'submit' || action === 'approve') && !readyToReview)}
       onClick={() => void execute(action)}>{labels[action]}</button>}
+    {status?.canDispute && <div className="fesc-dispute-form"><label>Lý do tranh chấp FESC
+      <textarea value={reason} onChange={event => setReason(event.target.value)} minLength={3} maxLength={2000} disabled={busy}/></label>
+      <button className="secondary" disabled={busy || loading || reason.trim().length < 3}
+        onClick={() => void execute('dispute')}>Mở tranh chấp FESC</button>
+    </div>}
   </section>;
 }

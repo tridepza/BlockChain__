@@ -8,6 +8,7 @@ import Auth from './Auth';
 import WalletLink from './WalletLink';
 import ProjectFesc from './ProjectFesc';
 import Explorer from './Explorer';
+import AdminDashboard from './AdminDashboard';
 import { categoryLabel } from './ui-labels';
 import { api, ApiError, errorMessage } from './api';
 import { loadDemo, saveDemo } from './demo';
@@ -53,7 +54,13 @@ const actionLabels: Record<string, string> = {
   confirmCancel: 'Đồng ý hủy và hoàn tiền',
 };
 
+let visitRecorded = false;
 export default function App() {
+  useEffect(() => {
+    if (visitRecorded) return;
+    visitRecorded = true;
+    void api('analytics/visit', {}).catch(() => {});
+  }, []);
   if (['/explorer', '/explorer/'].includes(window.location.pathname)) return <Explorer/>;
   return <SessionApp/>;
 }
@@ -78,6 +85,7 @@ function SessionApp() {
   }, [retry]);
 
   if (demo) return <Workspace key="demo" demo onExit={() => setDemo(false)}/>;
+  if (user && ['/admin', '/admin/'].includes(window.location.pathname)) return <AdminDashboard/>;
   if (user) return <Workspace key={user.id} user={user} onProfile={setUser} onExit={expired => {
     setUser(null);
     setMessage(expired ? 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.' : 'Bạn đã đăng xuất.');
@@ -102,6 +110,13 @@ function Workspace(props: WorkspaceProps) {
   const { demo, onExit } = props;
   const [role, setRole] = useState<Role>('Client');
   const actor = props.demo ? demoAccounts[role] : props.user;
+  const [adminAccess, setAdminAccess] = useState(false);
+  useEffect(() => {
+    if (demo) return;
+    let active = true;
+    api<{ allowed: boolean }>('admin/access').then(result => { if (active) setAdminAccess(result.allowed); }).catch(() => {});
+    return () => { active = false; };
+  }, [demo, actor.id]);
   const [data, setData] = useState(() => demo ? loadDemo() : emptyWorkspace);
   const [page, setPage] = useState<Page>('overview');
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -337,6 +352,7 @@ function Workspace(props: WorkspaceProps) {
             <Icon size={18}/>{label}{id === 'disputes' && disputes.length > 0 && <span className="count">{disputes.length}</span>}
           </button>)}
         {!demo && <a href="/explorer" className="nav-item explorer-link"><Globe2 size={18}/> Giao dịch công khai</a>}
+        {adminAccess && <a href="/admin" className="nav-item explorer-link"><ShieldCheck size={18}/> Quản trị</a>}
       </nav>
       <div className="side-bottom">
         <div className="profile"><div className="avatar">{initials}</div><div className="profile-text"><b>{actor.name}</b><small>{actor.role}</small></div></div>
@@ -641,7 +657,7 @@ function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFes
               {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
                 {actionButton({ ...review, action: 'approve' }, undefined, 'primary small')}
                 {canRequestRevision(m) && actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
-                {demo && actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
+                {!fesc && actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
               </>}
               {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>
                 {actionButton({ action: 'release', milestoneId: m.id }, undefined, 'primary small')}

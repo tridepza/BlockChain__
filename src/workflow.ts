@@ -45,9 +45,11 @@ export type Project = {
   funded: number;
   paid: number;
   created: string;
+  createdAt?: string;
   disputeReason?: string;
   decision?: string;
   cancellation?: CancellationRequest;
+  adminReview?: { revision: number; status: 'reviewing' | 'resolved'; history: { actorId: string; action: string; note: string; at: string; hash?: string }[] };
 };
 
 export type Tx = {
@@ -163,7 +165,8 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   return {
     id, title, category, description, client: actor.name, ownerId: actor.id, freelancer: '',
     budget: budget / 100, currency: input.currency, status: 'Open', funded: 0, paid: 0,
-    created: new Date().toISOString().slice(0, 10),
+    created: new Date(Date.now() + 7 * 3_600_000).toISOString().slice(0, 10),
+    createdAt: new Date().toISOString(),
     milestones: names.map((name, index) => ({ id: index + 1, title: name, amount: amounts[index] / 100, status: 'Pending' })),
   };
 }
@@ -184,7 +187,7 @@ export function applyProjectAction(
 ): ActionResult {
   const clientActions = ['assign', 'fund', 'approve', 'revision'];
   const ownerAction = clientActions.includes(input.action) ||
-    (input.action === 'dispute' && actor.id === demoAccounts.Client.id);
+    input.action === 'dispute';
   const owner = actor.role === 'Client' && actor.id === p.ownerId;
   const assignee = actor.role === 'Freelancer' && actor.id === p.freelancerId;
   const cancellationAction = ['requestCancel', 'confirmCancel'].includes(input.action);

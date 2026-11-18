@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { applyProjectAction, canSeePrivate, cents, createProject, deliveryFileLimit, deliveryPreviewLimit, mockGrantCents, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
 import { readDeliveryFiles, sendDeliveryFile } from './delivery.mjs';
@@ -8,7 +8,7 @@ import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
 import { walletLinking } from './wallet.mjs';
 import { localFunding } from './local-funding.mjs';
-import { fescActions, fescWalletBalance, projectFesc, publicFescHolders, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
+import { adminFescCase, adminFescStatistics, fescActions, fescWalletBalance, projectFesc, publicFescHolders, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
 import { authOtp, validPassword } from './auth-otp.mjs';
 import { otpMailer } from './mail.mjs';
 import { publicProjectPayments } from './public-projects.mjs';
@@ -16,6 +16,7 @@ import { createPublicClient, http } from 'viem';
 import { localChain } from '../src/local-chain.ts';
 import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
 import { fescVault } from './fesc-vault.mjs';
+import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from './admin-analytics.mjs';
 
 const deriveKey = promisify(scrypt);
 const passwordOptions = { N: 32768, r: 8, p: 3, maxmem: 40 * 1024 * 1024 };
@@ -77,7 +78,9 @@ async function readJson(req, limit = 16_384) {
 }
 
 export function createApi(filename, root = process.cwd(), options = {}) {
-  return createDatabaseApi(sqlStore(openSqlite(filename ?? process.env.ESCROW_DB_PATH ?? resolve(root, '.data/escrow.sqlite'))), root, options);
+  const target = filename ?? process.env.ESCROW_DB_PATH ?? resolve(root, '.data/escrow.sqlite');
+  return createDatabaseApi(sqlStore(openSqlite(target)), root,
+    { analyticsPath: target === ':memory:' ? ':memory:' : resolve(dirname(target), 'admin-analytics.sqlite'), ...options });
 }
 
 export async function createConfiguredApi(root) {
@@ -105,6 +108,8 @@ export async function createConfiguredApi(root) {
 }
 
 function createDatabaseApi(store, root, options = {}) {
+  let analytics;
+  const adminAnalytics = () => analytics ??= openAdminAnalytics(options.analyticsPath ?? resolve(root, '.data/admin-analytics.sqlite'));
   const walletApi = walletLinking(root);
   const otp = authOtp(store, options.sendOtp ?? otpMailer(root).sendOtp, options.now);
   const otpBinding = req => (req.headers.cookie ?? '').match(/(?:^|;\s*)escrow_otp=([a-f0-9]{64})(?=;|$)/)?.[1] ?? '';
@@ -113,14 +118,14 @@ function createDatabaseApi(store, root, options = {}) {
   const dummySalt = randomBytes(16);
   const dummyHash = randomBytes(64);
 
-  function limitAttempts(req, path) {
+  function limitAttempts(req, path, maximum = 30) {
     const now = Date.now();
     for (const [key, value] of attempts) {
       if (value.expires <= now) attempts.delete(key);
     }
     const key = `${req.socket.remoteAddress}:${path}`;
     const limit = attempts.get(key) ?? { count: 0, expires: now + 10 * 60_000 };
-    if (limit.count >= 30) throw new WorkflowError(429, 'Bạn đã thử quá nhiều lần. Hãy thử lại sau ít phút.');
+    if (limit.count >= Math.max(maximum, options.attemptLimit ?? 0)) throw new WorkflowError(429, 'Bạn đã thử quá nhiều lần. Hãy thử lại sau ít phút.');
     limit.count++;
     attempts.set(key, limit);
   }
@@ -148,6 +153,109 @@ function createDatabaseApi(store, root, options = {}) {
     const path = req.url.split('?')[0];
     const method = req.method;
     const token = sessionToken(req);
+    if (method === 'POST' && path === '/api/analytics/visit') {
+      await readJson(req);
+      limitAttempts(req, path, 1000);
+      const previous = (req.headers.cookie ?? '').match(/(?:^|;\s*)escrow_visitor=([a-f0-9]{64})(?=;|$)/)?.[1];
+      const visitor = previous ?? randomBytes(32).toString('hex');
+      adminAnalytics().recordVisit(visitor);
+      if (!previous) res.setHeader('Set-Cookie', `escrow_visitor=${visitor}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${req.socket.encrypted ? '; Secure' : ''}`);
+      return json(res, 200, {});
+    }
+    const adminPreview = /^\/api\/admin\/projects\/(\d+)\/milestones\/(\d+)\/deliveries\/([\da-f-]{36})\/preview$/.exec(path);
+    if (adminPreview || ['/api/admin/access', '/api/admin/overview', '/api/admin/case'].includes(path)) {
+      const account = token && await store.getSessionUser(hashToken(token));
+      if (!account) throw new WorkflowError(401, 'Hãy đăng nhập để truy cập quản trị.');
+      if (req.headers['x-escrow-account'] && req.headers['x-escrow-account'] !== account.id) throw new WorkflowError(401, 'Tài khoản đã thay đổi.');
+      const allowed = isAdminAccount(account, options.adminEmails ?? adminEmails(root));
+      if (path === '/api/admin/access' && method === 'GET') return json(res, 200, { allowed });
+      if (!allowed) throw new WorkflowError(403, 'Tài khoản không có quyền quản trị.');
+      if (adminPreview) {
+        if (method !== 'GET') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
+        const [, projectId, milestoneId, deliveryId] = adminPreview;
+        const project = await store.transaction(writes => writes.getProject(Number(projectId)));
+        const delivery = project?.milestones.find(item => item.id === Number(milestoneId))?.deliveries?.find(item => item.id === deliveryId);
+        if (!project || (!project.disputeReason && !project.adminReview) || !delivery?.preview) throw new WorkflowError(404, 'Bằng chứng không tồn tại trong hồ sơ tranh chấp.');
+        const file = await store.getDeliveryFile(deliveryId, 'preview');
+        if (!file) throw new WorkflowError(404, 'Tệp bằng chứng không tồn tại.');
+        return sendDeliveryFile(res, file);
+      }
+      if (path === '/api/admin/case') {
+        const input = method === 'POST' ? await readJson(req) : Object.fromEntries(new URLSearchParams(req.url.slice(path.length + 1)));
+        const id = Number(input.projectId);
+        if (!Number.isSafeInteger(id) || id <= 0) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
+        const result = await store.transaction(async writes => {
+          const current = await writes.getSessionUser(hashToken(token), true);
+          if (!current || !isAdminAccount(current, options.adminEmails ?? adminEmails(root))) throw new WorkflowError(403, 'Quyền quản trị đã thay đổi.');
+          let project = await writes.getProject(id);
+          if (!project || (!project.disputeReason && !project.adminReview && project.status !== 'Disputed')) throw new WorkflowError(404, 'Hồ sơ tranh chấp không tồn tại.');
+          if (method === 'GET') {
+            let chain;
+            if (project.currency === 'FESC') {
+              try { chain = await adminFescCase(root, project); }
+              catch { chain = { unavailable: true, message: 'Chưa xác minh được hợp đồng trên chain hiện tại.' }; }
+            }
+            return { project, chain };
+          }
+          if (method !== 'POST') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
+          const note = typeof input.note === 'string' ? input.note.trim() : '';
+          if (note.length < 3 || note.length > 2000) throw new WorkflowError(400, 'Nội dung xử lý cần 3–2000 ký tự.');
+          const revision = project.adminReview?.revision ?? 0;
+          if (input.revision !== revision) throw new WorkflowError(409, 'Hồ sơ đã thay đổi. Hãy tải lại trước khi xử lý.');
+          if (!['review', 'release', 'refund'].includes(input.action)) throw new WorkflowError(400, 'Thao tác quản trị không hợp lệ.');
+          if (input.action !== 'review') {
+            if (current.id === project.ownerId || current.id === project.freelancerId) throw new WorkflowError(403, 'Admin không được phân xử dự án của chính mình.');
+            if (project.status !== 'Disputed') throw new WorkflowError(409, 'Dự án không còn tranh chấp.');
+            if (project.currency === 'FESC') {
+              const resolution = await adminFescCase(root, project, { ...input, action: input.hash ? 'confirm' : 'prepare', decision: input.action });
+              if (!input.hash) return { transaction: resolution };
+              project = resolution.project;
+              await writes.addTransaction({ ...resolution.transaction, projectId: id, project: project.title,
+                action: 'Phân xử FESC: phân bổ quyền rút', amount: 0, currency: 'FESC', status: 'Đã xác nhận' });
+            } else {
+              const milestone = project.milestones.find(item => item.status === 'Disputed');
+              const resolved = applyProjectAction(project, { id: 'demo-arbitrator', role: 'Arbitrator' },
+                { action: input.action, milestoneId: milestone?.id, note });
+              project = resolved.project;
+              for (const tx of resolved.transactions ?? []) {
+                const beneficiary = tx.action === 'Phân xử: giải ngân' ? project.freelancerId : project.ownerId;
+                if (!beneficiary) throw new WorkflowError(409, 'Dự án thiếu bên nhận tiền.');
+                await writes.creditMock(beneficiary, cents(tx.amount));
+                await writes.addTransaction({ ...tx, id: randomUUID(), projectId: id, project: project.title,
+                  time: new Date().toISOString(), currency: 'MOCK', status: 'Mô phỏng' });
+              }
+            }
+          }
+          project = { ...project, adminReview: { revision: revision + 1, status: input.action === 'review' ? 'reviewing' : 'resolved',
+            history: [...(project.adminReview?.history ?? []), { actorId: current.id, action: input.action, note,
+              at: new Date().toISOString(), ...(input.hash ? { hash: input.hash } : {}) }] } };
+          await writes.saveProject(project);
+          return { project };
+        });
+        return json(res, 200, result);
+      }
+      if (method !== 'GET') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
+      const params = new URLSearchParams(req.url.slice(path.length + 1));
+      const range = adminPeriod(params.get('period') ?? 'day', params.get('date') ?? undefined);
+      await reconcilePublicProjects(root, store);
+      const data = await store.readWorkspace();
+      const buckets = range.period === 'day' ? [] : adminBuckets(range);
+      let fesc;
+      try { fesc = await adminFescStatistics(root, range, (await store.getWalletLink(account.id))?.address, buckets); }
+      catch { fesc = { available: false, error: 'Không đọc được blockchain FESC. Kiểm tra node và thử lại.' }; }
+      const createdTimes = data.projects.map(project => Date.parse(project.createdAt ?? `${project.created}T00:00:00+07:00`));
+      const createdIn = ({ start, end }) => createdTimes.filter(time => time >= Date.parse(start) && time < Date.parse(end)).length;
+      return json(res, 200, { range, traffic: adminAnalytics().summary(range),
+        fesc,
+        projectCount: data.projects.length,
+        projectSeries: buckets.map(bucket => ({ key: bucket.key, created: createdIn(bucket) })),
+        projectCounts: {
+          created: createdIn(range),
+          completed: data.projects.filter(project => project.status === 'Completed').length,
+        },
+        disputes: data.projects.filter(project => project.status === 'Disputed'),
+        resolvedDisputes: data.projects.filter(project => project.adminReview?.status === 'resolved') });
+    }
     const deliveryDownload = /^\/api\/projects\/(\d+)\/milestones\/(\d+)\/deliveries\/([\da-f-]{36})\/(preview|original)$/.exec(path);
     if (method === 'GET' && path === '/api/projects/public') {
       const projects = (await store.listOpenProjects())
@@ -437,7 +545,7 @@ function createDatabaseApi(store, root, options = {}) {
   }
 
   return {
-    close: store.close,
+    close: async () => { analytics?.close(); await store.close(); },
     middleware(req, res, next) {
       if (!req.url?.startsWith('/api/')) return next();
       handle(req, res).catch(error => {

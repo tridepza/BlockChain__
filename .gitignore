@@ -14,3 +14,4 @@ test-results/
 !.env.postgres.example
 !.env.mongo.example
 !.env.mail.example
+!.env.admin.example

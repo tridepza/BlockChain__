@@ -586,7 +586,7 @@ test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên m
   assert.equal((await action(other, 'confirmCancel', firstRequest)).status, 404);
   assert.equal((await action(freelancer, 'requestCancel', { note: 'Ghi đè đề nghị đang mở' })).status, 409);
   assert.equal((await action(freelancer, 'approve', { milestoneId: 1 })).status, 403);
-  assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Chỉ mô phỏng trong demo' })).status, 403);
+  assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Thiếu phiên bản bàn giao' })).status, 409);
   assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Xem lại yêu cầu' })).status, 200);
   const second = await action(freelancer, 'submit', submission);
   assert.equal(second.status, 200);

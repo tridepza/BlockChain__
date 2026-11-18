@@ -14,6 +14,8 @@ Xem [Giai đoạn 3 — Trạng thái, quyền hạn và quy tắc tiền](docs/
 
 ## Chạy website local
 
+Trang quản trị tại `/admin`: xem [cấp quyền, thống kê và xử lý tranh chấp](docs/admin.md).
+
 Để chạy đầy đủ web/API và blockchain sau khi mở lại máy, xem [hai terminal khởi động và lệnh kiểm tra hệ thống](docs/chay-lai-sau-khi-mo-may.md).
 
 Yêu cầu Node.js 24 trở lên. Mở PowerShell tại thư mục dự án rồi chạy:
