@@ -31,17 +31,3 @@
 .admin-breakdown th[scope="row"], .admin-breakdown thead th:first-child { text-align: left; font-weight: 600; }
 .admin-breakdown thead th { position: sticky; top: 0; background: #f3f7f3; font-size: 13px; color: var(--muted); }
 .admin-breakdown tbody tr:last-child > * { border-bottom: 0; }
-.admin-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; padding: 4px; border-radius: 10px; background: #e7eee9; }
-.admin-tabs button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 16px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 600; }
-.admin-tabs button.active { background: white; color: var(--ink); box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
-.admin-tabs .count { min-width: 20px; padding: 0 6px; border-radius: 10px; background: #c2410c; color: white; font-size: 12px; line-height: 20px; text-align: center; }
-.admin-case h4 { margin: 18px 0 8px; }
-.case-summary { padding: 12px 14px; border-radius: 8px; background: white; }
-.case-project { margin: 12px 0; }
-.case-project summary { cursor: pointer; font-weight: 600; }
-.admin-table-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
-.admin-table-tools input[type="search"] { flex: 1 1 240px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
-.admin-table-tools .check { display: flex; align-items: center; gap: 8px; }
-.admin-breakdown th small { display: block; font-weight: 400; color: var(--muted); }
-.admin-breakdown td a, .admin-breakdown code { white-space: nowrap; }
-.pager { justify-content: center; margin-top: 12px; }

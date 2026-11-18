@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import {
   ArrowLeft, ArrowRight, BriefcaseBusiness, CheckCircle2, FileText, FolderKanban, LayoutDashboard, LogOut,
-  Globe2, Menu, Plus, RefreshCw, Scale, Search, Settings, ShieldCheck, Trash2, Wallet, X,
+  Globe2, Menu, Plus, RefreshCw, Scale, Search, Settings, ShieldCheck, Wallet, X,
 } from 'lucide-react';
 import Auth from './Auth';
 import WalletLink from './WalletLink';
@@ -11,16 +11,19 @@ import Explorer from './Explorer';
 import AdminDashboard from './AdminDashboard';
 import { categoryLabel } from './ui-labels';
 import { api, ApiError, errorMessage } from './api';
+import { loadDemo, saveDemo } from './demo';
 import {
-  canSeePrivate, categories, currentMilestone, deliveryFileLimit, deliveryPreviewLimit, firstDueBufferMs, getSubmissionVersion, money, WorkflowError,
+  applyProjectAction, canRequestCancellation, canRequestRevision, canSeePrivate, categories, createProject, currentMilestone, demoAccounts,
+  cents, deliveryFileLimit, deliveryPreviewLimit, escrowBalance, getSubmissionVersion, mockGrantCents, money, pendingCancellation, visibleWorkspace, WorkflowError,
+  mockComplaintAvailable, reviewDueAt, workDueAt,
 } from './workflow';
-import type { Account, Project, ProjectAction, Tx, WorkspaceData } from './workflow';
+import type { Account, Currency, Project, ProjectAction, Role, Tx, WorkspaceData } from './workflow';
 
 const navigation = [
   { id: 'overview', label: 'Tổng quan', Icon: LayoutDashboard },
   { id: 'projects', label: 'Dự án', Icon: FolderKanban },
   { id: 'wallet', label: 'Ví & giao dịch', Icon: Wallet },
-  { id: 'disputes', label: 'Khiếu nại', Icon: Scale },
+  { id: 'disputes', label: 'Tranh chấp', Icon: Scale },
   { id: 'profile', label: 'Hồ sơ', Icon: Settings },
 ] as const;
 type Page = typeof navigation[number]['id'] | 'detail';
@@ -41,11 +44,16 @@ async function encodeDeliveryFile(file: File, limit: number) {
 const emptyWorkspace: WorkspaceData = { projects: [], txs: [] };
 const actionLabels: Record<string, string> = {
   assign: 'Chọn Freelancer',
+  fund: 'Ký quỹ',
   submit: 'Gửi bàn giao',
+  revision: 'Yêu cầu sửa',
+  approve: 'Nghiệm thu & giải ngân',
+  dispute: 'Gửi khiếu nại',
+  release: 'Quyết định giải ngân',
+  refund: 'Quyết định hoàn tiền',
+  requestCancel: 'Đề nghị hủy',
+  confirmCancel: 'Đồng ý hủy và hoàn tiền',
 };
-const vnTime = (value: string | number) => new Date(value).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
-const vnDate = (milliseconds: number) => new Date(milliseconds + 7 * 3_600_000).toISOString().slice(0, 10);
-const addDays = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 
 let visitRecorded = false;
 export default function App() {
@@ -60,6 +68,7 @@ export default function App() {
 
 function SessionApp() {
   const [user, setUser] = useState<Account | null>(null);
+  const [demo, setDemo] = useState(false);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
   const [restoreError, setRestoreError] = useState('');
@@ -76,6 +85,7 @@ function SessionApp() {
     return () => { active = false; };
   }, [retry]);
 
+  if (demo) return <Workspace key="demo" demo onExit={() => setDemo(false)}/>;
   if (user && ['/admin', '/admin/'].includes(window.location.pathname)) return <AdminDashboard/>;
   if (user) return <Workspace key={user.id} user={user} onProfile={setUser} onExit={expired => {
     setUser(null);
@@ -87,27 +97,35 @@ function SessionApp() {
       <p role={restoreError ? 'alert' : 'status'}>{restoreError || 'Đang kiểm tra phiên đăng nhập…'}</p>
       {restoreError && <div className="auth-links">
         <button className="primary" onClick={() => { setLoading(true); setRestoreError(''); setRetry(n => n + 1); }}>Thử lại</button>
+        <button className="secondary" onClick={() => setDemo(true)}>Thử bản demo</button>
       </div>}
     </div></main>;
   }
-  return <Auth onLogin={setUser} initialMessage={message}/>;
+  return <Auth onLogin={setUser} onDemo={() => setDemo(true)} initialMessage={message}/>;
 }
 
-function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfile: (user: Account) => void; onExit: (expired?: boolean) => void }) {
+type WorkspaceProps = { demo: true; onExit: () => void } |
+  { demo?: false; user: Account; onProfile: (user: Account) => void; onExit: (expired?: boolean) => void };
+
+function Workspace(props: WorkspaceProps) {
+  const { demo, onExit } = props;
+  const [role, setRole] = useState<Role>('Client');
+  const actor = props.demo ? demoAccounts[role] : props.user;
   const [adminAccess, setAdminAccess] = useState(false);
   useEffect(() => {
+    if (demo) return;
     let active = true;
     api<{ allowed: boolean }>('admin/access').then(result => { if (active) setAdminAccess(result.allowed); }).catch(() => {});
     return () => { active = false; };
-  }, [actor.id]);
-  const [data, setData] = useState(emptyWorkspace);
+  }, [demo, actor.id]);
+  const [data, setData] = useState(() => demo ? loadDemo() : emptyWorkspace);
   const [page, setPage] = useState<Page>('overview');
   const [activeId, setActiveId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [mobile, setMobile] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!demo);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -149,16 +167,17 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
   }, [refresh]);
 
   useEffect(() => {
+    if (demo) return;
     let active = true;
     api<WorkspaceData>('workspace', undefined, actor.id)
       .then(result => { if (active) setData(result); })
       .catch(error => { if (active) handleError(error); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [actor.id]);
+  }, [demo, actor.id]);
 
   useEffect(() => {
-    if (loading || busy || dialog || page === 'profile') return;
+    if (demo || loading || busy || dialog || page === 'profile') return;
     function refreshWhenVisible() {
       if (document.visibilityState === 'visible') void refresh(true);
     }
@@ -168,9 +187,9 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
       window.removeEventListener('focus', refreshWhenVisible);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
-  }, [loading, busy, dialog, page, actor.id]);
+  }, [demo, loading, busy, dialog, page, actor.id]);
 
-  const { projects, txs } = data;
+  const { projects, txs, mockWallet } = demo ? visibleWorkspace(data, actor) : data;
   const privateProjects = projects.filter(project => canSeePrivate(project, actor));
   const current = projects.find(project => project.id === activeId);
   const disputes = privateProjects.filter(project => project.status === 'Disputed');
@@ -180,7 +199,7 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
   const initials = actor.name.trim().split(/\s+/).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase();
   const activePage = page === 'detail' ? 'projects' : page;
   const canCreate = actor.role === 'Client' && (page === 'overview' || page === 'projects');
-  const canRefresh = page !== 'profile';
+  const canRefresh = !demo && page !== 'profile';
 
   useEffect(() => {
     if (!mobile) return;
@@ -213,7 +232,7 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
     setError('');
     setNotice('');
     window.scrollTo(0, 0);
-    if (!loading && !busy && (next === 'projects' || next === 'overview' || next === 'wallet' || next === 'disputes')) {
+    if (!demo && !loading && !busy && (next === 'projects' || next === 'overview' || next === 'wallet')) {
       void refresh(true);
     }
   }
@@ -243,6 +262,11 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
     }
   }
 
+  function persistDemo(next: WorkspaceData) {
+    saveDemo(next);
+    setData(next);
+  }
+
   function submitDialog(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -250,13 +274,35 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
     if (!dialog) return;
     void run(async () => {
       if (dialog.kind === 'create') {
-        const result = await api<{ project: Project; data: WorkspaceData }>('projects', fields, actor.id);
-        setData(result.data);
-        select(result.project);
+        let project: Project;
+        if (demo) {
+          project = createProject(actor, fields, Date.now());
+          const latest = loadDemo();
+          persistDemo({ ...latest, projects: [project, ...latest.projects] });
+        } else {
+          const result = await api<{ project: Project; data: WorkspaceData }>('projects', fields, actor.id);
+          project = result.project;
+          setData(result.data);
+        }
+        select(project);
         setNotice('Đã tạo dự án.');
       } else {
         const input = { ...dialog.action, ...fields };
-        if (input.action === 'submit') {
+        if (demo) {
+          const latest = loadDemo();
+          setData(latest);
+          const project = latest.projects.find(project => project.id === dialog.projectId);
+          if (!project) throw new WorkflowError(409, 'Dự án không còn trong bản demo.');
+          const result = applyProjectAction(project, actor, input, demoAccounts.Freelancer);
+          const txs: Tx[] = (result.transactions ?? []).map(transaction => ({
+            ...transaction, id: `DEMO-${crypto.randomUUID().slice(0, 8)}`, projectId: project.id,
+            project: project.title, status: 'Mô phỏng', time: new Date().toLocaleString('vi-VN'),
+          }));
+          persistDemo({
+            projects: latest.projects.map(p => p.id === project.id ? result.project : p),
+            txs: [...txs, ...latest.txs],
+          });
+        } else if (input.action === 'submit') {
           const preview = form.get('preview');
           const original = form.get('original');
           if (!(preview instanceof File) || !preview.size) throw new WorkflowError(400, 'Hãy chọn bản xem trước để Client nghiệm thu.');
@@ -266,11 +312,13 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
             original: original instanceof File && original.size ? await encodeDeliveryFile(original, deliveryFileLimit) : undefined,
           };
           setData(await api<WorkspaceData>('projects/delivery', data, actor.id));
-          setNotice('Đã lưu tệp. Hãy xác nhận bàn giao trong MetaMask.');
         } else {
           setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
-          setNotice(`Đã thực hiện ${actionLabels[dialog.action.action]}.`);
         }
+        const project = data.projects.find(project => project.id === dialog.projectId);
+        setNotice(project?.currency === 'FESC' && input.action === 'submit'
+          ? 'Đã lưu tệp. Hãy xác nhận bàn giao trong MetaMask.'
+          : `Đã thực hiện ${actionLabels[dialog.action.action]}.`);
       }
       setDialog(null);
     });
@@ -278,16 +326,18 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
 
   function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (props.demo) return;
     const fields = Object.fromEntries(new FormData(event.currentTarget));
     void run(async () => {
       const { user } = await api<{ user: Account }>('auth/profile', fields, actor.id);
-      onProfile(user);
+      props.onProfile(user);
       setNotice('Đã cập nhật hồ sơ.');
     });
   }
 
   function exit() {
-    void run(async () => {
+    if (demo) onExit();
+    else void run(async () => {
       await api('auth/logout', {}, actor.id);
       onExit();
     });
@@ -298,16 +348,16 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
     <aside id="workspace-menu" className={mobile ? 'sidebar show' : 'sidebar'}>
       <div className="brand"><span className="brandmark"><ShieldCheck size={21}/></span><b>FreelanceEscrow</b><button ref={menuClose} className="mobile-close icon-btn" aria-label="Đóng menu" onClick={() => setMobile(false)}><X size={20}/></button></div>
       <nav aria-label="Không gian làm việc">
-        {navigation.map(({ id, label, Icon }) =>
+        {navigation.filter(item => !demo || item.id !== 'profile').map(({ id, label, Icon }) =>
           <button key={id} className={`nav-item ${activePage === id ? 'selected' : ''}`} aria-current={activePage === id ? 'page' : undefined} disabled={busy} onClick={() => navigate(id)}>
             <Icon size={18}/>{label}{id === 'disputes' && disputes.length > 0 && <span className="count">{disputes.length}</span>}
           </button>)}
-        <a href="/explorer" className="nav-item explorer-link"><Globe2 size={18}/> Giao dịch công khai</a>
+        {!demo && <a href="/explorer" className="nav-item explorer-link"><Globe2 size={18}/> Giao dịch công khai</a>}
         {adminAccess && <a href="/admin" className="nav-item explorer-link"><ShieldCheck size={18}/> Quản trị</a>}
       </nav>
       <div className="side-bottom">
         <div className="profile"><div className="avatar">{initials}</div><div className="profile-text"><b>{actor.name}</b><small>{actor.role}</small></div></div>
-        <button className="nav-item logout" disabled={busy} onClick={exit}><LogOut size={17}/>Đăng xuất</button>
+        <button className="nav-item logout" disabled={busy} onClick={exit}><LogOut size={17}/>{demo ? 'Thoát demo' : 'Đăng xuất'}</button>
       </div>
     </aside>
     <main className="main" ref={mainRef}>
@@ -322,6 +372,11 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
             : <h1>{page === 'overview' ? `Chào ${actor.name.trim().split(/\s+/)[0]}` : title}</h1>}
           </div>
           <div className="page-actions">
+            {demo && <label className="role-select">Vai trò demo
+            <select value={role} disabled={busy} onChange={e => { setRole(e.target.value as Role); setSearch(''); navigate('overview'); }}>
+              <option>Client</option><option>Freelancer</option><option>Arbitrator</option>
+            </select>
+            </label>}
             {canRefresh && <button className="secondary" disabled={busy || loading || refreshing} onClick={() => void refresh()}><RefreshCw size={16}/> {refreshing ? 'Đang làm mới…' : 'Làm mới'}</button>}
             {canCreate && <button className="primary" disabled={busy || loading} onClick={() => openDialog({ kind: 'create' })}><Plus size={17}/> Tạo dự án</button>}
           </div>
@@ -332,15 +387,13 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
           <div className="stats">
             <Stat icon={<FolderKanban size={19}/>} label="Dự án đang hoạt động" value={privateProjects.filter(p => !['Completed', 'Cancelled'].includes(p.status)).length}/>
             <Stat icon={<FileText size={19}/>} label="Mốc chờ nghiệm thu" value={privateProjects.filter(p => currentMilestone(p)?.status === 'Submitted').length}/>
-            <Stat icon={<Scale size={19}/>} label="Khiếu nại đang mở" value={disputes.length}/>
             <Stat icon={<CheckCircle2 size={19}/>} label="Dự án đã hoàn tất" value={privateProjects.filter(p => p.status === 'Completed').length}/>
           </div>
           <section className="panel">
             <div className="panel-head"><h2>Dự án của bạn</h2>
               <button className="text-btn" onClick={() => navigate('projects')}>Xem tất cả <ArrowRight size={16}/></button>
             </div>
-            <ProjectList projects={privateProjects.slice(0, 4)} onSelect={select} empty={actor.role === 'Client'
-              ? 'Bạn chưa có dự án nào. Bấm "Tạo dự án" để bắt đầu.' : 'Bạn chưa tham gia dự án nào. Xem mục Dự án để tìm việc đang mở.'}/>
+            <ProjectList projects={privateProjects.slice(0, 4)} onSelect={select} empty="Bạn chưa tham gia dự án nào."/>
           </section>
         </>}
         {!loading && page === 'projects' && <section className="panel">
@@ -351,23 +404,31 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
           <ProjectList projects={filtered} onSelect={select} empty={query ? 'Không tìm thấy dự án phù hợp.' : 'Chưa có dự án nào.'}/>
         </section>}
         {!loading && page === 'detail' && (current ?
-          <ProjectDetail key={current.id} project={current} actor={actor} onOpenWallet={() => navigate('wallet')}
+          <ProjectDetail key={current.id} project={current} actor={actor} demo={!!demo}
+            mockCents={mockWallet?.cents ?? 0} onOpenWallet={() => navigate('wallet')}
             onFescChanged={refreshFescWorkspace}
             onAction={action => openDialog({ kind: 'action', projectId: current.id, action })}/> :
           <div className="panel"><Empty text="Dự án hiện không còn trong danh sách của bạn."/></div>)}
-        {!loading && page === 'wallet' && <WalletLink key={actor.id} accountId={actor.id}/>}
+        {!loading && page === 'wallet' && !demo && <WalletLink key={actor.id} accountId={actor.id}>
+          {mockWallet && <section className="panel wallet-card">
+          <div className="panel-head"><h2>Số dư MOCK <small>· Mô phỏng</small></h2><span className="stat-icon"><Wallet size={19}/></span></div>
+          <div className="balance">{money(mockWallet.cents / 100)}</div>
+          {actor.role === 'Client' && !mockWallet.claimed && <button className="primary" disabled={busy}
+            onClick={() => void run(async () => {
+              setData(await api<WorkspaceData>('wallet/mock-claim', {}, actor.id));
+              setNotice('Đã nhận ngân sách MOCK thử.');
+            })}>Nhận {money(mockGrantCents / 100)} thử</button>}
+        </section>}
+        </WalletLink>}
         {!loading && page === 'wallet' && <section className="panel">
           <div className="panel-head"><h2>Lịch sử giao dịch</h2></div>
           <TxTable txs={txs}/>
         </section>}
         {!loading && page === 'disputes' && <section className="panel">
-          <div className="panel-head"><h2>Khiếu nại đang mở</h2></div>
-          <p className="hint">Để gửi khiếu nại, mở dự án và dùng nút <b>Khiếu nại giai đoạn này</b> trong mục Ký quỹ FESC. Mọi khiếu nại cần bằng chứng.</p>
-          {!disputes.length ? <Empty text="Hiện chưa có khiếu nại nào."/> : disputes.map(project => <div className="dispute-card" key={project.id}>
-            <div><b>{project.title}</b>
-              <p>{project.dispute ? `${project.dispute.label} · do ${project.dispute.by} gửi` : project.disputeReason}</p>
-              <small>{project.client} · {project.freelancer}{project.adminReview?.history.length ? ' · admin đã phản hồi' : ' · chờ admin xem xét'}</small></div>
-            <button className="secondary" onClick={() => select(project)}>Xem khiếu nại</button>
+          <div className="panel-head"><h2>Vụ việc đang mở</h2></div>
+          {!disputes.length ? <Empty text="Hiện chưa có tranh chấp nào."/> : disputes.map(project => <div className="dispute-card" key={project.id}>
+            <div><b>{project.title}</b><p>{project.disputeReason}</p><small>{project.client} · {project.freelancer}</small></div>
+            <button className="secondary" onClick={() => select(project)}>Xem tranh chấp</button>
           </div>)}
         </section>}
         {page === 'profile' && <section className="panel profile-panel">
@@ -383,68 +444,27 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
         </section>}
       </div>
     </main>
-    {dialog && <WorkspaceDialog dialog={dialog} busy={busy} error={error}
+    {dialog && <WorkspaceDialog dialog={dialog} demo={!!demo} busy={busy} error={error}
+      currency={dialog.kind === 'action' ? data.projects.find(project => project.id === dialog.projectId)?.currency : undefined}
       onSubmit={submitDialog} onClose={() => { setError(''); setDialog(null); }}/>}
     {notice && <div className="toast" role="status"><CheckCircle2 size={18}/>{notice}<button aria-label="Đóng thông báo" onClick={() => setNotice('')}><X size={16}/></button></div>}
   </div>;
 }
 
-type MilestoneRow = { key: number; title: string; amount: string; due: string };
-let rowKey = 0;
-const newRow = (): MilestoneRow => ({ key: ++rowKey, title: '', amount: '', due: '' });
-
-// Milestones are entered as rows; the hidden fields keep the API's comma-separated format.
-function CreateProjectFields() {
-  const [rows, setRows] = useState<MilestoneRow[]>(() => [newRow()]);
-  const today = vnDate(Date.now());
-  const firstMin = vnDate(Date.now() + firstDueBufferMs + 86_400_000);
-  const totalCents = rows.reduce((sum, row) => sum + Math.round(Number(row.amount || 0) * 100), 0);
-  const budget = (totalCents / 100).toFixed(2);
-  const lastDue = rows[rows.length - 1]?.due ?? '';
-  const update = (key: number, changes: Partial<MilestoneRow>) => setRows(current => current.map(row => row.key === key ? { ...row, ...changes } : row));
-  return <>
-    <label>Tên dự án<input name="title" required autoFocus maxLength={120} placeholder="VD: Xây dựng website bán hàng"/></label>
-    <label>Danh mục<select name="category">{categories.map(category => <option key={category} value={category}>{categoryLabel(category)}</option>)}</select></label>
-    <label>Mô tả<textarea name="description" required maxLength={2000} placeholder="Mô tả phạm vi công việc, yêu cầu nghiệm thu…"/></label>
-    <fieldset className="milestone-rows">
-      <legend>Các giai đoạn (milestone) <small>· tối đa 10</small></legend>
-      {rows.map((row, index) => {
-        const min = index === 0 ? firstMin : rows[index - 1].due ? addDays(rows[index - 1].due, 1) : firstMin;
-        return <div className="milestone-row" key={row.key}>
-          <span className="row-number">{index + 1}</span>
-          <label>Tên giai đoạn<input required maxLength={80} value={row.title} placeholder={['Thiết kế', 'Frontend', 'Backend'][index] ?? 'Tên giai đoạn'}
-            onChange={event => update(row.key, { title: event.target.value.replace(/,/g, ' ') })}/></label>
-          <label>Số FESC<input type="number" required min="0.01" step="0.01" inputMode="decimal" value={row.amount} placeholder="30"
-            onChange={event => update(row.key, { amount: event.target.value })}/></label>
-          <label>Hạn bàn giao<input type="date" required min={min} value={row.due} onChange={event => update(row.key, { due: event.target.value })}/></label>
-          {rows.length > 1 && <button type="button" className="icon-btn" aria-label={`Xóa giai đoạn ${index + 1}`}
-            onClick={() => setRows(current => current.filter(item => item.key !== row.key))}><Trash2 size={17}/></button>}
-        </div>;
-      })}
-      {rows.length < 10 && <button type="button" className="secondary small" onClick={() => setRows(current => [...current, newRow()])}><Plus size={15}/> Thêm giai đoạn</button>}
-    </fieldset>
-    <div className="create-summary">
-      <div><small>Ngân sách (tổng các giai đoạn)</small><b>{budget} FESC</b></div>
-      <div><small>Hạn toàn dự án</small><b>{lastDue ? new Date(`${lastDue}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' }) : '—'}</b></div>
-    </div>
-    <p className="hint">Hạn tính đến hết ngày theo giờ Việt Nam và phải tăng dần. Hạn giai đoạn đầu cần sau {new Date(`${firstMin}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })} (đủ 2 ngày ký quỹ và 7 ngày bắt đầu). Hôm nay là {new Date(`${today}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })}.</p>
-    <input type="hidden" name="currency" value="FESC"/>
-    <input type="hidden" name="budget" value={budget}/>
-    <input type="hidden" name="milestones" value={rows.map(row => row.title.trim()).join(',')}/>
-    <input type="hidden" name="amounts" value={rows.map(row => row.amount.trim()).join(',')}/>
-    <input type="hidden" name="milestoneDues" value={rows.map(row => row.due).join(',')}/>
-    <input type="hidden" name="projectDue" value={lastDue}/>
-  </>;
-}
-
-function WorkspaceDialog({ dialog, busy, error, onSubmit, onClose }: {
-  dialog: Dialog; busy: boolean; error: string;
+function WorkspaceDialog({ dialog, demo, currency, busy, error, onSubmit, onClose }: {
+  dialog: Dialog; demo: boolean; currency?: Currency; busy: boolean; error: string;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void; onClose: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const create = dialog.kind === 'create';
+  const [budgetCurrency, setBudgetCurrency] = useState<Currency>(demo ? 'MOCK' : 'FESC');
+  const [milestoneNames, setMilestoneNames] = useState('');
+  const [milestoneDates, setMilestoneDates] = useState<string[]>([]);
+  const [projectDate, setProjectDate] = useState('');
+  const milestoneCount = Math.min(10, milestoneNames.split(',').length);
   const action = create ? '' : dialog.action.action;
   const title = create ? 'Tạo dự án mới' : actionLabels[action];
+  const needsNote = ['submit', 'revision', 'dispute', 'requestCancel'].includes(action);
   useEffect(() => {
     const element = ref.current;
     element?.showModal();
@@ -460,20 +480,46 @@ function WorkspaceDialog({ dialog, busy, error, onSubmit, onClose }: {
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <fieldset disabled={busy}>
-        {create ? <CreateProjectFields/> : action === 'assign' ? <>
+        {create ? <>
+          <label>Tên dự án<input name="title" required autoFocus maxLength={120} placeholder="VD: Xây dựng website bán hàng"/></label>
+          <label>Danh mục<select name="category">{categories.map(category => <option key={category} value={category}>{categoryLabel(category)}</option>)}</select></label>
+          <label>Mô tả<textarea name="description" required maxLength={2000} placeholder="Mô tả phạm vi công việc…"/></label>
+          {!demo && <label>Đơn vị ngân sách<select name="currency" value={budgetCurrency}
+            onChange={event => setBudgetCurrency(event.target.value === 'MOCK' ? 'MOCK' : 'FESC')}>
+            <option value="FESC">FESC · Hardhat Local</option><option value="MOCK">MOCK · Mô phỏng</option>
+          </select></label>}
+          <label>Ngân sách ({budgetCurrency})<input name="budget" type="number" min="0.01" step="0.01" required placeholder="100"/></label>
+          <label>Tên milestone, cách nhau bằng dấu phẩy<input name="milestones" required maxLength={800}
+            placeholder="Thiết kế, Frontend, Backend" value={milestoneNames} onChange={event => setMilestoneNames(event.target.value)}/></label>
+          <label>Số tiền từng milestone, cách nhau bằng dấu phẩy<input name="amounts" required maxLength={120} placeholder="30,40,30"/></label>
+          <label>Hạn toàn dự án<input type="date" name="projectDue" value={projectDate} required onChange={event => setProjectDate(event.target.value)}/></label>
+          {Array.from({ length: milestoneCount }, (_, index) => <label key={index}>Hạn milestone {index + 1}
+            <input type="date" required max={projectDate || undefined} value={milestoneDates[index] ?? ''}
+              onChange={event => setMilestoneDates(current => Object.assign([...current], { [index]: event.target.value }))}/>
+          </label>)}
+          <input type="hidden" name="milestoneDues" value={milestoneDates.slice(0, milestoneCount).join(',')}/>
+          <p className="hint">Hạn tính đến cuối ngày theo giờ Việt Nam. Hạn các mốc tăng dần.
+            {budgetCurrency === 'FESC' && ' Hạn mốc đầu phải cách hiện tại hơn 9 ngày để đủ thời gian ký quỹ và bắt đầu.'}</p>
+        </> : action === 'assign' && !demo ? (
           <label>Email của Freelancer<input name="email" type="email" required autoFocus maxLength={254}/></label>
-          <p className="hint">Freelancer cần đã đăng ký tài khoản và liên kết ví MetaMask để ký hợp đồng.</p>
-        </> : <>
-          <label>Mô tả bàn giao<textarea name="note" required autoFocus maxLength={2000}/></label>
-          <label>Bản xem trước (PDF, PNG hoặc JPG, tối đa 2 MiB)
-            <input type="file" name="preview" accept=".pdf,.png,.jpg,.jpeg" required/>
-          </label>
-          <label>Bản gốc (tùy chọn, tối đa 10 MiB)
-            <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
-          </label>
-          <p className="hint">Bản gốc mở cho Client sau khi giải ngân. Lưu tệp xong, xác nhận bàn giao trong MetaMask.</p>
-        </>}
-        <button className="primary full" type="submit" autoFocus={!create && action !== 'assign'}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
+        ) : needsNote ? (
+          <>
+            {action === 'requestCancel' && <p className="hint">Đề nghị có hiệu lực 72 giờ. Số dư chưa phân bổ chỉ được hoàn khi bên còn lại xác nhận.</p>}
+            <label>{action === 'submit' ? 'Mô tả bàn giao' : 'Lý do'}<textarea name="note" required autoFocus maxLength={2000}/></label>
+            {action === 'submit' && !demo && <>
+              <label>Bản xem trước (PDF, PNG hoặc JPG, tối đa 2 MiB)
+                <input type="file" name="preview" accept=".pdf,.png,.jpg,.jpeg" required/>
+              </label>
+              <label>Bản gốc thử (tùy chọn, tối đa 10 MiB)
+                <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
+              </label>
+              <p className="hint">Bản gốc mở sau khi giải ngân.{currency === 'FESC' && ' Lưu tệp xong, xác nhận bàn giao trong MetaMask.'}</p>
+            </>}
+          </>
+        ) : <p className="hint">{action === 'approve' && !demo
+          ? 'Giải ngân milestone và mở bản gốc bàn giao.'
+          : action === 'confirmCancel' ? 'Đóng dự án và hoàn số dư chưa phân bổ cho Client.' : 'Xác nhận thao tác này?'}</p>}
+        <button className="primary full" type="submit" autoFocus={!create && action !== 'assign' && !needsNote}>{busy ? 'Đang xử lý…' : create ? 'Tạo dự án' : 'Xác nhận'}</button>
       </fieldset>
     </form>
   </dialog>;
@@ -494,7 +540,7 @@ const statusLabels: Record<Project['status'] | Project['milestones'][number]['st
   'In progress': ['Đang thực hiện', 'blue'],
   Submitted: ['Chờ nghiệm thu', 'yellow'],
   'Revision requested': ['Cần chỉnh sửa', 'yellow'],
-  Disputed: ['Đang khiếu nại', 'red'],
+  Disputed: ['Đang tranh chấp', 'red'],
   Completed: ['Đã hoàn tất', 'green'],
   Cancelled: ['Đã hủy', 'red'],
   Pending: ['Chưa bắt đầu', 'neutral'],
@@ -503,26 +549,8 @@ const statusLabels: Record<Project['status'] | Project['milestones'][number]['st
 };
 
 function Status({ value }: { value: Project['status'] | Project['milestones'][number]['status'] }) {
-  const [label, color] = statusLabels[value] ?? [value, 'neutral'];
+  const [label, color] = statusLabels[value];
   return <span className={`pill ${color}`}>{label}</span>;
-}
-
-const steps = ['Chọn Freelancer', 'Tạo & ký quỹ hợp đồng', 'Thực hiện & nghiệm thu', 'Hoàn tất'];
-function stepIndex(status: Project['status']) {
-  if (status === 'Open') return 0;
-  if (status === 'Proposal sent') return 1;
-  if (status === 'Completed' || status === 'Cancelled') return 4;
-  return 2;
-}
-
-function ProgressSteps({ project }: { project: Project }) {
-  const active = stepIndex(project.status);
-  return <ol className="progress-steps" aria-label="Tiến trình dự án">
-    {steps.map((label, index) => <li key={label} className={index < active ? 'done' : index === active ? 'current' : ''}
-      aria-current={index === active ? 'step' : undefined}>
-      <span>{index < active ? '✓' : index + 1}</span>{label}
-    </li>)}
-  </ol>;
 }
 
 function ProjectList({ projects, onSelect, empty }: { projects: Project[]; onSelect: (project: Project) => void; empty: string }) {
@@ -532,9 +560,9 @@ function ProjectList({ projects, onSelect, empty }: { projects: Project[]; onSel
       return <li key={p.id}><button className="project-row" onClick={() => onSelect(p)}>
         <span className="project-name">
           <span className="project-icon"><BriefcaseBusiness size={19}/></span>
-          <span><b>{p.title}</b><small>{categoryLabel(p.category)} · {p.client}{p.dueAt ? ` · hạn ${new Date(p.dueAt).toLocaleDateString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}` : ''}</small></span>
+          <span><b>{p.title}</b><small>{categoryLabel(p.category)} · {p.client}</small></span>
         </span>
-        <span className="project-money"><b>{money(p.budget)}</b><small>{progress}% đã thanh toán</small></span>
+        <span className="project-money"><b>{money(p.budget, p.currency)}</b><small>{progress}% đã thanh toán</small></span>
         <Status value={p.status}/>
         <ArrowRight className="project-arrow" size={18}/>
       </button></li>;
@@ -545,61 +573,87 @@ function TxTable({ txs }: { txs: Tx[] }) {
   if (!txs.length) return <Empty text="Chưa có giao dịch."/>;
   return <div className="table-wrap" tabIndex={0} role="region" aria-label="Bảng giao dịch"><table>
     <thead><tr><th scope="col">Hành động</th><th scope="col">Dự án</th><th scope="col">Số tiền</th><th scope="col">Mã giao dịch</th><th scope="col">Trạng thái</th></tr></thead>
-    <tbody>{txs.map(tx => <tr key={tx.id}><td><b>{tx.action}</b><small>{Number.isFinite(Date.parse(tx.time)) ? vnTime(tx.time) : tx.time}</small></td><td>{tx.project}</td><td>{money(tx.amount)}</td>
-      <td>{/^0x[0-9a-f]{64}$/i.test(tx.id)
+    <tbody>{txs.map(tx => <tr key={tx.id}><td><b>{tx.action}</b><small>{tx.time}</small></td><td>{tx.project}</td><td>{money(tx.amount, tx.currency)}</td>
+      <td>{tx.currency === 'FESC' && /^0x[0-9a-f]{64}$/i.test(tx.id)
         ? <a href={`/explorer?q=${tx.id}`}><code>{tx.id}</code></a> : <code>{tx.id}</code>}</td>
       <td><span className={`pill ${tx.status === 'Đã xác nhận' ? 'green' : 'neutral'}`}>{tx.status}</span></td></tr>)}</tbody>
   </table></div>;
 }
 
-function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onAction }: {
-  project: Project; actor: Account; onAction: (action: ProjectAction) => void;
-  onOpenWallet: () => void; onFescChanged: () => void;
+function ProjectDetail({ project: p, actor, demo, mockCents, onOpenWallet, onFescChanged, onAction }: {
+  project: Project; actor: Account; demo: boolean; onAction: (action: ProjectAction) => void;
+  mockCents: number; onOpenWallet: () => void; onFescChanged: () => void;
 }) {
   const owner = actor.id === p.ownerId && actor.role === 'Client';
   const freelancer = actor.id === p.freelancerId && actor.role === 'Freelancer';
+  const arbitrator = demo && actor.role === 'Arbitrator';
   const privateProject = canSeePrivate(p, actor);
   const current = currentMilestone(p);
+  const fesc = !demo && p.currency === 'FESC';
+  const canCancel = !fesc && (owner || freelancer) && canRequestCancellation(p);
+  const cancellation = canCancel ? pendingCancellation(p) : undefined;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
     return () => window.clearInterval(timer);
   }, []);
-  const decided = (p.disputeHistory ?? []).filter(item => item.resolution);
+  const formatDeadline = (value: string | number) => new Date(value).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+
+  function actionButton(action: ProjectAction, label = actionLabels[action.action], style = 'primary') {
+    return <button className={style} onClick={() => onAction(action)}>{label}</button>;
+  }
 
   return <>
     <section className="panel detail-panel">
       <div className="detail-head">
-        <div><div className="eyebrow">{categoryLabel(p.category)} · FESC trên Hardhat Local</div><h1>{p.title}</h1><p>{p.description}</p>
+        <div><div className="eyebrow">{categoryLabel(p.category)} · {fesc ? 'Hardhat Local' : 'Mô phỏng'}</div><h1>{p.title}</h1><p>{p.description}</p>
           <div className="detail-meta"><Status value={p.status}/><span>Client: {p.client}</span><span>Freelancer: {p.freelancer || 'Đang tuyển'}</span></div>
+          {p.dueAt && <p><b>Hạn toàn dự án</b> · <time dateTime={p.dueAt}>{formatDeadline(p.dueAt)}</time></p>}
         </div>
-        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG</small><b>{money(p.budget)}</b>
-          {p.dueAt && <small>Hạn toàn dự án: <time dateTime={p.dueAt}>{vnTime(p.dueAt)}</time></small>}
-          {privateProject && <small>Đã trả Freelancer: {money(p.paid)}</small>}
+        <div className="detail-budget"><small>GIÁ TRỊ HỢP ĐỒNG</small><b>{money(p.budget, p.currency)}</b>
+          {privateProject && !fesc && <small>Còn ký quỹ: {money(escrowBalance(p))} · Đã trả: {money(p.paid)}</small>}
         </div>
       </div>
-      {privateProject && <ProgressSteps project={p}/>}
       <div className="detail-actions">
-        {owner && p.status === 'Open' && <button className="primary" onClick={() => onAction({ action: 'assign' })}>{actionLabels.assign}</button>}
+        {owner && p.status === 'Open' && actionButton({ action: 'assign' }, demo ? 'Chọn Freelancer demo' : undefined)}
+        {!fesc && owner && p.status === 'Proposal sent' && (demo || mockCents >= cents(p.budget)
+          ? actionButton({ action: 'fund' }, `Ký quỹ ${money(p.budget)}`)
+          : <div>
+            <p className="hint">Số dư {money(mockCents / 100)}. Cần {money(p.budget)} để ký quỹ dự án.</p>
+            <button className="secondary" onClick={onOpenWallet}>Mở ví MOCK</button>
+          </div>)}
+        {canCancel && !cancellation && actionButton({ action: 'requestCancel' }, undefined, 'danger-outline')}
+        {cancellation && cancellation.proposerId !== actor.id && <button className="danger-outline"
+          onClick={() => onAction({ action: 'confirmCancel', cancellationId: cancellation.id })}>
+          {actionLabels.confirmCancel}
+        </button>}
       </div>
-      {privateProject && p.freelancerId && <ProjectFesc project={p} accountId={actor.id} role={freelancer ? 'Freelancer' : 'Client'} onWallet={onOpenWallet}
+      {fesc && privateProject && p.freelancerId && <ProjectFesc project={p} accountId={actor.id} onWallet={onOpenWallet}
         onDelivery={() => { if (current) onAction({ action: 'submit', milestoneId: current.id }); }} onChanged={onFescChanged}/>}
+      {cancellation && <div className="hint">
+        <b>{cancellation.proposerId === actor.id ? 'Đang chờ bên còn lại đồng ý hủy' : 'Bên còn lại đề nghị hủy'}</b>
+        <p>{cancellation.reason}</p>
+        <small>Hết hạn lúc {new Date(cancellation.expiresAt).toLocaleString('vi-VN')}</small>
+      </div>}
       <section className="milestones" aria-labelledby="milestone-title">
-        <h2 id="milestone-title">Các giai đoạn <span className="result-count">{p.milestones.length}</span></h2>
+        <h2 id="milestone-title">Các mốc thực hiện <span className="result-count">{p.milestones.length}</span></h2>
         {p.milestones.map(m => {
-        const late = !!m.dueAt && now > Date.parse(m.dueAt) && ['Pending', 'In progress', 'Revision requested'].includes(m.status) &&
-          !['Open', 'Proposal sent', 'Completed', 'Cancelled'].includes(p.status);
-        return <div className={`milestone${current?.id === m.id ? ' current' : ''}`} key={m.id}>
+        const review = { milestoneId: m.id, submissionVersion: getSubmissionVersion(m) };
+        const reviewDeadline = !fesc && m.status === 'Submitted' ? reviewDueAt(m) : undefined;
+        const late = now > workDueAt(p, m);
+        return <div className="milestone" key={m.id}>
           <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
           <div className="mile-content">
             <div className="mile-heading">
               <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
-              <b className="mile-amount">{money(m.amount)}</b>
+              <b className="mile-amount">{money(m.amount, p.currency)}</b>
             </div>
-            {m.dueAt && <p className={late ? 'hint late' : 'hint'}>{late ? 'Đã quá hạn bàn giao' : 'Hạn bàn giao'} · <time dateTime={m.dueAt}>{vnTime(m.dueAt)}</time></p>}
-            {m.arbitration && <p className="hint">Admin đã phân xử: Freelancer nhận {m.arbitration.toFreelancer} FESC, Client nhận {m.arbitration.toClient} FESC.</p>}
+            {m.dueAt && <p className="hint">Hạn bàn giao · <time dateTime={m.dueAt}>{formatDeadline(m.dueAt)}</time></p>}
+            {privateProject && reviewDeadline !== undefined && <p className="hint">
+              {now > reviewDeadline ? 'Đã quá hạn nghiệm thu' : 'Hạn nghiệm thu'} · {formatDeadline(reviewDeadline)}
+            </p>}
             {privateProject && m.submission && <div className="evidence"><FileText size={15}/>{m.submission}</div>}
-            {privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
+            {!demo && privateProject && !!m.deliveries?.length && <details className="hint" open={current?.id === m.id || m.status === 'Paid'}>
               <summary>Lịch sử bàn giao ({m.deliveries.length})</summary>
               <ul className="delivery-list">
                 {[...m.deliveries].reverse().map(delivery => {
@@ -607,7 +661,7 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
                   const canDownloadOriginal = freelancer || (owner && m.status === 'Paid' && delivery.version === m.submissionVersion);
                   return <li key={delivery.id}>
                     <b>Phiên bản {delivery.version}</b>
-                    {delivery.submittedAt && <time dateTime={delivery.submittedAt}> · {vnTime(delivery.submittedAt)}</time>}
+                    {delivery.submittedAt && <time dateTime={delivery.submittedAt}> · {new Date(delivery.submittedAt).toLocaleString('vi-VN')}</time>}
                     {delivery.version !== m.submissionVersion && <p>{delivery.note}</p>}
                     <div className="delivery-files">
                       {delivery.preview && <a href={url + '/preview'} download>Tải bản xem trước · {delivery.preview.name}</a>}
@@ -615,28 +669,37 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
                         ? <a href={url + '/original'} download>Tải bản gốc · {delivery.original.name}</a>
                         : <span>{delivery.version === m.submissionVersion ? 'Bản gốc đang khóa' : 'Bản gốc của phiên bản cũ đang khóa'}</span>)}
                     </div>
-                    {delivery.original && <details className="delivery-hash">
-                      <summary>Mã kiểm tra tệp</summary>
-                      <small>SHA-256 <code>{delivery.original.sha256}</code></small>
-                    </details>}
+                     {delivery.original && <details className="delivery-hash">
+                       <summary>Mã kiểm tra tệp</summary>
+                       <small>SHA-256 <code>{delivery.original.sha256}</code></small>
+                     </details>}
                   </li>;
                 })}
               </ul>
             </details>}
             {privateProject && m.revisionReason && <p>Yêu cầu sửa: {m.revisionReason}</p>}
-            {getSubmissionVersion(m) > 0 && m.status === 'Submitted' && owner && <p className="hint">Xem bản bàn giao rồi nghiệm thu trong mục Ký quỹ FESC.</p>}
+            {!fesc && current?.id === m.id && <div className="mile-buttons">
+              {freelancer && !late && ['Funded', 'In progress', 'Revision requested'].includes(p.status) &&
+                ['Pending', 'In progress', 'Revision requested'].includes(m.status) && actionButton({ action: 'submit', milestoneId: m.id }, undefined, 'primary small')}
+              {owner && m.status === 'Submitted' && !['Disputed', 'Cancelled', 'Completed'].includes(p.status) && <>
+                {actionButton({ ...review, action: 'approve' }, undefined, 'primary small')}
+                {canRequestRevision(m, now) && actionButton({ ...review, action: 'revision' }, undefined, 'secondary small')}
+              </>}
+              {(owner || freelancer) && mockComplaintAvailable(p, m, actor.role, now) &&
+                actionButton({ ...review, action: 'dispute' }, undefined, 'secondary small')}
+              {arbitrator && p.status === 'Disputed' && m.status === 'Disputed' && <>
+                {actionButton({ action: 'release', milestoneId: m.id }, undefined, 'primary small')}
+                {actionButton({ action: 'refund', milestoneId: m.id }, undefined, 'secondary small')}
+              </>}
+            </div>}
           </div>
         </div>;
       })}</section>
-      {privateProject && decided.length > 0 && <details className="project-terms">
-        <summary>Khiếu nại đã giải quyết ({decided.length})</summary>
-        <ul>{decided.map(item => <li key={item.openedAt}>{item.label} · do {item.by} gửi · {item.decision}
-          {item.resolution && ` (Freelancer ${item.resolution.toFreelancer} FESC, Client ${item.resolution.toClient} FESC)`}</li>)}</ul>
-      </details>}
+      {privateProject && p.disputeReason && <p className="hint"><b>Khiếu nại{p.disputeOpenedBy ? ` của ${p.disputeOpenedBy}` : ''}</b> · {p.disputeReason}</p>}
+      {privateProject && p.decision && <p className="hint"><b>Quyết định phân xử:</b> {p.decision}</p>}
       <details className="project-terms">
         <summary>Điều khoản và thông tin dự án</summary>
         <p>Mã dự án: #{p.id} · Ngày tạo: {p.created}</p>
-        <p>Client có 5 ngày để nghiệm thu mỗi bản bàn giao; quá hạn, Freelancer được khiếu nại. Mọi khiếu nại cần bằng chứng và do admin phân xử.</p>
       </details>
     </section>
   </>;

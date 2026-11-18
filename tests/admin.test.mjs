@@ -8,35 +8,33 @@ import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import { createApi } from '../server/api.mjs';
 import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from '../server/admin-analytics.mjs';
-import { applyProjectAction, createProject } from '../src/workflow.ts';
+import { applyProjectAction, createProject, reviewWindowMs } from '../src/workflow.ts';
 
-test('projects are FESC-only with ordered due dates; the server records only assignment, delivery and verified payments', t => {
+test('MOCK validates project dates and enforces work and five-day review deadlines', t => {
   const now = Date.parse('2026-11-18T10:00:00+07:00');
   t.mock.timers.enable({ apis: ['Date'], now });
   const client = { id: 'client', name: 'Client', role: 'Client' };
   const worker = { id: 'worker', name: 'Worker', role: 'Freelancer' };
   const input = { title: 'Scheduled', description: 'Test handoff', category: 'Web Development',
-    budget: '100', milestones: 'Design, Build', amounts: '40,60', projectDue: '2026-12-10', milestoneDues: '2026-11-28,2026-12-10' };
-  // First due date needs > 9 days for funding + start; dates must exist, increase and stay within the project.
-  for (const milestoneDues of ['2026-11-28', '2026-11-26,2026-12-04', '2026-11-31,2026-12-04', '2026-12-04,2026-11-30', '2026-11-28,2026-12-11']) {
+    budget: '100', milestones: 'Design, Build', amounts: '40,60', projectDue: '2026-12-05', milestoneDues: '2026-11-20,2026-12-04' };
+  for (const milestoneDues of ['2026-11-20', '2026-11-31,2026-12-04', '2026-12-04,2026-11-20', '2026-11-20,2026-12-06']) {
     assert.throws(() => createProject(client, { ...input, milestoneDues }, 1), { status: 400 });
   }
-  assert.throws(() => createProject(client, { ...input, projectDue: undefined, milestoneDues: undefined }, 1), { status: 400 });
-  assert.throws(() => createProject(client, { ...input, currency: 'MOCK' }, 1), { status: 400 });
-  assert.throws(() => createProject(worker, input, 1), { status: 403 });
   const schedule = createProject(client, input, 1);
-  assert.equal(schedule.currency, 'FESC');
-  assert.equal(schedule.dueAt, '2026-12-10T16:59:59.000Z');
-  assert.equal(schedule.milestones[0].dueAt, '2026-11-28T16:59:59.000Z');
+  assert.equal(schedule.dueAt, '2026-12-05T16:59:59.000Z');
   const project = { ...schedule, freelancerId: worker.id, funded: 100, status: 'Funded' };
-  const submitted = applyProjectAction(project, worker, { action: 'submit', milestoneId: 1, note: 'Delivered' }).project;
-  assert.equal(submitted.milestones[0].status, 'Submitted');
-  for (const action of ['dispute', 'revision', 'release', 'refund', 'requestCancel']) {
-    assert.throws(() => applyProjectAction(submitted, client, { action, milestoneId: 1, submissionVersion: 1, note: 'x' }));
-  }
-  assert.throws(() => applyProjectAction(submitted, worker, { action: 'approve', milestoneId: 1, submissionVersion: 1 }), { status: 403 });
-  const paid = applyProjectAction(submitted, client, { action: 'approve', milestoneId: 1, submissionVersion: 1 }).project;
-  assert.equal(paid.paid, 40);
+  const submit = { action: 'submit', milestoneId: 1, note: 'Delivered' };
+  const submitted = applyProjectAction(project, worker, submit).project;
+  const complaint = { action: 'dispute', milestoneId: 1, submissionVersion: 1, note: 'Review is overdue' };
+  assert.equal(applyProjectAction(submitted, client, complaint).project.disputeOpenedBy, 'Client');
+  assert.throws(() => applyProjectAction(submitted, { ...worker, id: 'outsider' }, complaint), { status: 403 });
+  t.mock.timers.setTime(now + reviewWindowMs);
+  assert.throws(() => applyProjectAction(submitted, worker, complaint), { status: 409 });
+  t.mock.timers.setTime(now + reviewWindowMs + 1);
+  assert.equal(applyProjectAction(submitted, worker, complaint).project.disputeOpenedBy, 'Freelancer');
+  assert.throws(() => applyProjectAction(submitted, client, { ...complaint, action: 'revision' }), { status: 409 });
+  assert.throws(() => applyProjectAction(project, worker, submit), { status: 409 });
+  assert.equal(applyProjectAction(project, client, { ...complaint, submissionVersion: 0 }).project.status, 'Disputed');
 });
 
 test('admin calendar uses Vietnam midnight, Monday weeks, leap months and year transitions', () => {
@@ -70,26 +68,26 @@ test('admin email file is read even when saved with a UTF-8 BOM', async t => {
   assert.equal(isAdminAccount({ email: 'admin@example.test' }, adminEmails(root)), true);
 });
 
-test('admin APIs protect private disputes, count visitors, share replies and reject MOCK decisions', async t => {
+test('admin APIs protect private disputes, count visitors and settle MOCK exactly once with an audit', async t => {
   const root = await mkdtemp(join(tmpdir(), 'escrow-admin-api-'));
   const filename = join(root, 'app.sqlite');
-  const service = createApi(filename, root, { adminEmails: 'admin@example.test', sendNotice: async () => {} });
+  const service = createApi(filename, root, { adminEmails: 'admin@example.test' });
   const db = new DatabaseSync(filename);
   const server = createServer((req, res) => service.middleware(req, res, () => res.writeHead(404).end()));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); await service.close(); await rm(root, { recursive: true }); });
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const tokens = { admin: 'a'.repeat(64), client: 'b'.repeat(64), worker: 'd'.repeat(64) };
+  const tokens = { admin: 'a'.repeat(64), client: 'b'.repeat(64) };
   for (const id of ['admin', 'client', 'worker']) {
     db.prepare('INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)').run(id, id, `${id}@example.test`, id === 'worker' ? 'Freelancer' : 'Client', Buffer.alloc(16), Buffer.alloc(64));
-    db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(createHash('sha256').update(tokens[id]).digest('hex'), id, Date.now() + 600000);
+    db.prepare('INSERT INTO mock_balances VALUES (?, ?, ?)').run(id, 0, 1);
+    if (tokens[id]) db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(createHash('sha256').update(tokens[id]).digest('hex'), id, Date.now() + 600000);
   }
   const project = { id: 1, title: 'Private dispute', category: 'Web Development', description: 'Private details', ownerId: 'client',
-    freelancerId: 'worker', client: 'Client', freelancer: 'Worker', currency: 'FESC', budget: 100, funded: 100, paid: 0,
+    freelancerId: 'worker', client: 'Client', freelancer: 'Worker', currency: 'MOCK', budget: 100, funded: 100, paid: 0,
     status: 'Disputed', disputeReason: 'Delivery rejected', created: '2026-11-18',
     milestones: [{ id: 1, title: 'First', amount: 40, status: 'Disputed' }, { id: 2, title: 'Next', amount: 60, status: 'Pending' }] };
   db.prepare('INSERT INTO projects VALUES (?, ?)').run(1, JSON.stringify(project));
-  db.prepare('INSERT INTO projects VALUES (?, ?)').run(2, JSON.stringify({ ...project, id: 2, currency: 'MOCK', title: 'Legacy MOCK' }));
   async function request(path, user, data, headers = {}) {
     const response = await fetch(origin + '/api/' + path, { method: data ? 'POST' : 'GET',
       headers: { ...(user ? { Cookie: `escrow_session=${tokens[user]}` } : {}), ...(data ? { 'Content-Type': 'application/json', Origin: origin } : {}), ...headers },
@@ -100,8 +98,6 @@ test('admin APIs protect private disputes, count visitors, share replies and rej
   assert.equal((await request('admin/overview', 'client')).status, 403);
   assert.equal((await request('admin/case?projectId=1', 'client')).status, 403);
   assert.equal((await request('admin/access', 'client')).body.allowed, false);
-  assert.equal((await request('admin/accounts', 'client')).status, 403);
-  assert.equal((await request('admin/transactions', 'client')).status, 403);
   const visitor = await request('analytics/visit', null, {});
   assert.equal(visitor.status, 200);
   assert.match(visitor.cookie, /HttpOnly/);
@@ -112,33 +108,34 @@ test('admin APIs protect private disputes, count visitors, share replies and rej
   assert.equal(overview.status, 200);
   assert.equal(overview.body.traffic.pageViews, 3);
   assert.equal(overview.body.traffic.uniqueVisitors, 2);
-  assert.equal(overview.body.projectCount, 2);
-  assert.equal(overview.body.disputes.length, 2);
+  assert.equal(overview.body.projectCount, 1);
+  assert.equal(overview.body.disputes.length, 1);
   const weekly = await request('admin/overview?period=week', 'admin');
   assert.equal(weekly.body.traffic.series.length, 7);
   assert.equal(weekly.body.traffic.series.reduce((sum, row) => sum + row.pageViews, 0), 3);
   assert.equal(weekly.body.projectSeries.length, 7);
   assert.equal((await request('admin/overview?period=bad', 'admin')).status, 400);
-  const accounts = await request('admin/accounts', 'admin');
-  assert.equal(accounts.body.total, 3);
-  assert.equal(accounts.body.available, false, 'no chain: balances are unavailable rather than zero');
-
-  // Replies are shared with both parties through the workspace.
-  const note = { projectId: 1, action: 'review', note: 'Please add the chat log', revision: 0 };
+  const note = { projectId: 1, action: 'review', note: 'Checked the delivery', revision: 0 };
   assert.equal((await request('admin/case', 'client', note)).status, 403);
   assert.equal((await request('admin/case', 'admin', note, { Origin: 'https://foreign.test' })).status, 403);
   assert.equal((await request('admin/case', 'admin', note)).status, 200);
   assert.equal((await request('admin/case', 'admin', note)).status, 409);
-  const workerView = await request('workspace', 'worker');
-  assert.equal(workerView.body.projects.find(item => item.id === 1).adminReview.history[0].note, 'Please add the chat log');
-  assert.equal(workerView.body.mockWallet, undefined);
-
-  // MOCK projects can no longer be settled; FESC decisions need a verified chain transaction.
-  assert.equal((await request('admin/case', 'admin', { projectId: 2, action: 'release', note: 'Legacy', revision: 0 })).status, 409);
-  const decision = await request('admin/case', 'admin', { projectId: 1, action: 'release', note: 'Release', revision: 1, evidenceCount: '0' });
-  assert.notEqual(decision.status, 200);
-  assert.equal(JSON.parse(db.prepare('SELECT data FROM projects WHERE id = 1').get().data).status, 'Disputed');
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n, 0);
+  const decision = { projectId: 1, action: 'release', note: 'Release accepted milestone and refund future work', revision: 1 };
+  const resolved = await request('admin/case', 'admin', decision);
+  assert.equal(resolved.status, 200);
+  assert.equal(resolved.body.project.status, 'Completed');
+  assert.equal(resolved.body.project.paid, 40);
+  assert.equal(resolved.body.project.adminReview.history.length, 2);
+  assert.equal(resolved.body.project.adminReview.status, 'resolved');
+  assert.equal(db.prepare('SELECT cents FROM mock_balances WHERE user_id = ?').get('worker').cents, 4000);
+  assert.equal(db.prepare('SELECT cents FROM mock_balances WHERE user_id = ?').get('client').cents, 6000);
+  assert.equal((await request('admin/case', 'admin', { ...decision, revision: 2 })).status, 409);
+  assert.equal((await request('admin/case', 'admin', { ...note, revision: 2 })).status, 409);
+  const closed = await request('admin/overview', 'admin');
+  assert.equal(closed.body.disputes.length, 0);
+  assert.equal(closed.body.resolvedDisputes[0].adminReview.status, 'resolved');
+  assert.equal(closed.body.resolvedDisputes[0].adminReview.history.length, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n, 2);
   db.prepare('DELETE FROM sessions WHERE user_id = ?').run('admin');
   assert.equal((await request('admin/case?projectId=1', 'admin')).status, 401);
 });

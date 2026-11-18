@@ -45,8 +45,7 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
     accounts: { arbitrator: wallets.admin.account.address },
   }));
   const filename = join(root, 'app.sqlite');
-  const notices = [];
-  service = createApi(filename, root, { adminEmails: 'admin@example.test', sendNotice: async message => { notices.push(message); } });
+  service = createApi(filename, root, { adminEmails: 'admin@example.test' });
   db = new DatabaseSync(filename);
   const tokens = { client: 'a'.repeat(64), worker: 'b'.repeat(64), admin: 'c'.repeat(64) };
   for (const id of Object.keys(wallets)) {
@@ -71,12 +70,6 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
     assert.equal(response.status, expected, JSON.stringify(body)); return body;
   }
   const state = id => request('projects/fesc', id, { projectId: 1 });
-  async function upload(id, name, bytes, expected = 201) {
-    const response = await fetch(`${origin}/api/projects/evidence?projectId=1&name=${encodeURIComponent(name)}`, { method: 'POST',
-      headers: { Cookie: `escrow_session=${tokens[id]}`, Origin: origin, 'Content-Type': 'application/octet-stream' }, body: bytes });
-    const body = await response.json();
-    assert.equal(response.status, expected, JSON.stringify(body)); return body.evidence;
-  }
   async function execute(action, id, extra = {}) {
     const tx = await request('projects/fesc', id, { projectId: 1, action, ...extra });
     return confirm(await wallets[id].sendTransaction({ to: tx.to, data: tx.data }));
@@ -88,29 +81,10 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
     preview: { name: 'preview.pdf', data: Buffer.from('%PDF-test').toString('base64') } });
   await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
   assert.equal((await state('client')).canDispute, true);
-  const complaint = { milestoneId: 1, reason: 0, note: 'The delivery needs arbitration' };
-  await request('projects/fesc', 'client', { projectId: 1, action: 'dispute', ...complaint }, 400);
-  await request('projects/fesc', 'client', { projectId: 1, action: 'dispute', ...complaint, reason: 2, links: ['https://example.com/a'] }, 409);
-  await upload('client', 'fake.png', Buffer.from('not a png'), 400);
-  await upload('client', 'notes.exe', Buffer.from('MZ'), 400);
-  const screenshot = await upload('client', 'screenshot.png', Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(64)]));
-  assert.equal(screenshot.sha256, createHash('sha256').update(Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(64)])).digest('hex'));
-  const workerView = await fetch(`${origin}/api/projects/1/evidence/${screenshot.id}`, { headers: { Cookie: `escrow_session=${tokens.worker}` } });
-  assert.equal(workerView.status, 404, 'unsubmitted evidence stays private to the uploader');
-  await execute('dispute', 'client', { ...complaint, evidenceIds: [screenshot.id], links: ['https://example.com/spec'] });
+  await execute('dispute', 'client', { milestoneId: 1, note: 'The delivery needs arbitration' });
   assert.equal((await state('client')).projectStatus, 'Disputed');
   const info = await request('admin/case?projectId=1', 'admin');
   assert.equal(info.project.disputeReason, 'The delivery needs arbitration');
-  assert.equal(info.project.dispute.label, 'Bản bàn giao không đúng yêu cầu');
-  assert.equal(info.project.dispute.by, 'Client');
-  assert.deepEqual(info.project.dispute.evidence.map(item => item.kind).sort(), ['file', 'link']);
-  assert.deepEqual(info.chain.modes, ['terminate']);
-  const evidenceUrl = `${origin}/api/admin/projects/1/evidence/${screenshot.id}`;
-  assert.equal((await fetch(evidenceUrl, { headers: { Cookie: `escrow_session=${tokens.client}` } })).status, 403);
-  const shown = await fetch(evidenceUrl + '?inline=1', { headers: { Cookie: `escrow_session=${tokens.admin}` } });
-  assert.equal(shown.status, 200);
-  assert.match(shown.headers.get('content-disposition'), /^inline/);
-  assert.equal((await fetch(`${origin}/api/projects/1/evidence/${screenshot.id}`, { headers: { Cookie: `escrow_session=${tokens.worker}` } })).status, 200);
   const delivery = info.project.milestones[0].deliveries[0];
   const previewUrl = origin + `/api/admin/projects/1/milestones/1/deliveries/${delivery.id}/preview`;
   assert.equal((await fetch(previewUrl)).status, 401);
@@ -134,10 +108,6 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   const completed = await request('admin/case', 'admin', { ...decision, hash: resolution.transactionHash });
   assert.equal(completed.project.paid, 0.1);
   assert.equal(completed.project.status, 'Completed');
-  assert.equal(completed.emailed, 'sent');
-  assert.equal(notices.length, 2);
-  assert.match(notices[0].subject, /Kết quả phân xử dự án #1/);
-  assert.match(notices[0].text, /Giải ngân 100% cho Freelancer/);
   await request('admin/case', 'admin', { ...decision, revision: 1, hash: resolution.transactionHash }, 409);
   assert.equal(await rpc.readContract({ address: escrow, abi, functionName: 'claimable', args: [wallets.worker.account.address] }), parseUnits('0.1', 18));
   assert.equal((await state('client')).step, 'withdraw');

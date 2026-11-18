@@ -138,7 +138,7 @@ async function initialize() {
     ]);
     assert.ok(tokenCode && tokenCode !== '0x' && factoryCode && factoryCode !== '0x' && vaultCode && vaultCode !== '0x');
     const manifest = {
-      chainId: 31337, projectPayments: 1, escrowPolicy: 2, factoryRevision: 2, instanceKey,
+      chainId: 31337, projectPayments: 1, instanceKey,
       token: token.address, tokenCodeHash: keccak256(tokenCode),
       factory: factory.address, factoryCodeHash: keccak256(factoryCode),
       startBlock: factory.receipt.blockNumber.toString(), startBlockHash: factory.receipt.blockHash,

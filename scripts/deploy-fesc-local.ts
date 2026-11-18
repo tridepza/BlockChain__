@@ -59,8 +59,6 @@ try {
     await writeFile(new URL('local-fesc-deployment.json', output), JSON.stringify({
       chainId: 31337,
       projectPayments: 1,
-      escrowPolicy: 2,
-      factoryRevision: 2,
       instanceKey,
       token: token.address,
       tokenCodeHash: keccak256(tokenCode),

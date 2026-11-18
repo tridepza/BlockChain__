@@ -20,12 +20,9 @@ const password = 'mật-khẩu-test-2026';
 const client = { name: 'Tên trùng', email: 'owner@example.test', password, role: 'Client' };
 const outsider = { ...client, email: 'other@example.test' };
 const worker = { name: 'Freelancer test', email: 'worker@example.test', password, role: 'Freelancer' };
-// Due dates in Vietnam time; the first must be more than 9 days away.
-const vnDay = days => new Date(Date.now() + days * 86_400_000 + 7 * 3_600_000).toISOString().slice(0, 10);
 const input = {
   title: 'Kiểm thử dự án', category: 'Web Development', description: 'Dữ liệu thử nghiệm',
   budget: '0.30', milestones: 'Một, Hai', amounts: '0.10, 0.20',
-  milestoneDues: `${vnDay(20)},${vnDay(30)}`, projectDue: vnDay(30),
 };
 
 let lastTestClock = Date.now();
@@ -532,7 +529,7 @@ test('tài khoản và session được lưu bền vững, cookie cũ bị thu h
   assert.equal((await req('auth/me', { cookie: newCookie })).status, 401);
 });
 
-test('workspace xác minh vai trò, quyền sở hữu và chỉ nhận thao tác FESC hợp lệ', async t => {
+test('workspace xác minh vai trò, quyền sở hữu và trạng thái trên máy chủ', async t => {
   const app = await listen(':memory:');
   t.after(app.close);
   const req = app.request;
@@ -548,36 +545,103 @@ test('workspace xác minh vai trò, quyền sở hữu và chỉ nhận thao tá
   assert.equal((await req('projects', { data: input })).status, 401);
   assert.equal((await req('projects', { data: { ...input, role: 'Client' }, cookie: freelancer })).status, 403);
   assert.equal((await req('projects', { data: { ...input, amounts: '0.10,,0.20' }, cookie: owner })).status, 400);
-  assert.equal((await req('projects', { data: { ...input, currency: 'MOCK' }, cookie: owner })).status, 400);
-  assert.equal((await req('projects', { data: { ...input, milestoneDues: `${vnDay(3)},${vnDay(30)}` }, cookie: owner })).status, 400);
   const created = await req('projects', { data: input, cookie: owner });
   assert.equal(created.status, 201);
-  assert.equal(created.body.project.currency, 'FESC');
-  assert.equal(created.body.data.mockWallet, undefined);
   const projectId = created.body.project.id;
   const action = (cookie, action, fields) => req('projects/action', { cookie, data: { projectId, action, ...fields } });
   const publicList = (await req('projects/public')).body.projects;
   assert.equal(publicList.length, 1);
-  assert.equal(publicList[0].currency, 'FESC');
   assert.equal(publicList[0].ownerId, undefined);
   assert.equal(publicList[0].milestones, undefined);
   assert.deepEqual((await req('workspace', { cookie: other })).body.projects, []);
   assert.equal((await action(other, 'assign', { email: worker.email, ownerId: created.body.project.ownerId })).status, 404);
-  // Money only moves through FESC transactions, so the old MOCK actions are rejected.
-  for (const name of ['fund', 'approve', 'revision', 'dispute', 'requestCancel', 'confirmCancel', 'release']) {
-    assert.equal((await action(owner, name, { milestoneId: 1, note: 'x' })).status, 400, name);
-  }
-  assert.equal((await req('wallet/mock-claim', { data: {}, cookie: owner })).status, 404);
-  assert.equal((await action(owner, 'assign', { email: outsider.email })).status, 400);
+  assert.equal((await action(owner, 'fund')).status, 409);
   assert.equal((await action(owner, 'assign', { email: worker.email })).status, 200);
-  assert.equal((await action(owner, 'assign', { email: worker.email })).status, 409);
   assert.deepEqual((await req('projects/public')).body.projects, []);
-  const assigned = (await req('workspace', { cookie: freelancer })).body.projects[0];
-  assert.equal(assigned.freelancerId, (await req('auth/me', { cookie: freelancer })).body.user.id);
-  assert.equal(assigned.funded, 0);
-  // Delivery uploads wait for the funded FESC contract.
-  assert.equal((await action(freelancer, 'submit', { milestoneId: 1, note: 'Bàn giao sớm' })).status, 409);
-  assert.deepEqual((await req('workspace', { cookie: other })).body, { projects: [], txs: [] });
+  const noFunds = await action(owner, 'fund');
+  assert.equal(noFunds.status, 409);
+  assert.match(noFunds.body.error, /Số dư MOCK không đủ/);
+  assert.equal((await req('workspace', { cookie: owner })).body.projects[0].funded, 0);
+  const claim = cookie => req('wallet/mock-claim', { data: { cents: 99_000_000 }, cookie });
+  assert.equal((await claim(freelancer)).status, 403);
+  const claimed = await Promise.all([claim(owner), claim(owner)]);
+  assert.deepEqual(claimed.map(result => result.status).sort(), [200, 409]);
+  assert.equal(claimed.find(result => result.status === 200).body.mockWallet.cents, 100_000);
+  const funding = await Promise.all([action(owner, 'fund'), action(owner, 'fund')]);
+  assert.deepEqual(funding.map(result => result.status).sort(), [200, 409]);
+  assert.equal(funding.find(result => result.status === 200).body.mockWallet.cents, 99_970);
+  assert.equal((await action(freelancer, 'submit', { milestoneId: 2, note: 'Bàn giao sai thứ tự' })).status, 409);
+  const submission = { milestoneId: 1, note: 'Bàn giao hợp lệ' };
+  const first = await action(freelancer, 'submit', submission);
+  assert.equal(first.status, 200);
+  const firstReview = { milestoneId: 1, submissionVersion: first.body.projects[0].milestones[0].submissionVersion };
+  assert.equal(firstReview.submissionVersion, 1);
+  assert.equal((await action(owner, 'cancel')).status, 403);
+  const proposed = await action(owner, 'requestCancel', { note: 'Đề nghị hủy sau khi bàn giao' });
+  assert.equal(proposed.status, 200);
+  assert.equal(proposed.body.projects[0].status, 'Submitted');
+  assert.deepEqual(proposed.body.txs.map(tx => tx.amount), [0.3]);
+  const firstRequest = { cancellationId: proposed.body.projects[0].cancellation.id };
+  assert.equal((await action(owner, 'confirmCancel', firstRequest)).status, 403);
+  assert.equal((await action(other, 'confirmCancel', firstRequest)).status, 404);
+  assert.equal((await action(freelancer, 'requestCancel', { note: 'Ghi đè đề nghị đang mở' })).status, 409);
+  assert.equal((await action(freelancer, 'approve', { milestoneId: 1 })).status, 403);
+  assert.equal((await action(owner, 'dispute', { milestoneId: 1, note: 'Thiếu phiên bản bàn giao' })).status, 409);
+  assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Xem lại yêu cầu' })).status, 200);
+  const second = await action(freelancer, 'submit', submission);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.projects[0].milestones[0].submissionVersion, 2);
+  assert.equal((await action(owner, 'approve', firstReview)).status, 409);
+  assert.equal((await action(owner, 'approve', { milestoneId: 1 })).status, 409);
+  assert.equal((await action(owner, 'revision', { ...firstReview, note: 'Yêu cầu cũ' })).status, 409);
+  assert.equal((await action(owner, 'revision', { milestoneId: 1, submissionVersion: 2, note: 'Yêu cầu sửa lần hai' })).status, 200);
+  assert.equal((await action(freelancer, 'submit', submission)).status, 200);
+  assert.equal((await action(owner, 'revision', { milestoneId: 1, submissionVersion: 3, note: 'Yêu cầu sửa lần ba' })).status, 409);
+  const beforeApproval = (await req('workspace', { cookie: owner })).body;
+  assert.equal(beforeApproval.projects[0].paid, 0);
+  assert.deepEqual(beforeApproval.txs.map(tx => tx.amount), [0.3]);
+  const currentReview = { ...firstReview, submissionVersion: 3 };
+  const approvals = await Promise.all([action(owner, 'approve', currentReview), action(owner, 'approve', currentReview)]);
+  assert.deepEqual(approvals.map(result => result.status).sort(), [200, 409]);
+  assert.equal((await action(freelancer, 'confirmCancel', firstRequest)).status, 409);
+  const expired = await action(freelancer, 'requestCancel', { note: 'Đề nghị hoàn phần còn lại' });
+  assert.equal(expired.status, 200);
+  const expiredRequest = expired.body.projects[0].cancellation;
+  t.mock.timers.enable({ apis: ['Date'], now: expiredRequest.expiresAt + 1 });
+  assert.equal((await action(owner, 'confirmCancel', { cancellationId: expiredRequest.id })).status, 409);
+  const renewed = await action(freelancer, 'requestCancel', { note: 'Đề nghị mới' });
+  assert.equal(renewed.status, 200);
+  const confirmation = { cancellationId: renewed.body.projects[0].cancellation.id };
+  assert.notEqual(confirmation.cancellationId, expiredRequest.id);
+  assert.equal((await action(owner, 'confirmCancel', { cancellationId: expiredRequest.id })).status, 409);
+  const confirmations = await Promise.all([
+    action(owner, 'confirmCancel', confirmation),
+    action(owner, 'confirmCancel', confirmation),
+  ]);
+  assert.deepEqual(confirmations.map(result => result.status).sort(), [200, 409]);
+  const cancelled = confirmations.find(result => result.status === 200);
+  assert.equal(cancelled.body.projects[0].status, 'Cancelled');
+  assert.equal(cancelled.body.projects[0].paid, 0.1);
+  assert.equal(cancelled.body.projects[0].cancellation, undefined);
+  assert.equal(cancelled.body.mockWallet.cents, 99_990);
+  assert.equal((await req('workspace', { cookie: freelancer })).body.mockWallet.cents, 10);
+  assert.deepEqual(cancelled.body.txs.map(tx => tx.amount), [0.2, 0.1, 0.3]);
+  assert.ok(cancelled.body.txs.every(tx => tx.status === 'Mô phỏng' && tx.id.startsWith('DEMO-')));
+  assert.deepEqual((await req('workspace', { cookie: other })).body, {
+    projects: [], txs: [], mockWallet: { cents: 0, claimed: false },
+  });
+
+  const projects = [];
+  for (const title of ['Ký quỹ A', 'Ký quỹ B']) {
+    const result = await req('projects', { cookie: owner, data: { ...input, title, budget: '600', amounts: '300,300' } });
+    assert.equal(result.status, 201);
+    const id = result.body.project.id;
+    assert.equal((await action(owner, 'assign', { projectId: id, email: worker.email })).status, 200);
+    projects.push(id);
+  }
+  const simultaneous = await Promise.all(projects.map(id => action(owner, 'fund', { projectId: id })));
+  assert.deepEqual(simultaneous.map(result => result.status).sort(), [200, 409]);
+  assert.equal((await req('workspace', { cookie: owner })).body.mockWallet.cents, 39_990);
 });
 
 test('Vite từ chối DB đặt trong public hoặc thư mục đầu ra và chặn bản SQLite còn sót', async () => {

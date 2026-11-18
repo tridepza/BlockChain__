@@ -24,14 +24,11 @@ try {
   assert.equal(instanceKey, manifest.instanceKey);
   assert.ok(isAddressEqual(await factory.read.token(), manifest.token));
 
-  // Older factories lack these getters; treat a missing getter as revision 1.
-  const readOr1 = (call: Promise<number>) => call.catch(error => {
+  const currentPolicy = await factory.read.LATEST_POLICY_VERSION().catch(error => {
     if (error.walk?.((cause: Error) => ['ContractFunctionZeroDataError', 'ContractFunctionRevertedError'].includes(cause.name))) return 1;
     throw error;
   });
-  const currentPolicy = await readOr1(factory.read.LATEST_POLICY_VERSION());
-  const currentRevision = await readOr1(factory.read.FACTORY_REVISION());
-  if (currentPolicy >= 2 && currentRevision >= 2) {
+  if (currentPolicy >= 2) {
     console.log('Factory hiện tại đã hỗ trợ thời hạn mới.');
   } else {
     const nextKey = toHex(randomBytes(32));
@@ -43,14 +40,13 @@ try {
     assert.ok(isAddressEqual(await contract.read.token(), manifest.token));
     assert.equal(await contract.read.instanceKey(), nextKey);
     assert.equal(await contract.read.LATEST_POLICY_VERSION(), 2);
-    assert.equal(await contract.read.FACTORY_REVISION(), 2);
     const code = await rpc.getCode({ address: contract.address });
     assert.ok(code);
     assert.equal(await readFile(path, 'utf8'), original, 'Manifest đã đổi trong lúc chạy.');
     const staged = new URL(`./local-fesc-deployment.${nextKey.slice(2)}.tmp`, path);
     // Keep the original block anchor so token history still includes transfers before the upgrade.
     await writeFile(staged, JSON.stringify({ ...manifest, instanceKey: nextKey,
-      factory: contract.address, factoryCodeHash: keccak256(code), escrowPolicy: 2, factoryRevision: 2,
+      factory: contract.address, factoryCodeHash: keccak256(code),
       factoryCreationTxHash: receipt.transactionHash }, null, 2) + '\n', { flag: 'wx' });
     await rename(staged, path);
     console.log(`EscrowFactory mới ${contract.address}. Đã giữ token FESC, vault và các hợp đồng dự án cũ.`);

@@ -11,8 +11,9 @@ type Mode = 'login' | 'register' | 'forgot' | 'projects';
 type Challenge = { challengeId: string; email: string; purpose: 'register' | 'login' | 'reset'; expiresAt: number; resendAt: number };
 const resetOtpMessage = 'Nếu email này đã đăng ký, mã OTP sẽ được gửi tới hộp thư của bạn. Kiểm tra cả thư rác.';
 
-export default function Auth({ onLogin, initialMessage }: {
+export default function Auth({ onLogin, onDemo, initialMessage }: {
   onLogin: (user: Account) => void;
+  onDemo: () => void;
   initialMessage: string;
 }) {
   const [mode, setMode] = useState<Mode>('login');
@@ -196,6 +197,7 @@ export default function Auth({ onLogin, initialMessage }: {
               <div className="auth-switch">{register ? 'Đã có tài khoản?' : 'Chưa có tài khoản?'} <button className="text-btn" disabled={busy} onClick={() => switchMode(register ? 'login' : 'register')}>{register ? 'Đăng nhập' : 'Đăng ký'}</button></div>
               <div className="auth-links">
                 <button className="secondary" disabled={busy} onClick={browseProjects}>Xem dự án công khai</button>
+                <button className="secondary" disabled={busy} onClick={onDemo}>Thử bản demo</button>
               </div>
               <a href="/explorer" className="auth-explorer">Giao dịch FESC công khai</a>
             </>

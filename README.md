@@ -56,7 +56,7 @@ npm.cmd run db:recover -- postgres
 npm.cmd run db:recover -- postgres --apply
 ```
 
-Không có `--apply` thì chỉ kiểm tra. Lệnh khôi phục sao lưu MongoDB vào `.data/backups` trước khi ghi, giữ nguồn cũ, đối chiếu tài khoản theo email, giữ mật khẩu hiện có ở đích, chuyển dự án, giao dịch và tệp bàn giao, đồng thời tránh nhập lại dự án đã khôi phục. Các tham chiếu điều khoản FESC cũ được giữ khi ID dự án thay đổi. Ví đã thuộc tài khoản khác không bị chuyển chủ; số liên kết xung đột được báo sau khi nhập. Dự án MOCK cũ không được khôi phục.
+Không có `--apply` thì chỉ kiểm tra. Lệnh khôi phục sao lưu MongoDB vào `.data/backups` trước khi ghi, giữ nguồn cũ, đối chiếu tài khoản theo email, giữ mật khẩu hiện có ở đích, chuyển dự án, giao dịch và tệp bàn giao, đồng thời tránh nhập lại dự án đã khôi phục. Các tham chiếu điều khoản FESC cũ được giữ khi ID dự án thay đổi. Ví đã thuộc tài khoản khác không bị chuyển chủ; số liên kết xung đột được báo sau khi nhập. Số dư MOCK chỉ được nhập cho tài khoản mới để tránh cộng lặp vào tài khoản đã có.
 
 Để chủ động đổi database, chạy `npm.cmd run db:select -- <mongodb|postgres|sqlite>` sau khi chuẩn bị database đích và khởi động lại website. Chuyển database không tự chuyển dữ liệu.
 
@@ -159,14 +159,12 @@ Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong 
 
 ## Thử các luồng
 
-- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt để giữ hai phiên và hai tài khoản MetaMask riêng. Client tạo dự án theo từng giai đoạn (tên, số FESC, hạn bàn giao); hạn toàn dự án là hạn của giai đoạn cuối. Hạn giai đoạn đầu cần cách hiện tại hơn 9 ngày để đủ 48 giờ ký quỹ và 7 ngày bắt đầu. Mọi giao dịch dùng **FESC** trên Hardhat Local; chế độ MOCK và bản demo đã được gỡ bỏ.
-- **Thời hạn và gia hạn.** Client có **5 ngày** nghiệm thu mỗi bản bàn giao. Client gia hạn một giai đoạn hoặc toàn dự án bằng MetaMask; Freelancer gửi yêu cầu gia hạn để Client chấp nhận hoặc từ chối.
-- **Khiếu nại.** Trong mục Ký quỹ FESC, bấm **Khiếu nại giai đoạn này**. Client chọn: bản bàn giao không đúng yêu cầu, quá hạn thời gian dự án (có thể yêu cầu chấm dứt hợp đồng) hoặc lý do khác. Freelancer chọn: Client quá hạn nghiệm thu 5 ngày hoặc lý do khác. Mọi khiếu nại cần ít nhất một bằng chứng: ảnh, tệp tối đa 100MB hoặc link. Tệp bằng chứng lưu ở `.data/evidence` trên máy chạy web; hãy sao lưu thư mục này cùng database.
-- **Phân xử.** Admin đọc hồ sơ, phản hồi cho hai bên, rồi quyết định cho riêng giai đoạn bị khiếu nại: giải ngân 100% cho Freelancer, chia đều 50/50 hoặc hoàn 100% cho Client, kèm tiếp tục giai đoạn sau hoặc chấm dứt hợp đồng. Kết quả được gửi Gmail cho hai bên. Xem [docs/admin.md](docs/admin.md).
+- **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt để giữ hai phiên và hai tài khoản MetaMask riêng. Client tạo dự án, chọn Freelancer qua email đã đăng ký và chọn đơn vị ngân sách. Mặc định là **FESC** trên Hardhat Local.
+- **Bản demo.** Chọn **Thử bản demo** ở trang đăng nhập để đổi giữa Client, Freelancer và Arbitrator trên dữ liệu mẫu. Milestone 2 của dự án website đã có bàn giao để thử nhánh tranh chấp và phân xử. Dữ liệu demo lưu riêng trong trình duyệt. Xóa hai khóa `fe-projects` và `fe-txs` để trở về dữ liệu mẫu.
 
-Sau khi cập nhật mã nguồn, chạy `npm.cmd run chain:upgrade:fesc-factory` một lần khi node Hardhat đang chạy để dự án FESC mới dùng quy tắc thời hạn, gia hạn và phân xử mới. Token, ví và dự án cũ được giữ nguyên; dự án tạo trước khi nâng cấp vẫn theo quy tắc cũ.
+Dự án dùng **MOCK** có số dư mô phỏng riêng. Client có thể nhận ngân sách 1.000 MOCK một lần ở **Ví & giao dịch**. Luồng MOCK hỗ trợ yêu cầu sửa và đề nghị hủy có xác nhận trong 72 giờ. Bạn có thể thử phân xử trong bản demo trình duyệt.
 
-Để xóa dữ liệu MOCK cũ khỏi MongoDB, chạy `npm.cmd run db:purge-mock` để xem danh sách, rồi `npm.cmd run db:purge-mock -- --apply` để sao lưu toàn bộ database vào `.data/backups` và xóa dự án, giao dịch, tệp bàn giao và số dư MOCK.
+Khi gửi bàn giao, Freelancer đính kèm bản xem trước PDF, PNG hoặc JPEG (tối đa 2 MiB) và có thể thêm bản gốc thử ZIP, PDF, PNG, JPEG hoặc TXT (tối đa 10 MiB). Client có thể tải bản xem trước và chỉ tải được bản gốc của phiên bản đã giải ngân. Nếu dùng MongoDB hoặc PostgreSQL, chạy `db:migrate` để tạo nơi lưu tệp.
 
 ## Chạy hợp đồng trên Hardhat local
 
