@@ -14,7 +14,7 @@ const labels = {
   start: 'Bắt đầu milestone',
   submit: 'Xác nhận bàn giao trong MetaMask',
   approve: 'Nghiệm thu & giải ngân FESC',
-  dispute: 'Mở tranh chấp FESC',
+  dispute: 'Gửi khiếu nại FESC',
   withdraw: 'Rút FESC được phân xử về ví',
 };
 type Action = keyof typeof labels;
@@ -32,6 +32,8 @@ type FescStatus = {
   milestoneId?: number;
   submissionVersion?: number;
   canDispute?: boolean;
+  reviewDueAt?: number;
+  workDueAt?: number;
 };
 
 export default function ProjectFesc({ project, accountId, onWallet, onDelivery, onChanged }: {
@@ -50,12 +52,13 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
   const [submitted, setSubmitted] = useState('');
   const [reason, setReason] = useState('');
   const { id, freelancerId, paid, status: projectStatus } = project;
+  const trackDeadline = status?.workDueAt !== undefined || status?.reviewDueAt !== undefined;
 
   useEffect(() => {
     if (busy) return;
     let active = true;
-    async function load() {
-      setLoading(true);
+    async function load(showLoading: boolean) {
+      if (showLoading) setLoading(true);
       try {
         const next = await api<FescStatus>('projects/fesc', { projectId: id }, accountId);
         if (!active) return;
@@ -65,12 +68,13 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
       } catch (reason) {
         if (active) { setStatus(null); setReadError(errorMessage(reason)); }
       } finally {
-        if (active) setLoading(false);
+        if (active && showLoading) setLoading(false);
       }
     }
-    void load();
-    return () => { active = false; };
-  }, [id, freelancerId, accountId, projectStatus, paid, busy, onChanged]);
+    void load(true);
+    const timer = trackDeadline ? window.setInterval(() => void load(false), 15_000) : undefined;
+    return () => { active = false; window.clearInterval(timer); };
+  }, [id, freelancerId, accountId, projectStatus, paid, busy, onChanged, trackDeadline]);
 
   async function execute(action: Action) {
     setBusy(true);
@@ -117,6 +121,7 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
   const correctMilestone = !!milestone && milestone.id === status?.milestoneId;
   const readyToReview = correctMilestone && milestone.status === 'Submitted' &&
     getSubmissionVersion(milestone) === status?.submissionVersion;
+  const formatDeadline = (value: number) => new Date(value).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
   return <section className="panel fesc-project" aria-labelledby="fesc-title">
     <div className="panel-head"><h2 id="fesc-title">Ký quỹ FESC</h2>
       <button type="button" className="secondary small" disabled={busy || loading}
@@ -133,6 +138,8 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
         {status.escrow && <p>Escrow <code>{status.escrow}</code></p>}
       </details>}
       <p className="hint" role="status">{status.message}</p>
+      {status.workDueAt !== undefined && <p className="hint">Hạn bàn giao trên blockchain · {formatDeadline(status.workDueAt)}</p>}
+      {status.reviewDueAt !== undefined && <p className="hint">Hạn nghiệm thu trên blockchain · {formatDeadline(status.reviewDueAt)}</p>}
       {action && status.gas === '0' && <p className="hint">Ví cần ETH thử để trả phí gas.</p>}
     </>}
     {loading && <p className="hint" role="status">Đang đọc trạng thái FESC…</p>}
@@ -145,10 +152,10 @@ export default function ProjectFesc({ project, accountId, onWallet, onDelivery, 
     {action && <button className="primary" type="button" disabled={busy || loading || status?.gas === '0' ||
       ((action === 'submit' || action === 'approve') && !readyToReview)}
       onClick={() => void execute(action)}>{labels[action]}</button>}
-    {status?.canDispute && <div className="fesc-dispute-form"><label>Lý do tranh chấp FESC
+    {status?.canDispute && <div className="fesc-dispute-form"><label>Lý do khiếu nại FESC
       <textarea value={reason} onChange={event => setReason(event.target.value)} minLength={3} maxLength={2000} disabled={busy}/></label>
       <button className="secondary" disabled={busy || loading || reason.trim().length < 3}
-        onClick={() => void execute('dispute')}>Mở tranh chấp FESC</button>
+        onClick={() => void execute('dispute')}>{labels.dispute}</button>
     </div>}
   </section>;
 }

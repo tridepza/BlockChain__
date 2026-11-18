@@ -22,12 +22,16 @@ Dữ liệu truy cập được lưu tại `.data/admin-analytics.sqlite` (kèm 
 
 ## Quản lý tranh chấp
 
+Client có thể gửi khiếu nại về bản đã nộp hoặc khi Freelancer quá hạn bàn giao. Với MOCK và hợp đồng FESC chính sách 2, Freelancer có thể gửi khiếu nại ngay sau 5 ngày kể từ lần nộp hiện hành nếu Client chưa nghiệm thu. Nghiệm thu muộn vẫn được chấp nhận nếu khiếu nại chưa mở. Hạn ngày nhập lúc tạo dự án kết thúc lúc 23:59:59 giờ Việt Nam. Các hạn mốc tăng dần và nằm trong hạn toàn dự án. Hạn này giới hạn bàn giao, còn 5 ngày nghiệm thu tính riêng từ lúc nộp.
+
+Đối với mạng local đã có factory cũ, chạy `npm.cmd run chain:upgrade:fesc-factory` khi node đang chạy để tạo factory hỗ trợ chính sách 2 trên cùng token. Hợp đồng đã tạo giữ nguyên điều khoản và thời hạn trên blockchain, bao gồm 72 giờ nghiệm thu của FESC chính sách 1. Hướng dẫn thiết kế giai đoạn 3 mô tả chính sách 1 với 72 giờ và có thể nới hạn mốc sau. Chính sách 2 giữ hạn bàn giao đã nhập.
+
 Mở hồ sơ để xem nội dung dự án, lý do, milestone, mô tả bản bàn giao và lịch sử xử lý. Ghi chú xem xét không thay đổi số tiền. Quyết định cần lý do, được xem lại trước khi xác nhận, và được lưu cùng tài khoản thực hiện, thời điểm, phiên bản hồ sơ và mã giao dịch nếu có. Hồ sơ đã phân xử vẫn được liệt kê để tra lại.
 
 Admin không được phân xử dự án mà chính tài khoản đó là Client hoặc Freelancer. Hồ sơ thay đổi khi đang mở sẽ yêu cầu tải lại. Các API workspace, tệp và explorer vẫn giữ phân quyền riêng; quyền admin không được gửi từ trình duyệt để bỏ qua kiểm tra server.
 
-- **MOCK:** Client có thể mở tranh chấp khi đang nghiệm thu bản bàn giao. Admin chọn giải ngân milestone đang tranh chấp cho Freelancer hoặc hoàn tiền cho Client. Milestone chưa thực hiện còn lại được hoàn cho Client. Ghi kết quả, cộng số dư và ghi giao dịch trong cùng transaction database, không giải ngân lại khi gửi lặp.
-- **FESC:** Client mở tranh chấp bản bàn giao bằng MetaMask; Freelancer có thể mở khi quá hạn nghiệm thu. Trạng thái chỉ được ghi nhận khi đọc được trạng thái tranh chấp trên contract. Quyết định phải ký bằng ví `arbitrator` đã cố định trong hợp đồng, không phải bất kỳ ví nào của tài khoản admin. Trang không lưu private key hoặc tự ký. Server kiểm tra đúng deployment, điều khoản, số bằng chứng hiện hành, receipt thành công, block, người ký, nội dung và các sự kiện phân bổ trước khi ghi kết quả.
+- **MOCK:** Admin chọn giải ngân milestone đang tranh chấp cho Freelancer hoặc hoàn tiền cho Client. Milestone chưa thực hiện còn lại được hoàn cho Client. Ghi kết quả, cộng số dư và ghi giao dịch trong cùng transaction database, không giải ngân lại khi gửi lặp.
+- **FESC:** Hai bên ký khiếu nại bằng MetaMask. Server đối chiếu trạng thái tranh chấp và receipt trước khi ghi nhận. Quyết định phải ký bằng ví `arbitrator` đã cố định trong hợp đồng, không phải bất kỳ ví nào của tài khoản admin. Trang không lưu private key hoặc tự ký. Server kiểm tra đúng deployment, điều khoản, số bằng chứng hiện hành, receipt thành công, block, người ký, nội dung và các sự kiện phân bổ trước khi ghi kết quả.
 - Sau phân xử FESC, contract phân bổ **quyền rút**; chưa phải chuyển token vào ví ngay. Client và Freelancer vào dự án, bấm **Rút FESC được phân xử về ví** để nhận phần của mình. Phần milestone tương lai về Client. Số liệu chuyển token chỉ tăng khi các giao dịch chuyển FESC đã xác nhận.
 - Nếu giao dịch phân xử đã gửi nhưng chưa ghi nhận, giữ nguyên quyết định và mã hash, dùng **Kiểm tra và ghi nhận**. Có thể nhập lại hash sau khi tải lại trang; không gửi một giao dịch khác để thay thế kết quả đã xác nhận.
 

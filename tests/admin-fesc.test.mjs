@@ -58,6 +58,11 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
     ownerId: 'client', freelancerId: 'worker', client: 'client', freelancer: 'worker', currency: 'FESC', budget: 0.3,
     funded: 0, paid: 0, status: 'Proposal sent', created: '2026-11-18',
     milestones: [{ id: 1, title: 'First', amount: 0.1, status: 'Pending' }, { id: 2, title: 'Next', amount: 0.2, status: 'Pending' }] };
+  const startingBlock = await rpc.getBlock();
+  const dueAt = days => new Date(Number(startingBlock.timestamp + BigInt(days) * 86400n) * 1000).toISOString();
+  project.dueAt = dueAt(23);
+  project.milestones[0].dueAt = dueAt(12);
+  project.milestones[1].dueAt = dueAt(22);
   db.prepare('INSERT INTO projects VALUES (?, ?)').run(1, JSON.stringify(project));
   server = createServer((req, res) => service.middleware(req, res, () => res.writeHead(404).end()));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -77,14 +82,21 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   await execute('create', 'client'); await execute('accept', 'worker');
   await execute('allow', 'client'); const funding = await execute('fund', 'client');
   await execute('start', 'worker');
+  assert.equal((await state('worker')).workDueAt, Date.parse(project.milestones[0].dueAt));
   await request('projects/delivery', 'worker', { projectId: 1, action: 'submit', milestoneId: 1, note: 'Delivered first milestone',
     preview: { name: 'preview.pdf', data: Buffer.from('%PDF-test').toString('base64') } });
-  await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
+  const submission = await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
+  const submittedAt = (await rpc.getBlock({ blockNumber: submission.blockNumber })).timestamp;
+  const workerReview = await state('worker');
+  assert.equal(workerReview.reviewDueAt, Number(submittedAt + 5n * 86400n) * 1000);
+  assert.equal(workerReview.canDispute, false);
+  await request('projects/fesc', 'worker', { projectId: 1, action: 'dispute', milestoneId: 1, submissionVersion: 1, note: 'Too early' }, 409);
   assert.equal((await state('client')).canDispute, true);
-  await execute('dispute', 'client', { milestoneId: 1, note: 'The delivery needs arbitration' });
+  await execute('dispute', 'client', { milestoneId: 1, submissionVersion: 1, note: 'The delivery needs arbitration' });
   assert.equal((await state('client')).projectStatus, 'Disputed');
   const info = await request('admin/case?projectId=1', 'admin');
   assert.equal(info.project.disputeReason, 'The delivery needs arbitration');
+  assert.equal(info.project.disputeOpenedBy, 'Client');
   const delivery = info.project.milestones[0].deliveries[0];
   const previewUrl = origin + `/api/admin/projects/1/milestones/1/deliveries/${delivery.id}/preview`;
   assert.equal((await fetch(previewUrl)).status, 401);
