@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { getCACertificates } from 'node:tls';
 import { parseEnv } from 'node:util';
 import { MongoClient } from 'mongodb';
-import { integrityPlan } from './integrity.mjs';
+import { integrityPlan, mockPurgePlan } from './integrity.mjs';
 
 class MongoSetupError extends Error {}
 
@@ -82,6 +82,15 @@ export function openMongo(config) {
       deleteEmailChallenges: email => authChallenges.deleteMany({ email }, options),
       getUserById: id => users.findOne({ _id: id }, { ...options, projection: { _id: 1 } }),
       countUsers: () => users.countDocuments({}, options),
+      getAccount: id => users.findOne({ _id: id }, { ...options, projection: { _id: 0, id: 1, name: 1, email: 1, role: 1 } }),
+      async listAccounts() {
+        const [accounts, links] = await Promise.all([
+          users.find({}, { ...options, projection: { _id: 0, id: 1, name: 1, email: 1, role: 1 } }).sort({ name: 1, _id: 1 }).toArray(),
+          walletLinks.find({}, { ...options, projection: { _id: 1, address: 1 } }).toArray(),
+        ]);
+        const addresses = new Map(links.map(link => [link._id, link.address]));
+        return accounts.map(account => ({ ...account, address: addresses.get(account.id) ?? null }));
+      },
       async createUser(user) {
         try {
           await users.insertOne({ ...user, _id: user.id }, options);
@@ -104,21 +113,6 @@ export function openMongo(config) {
       insertSession: (tokenHash, userId, expires) =>
         sessions.insertOne({ _id: tokenHash, userId, expiresAt: new Date(expires) }, options),
       updateUserName: (id, name) => users.updateOne({ _id: id }, { $set: { name } }, options),
-      async getMockBalance(id) {
-        const row = await mockBalances.findOne({ _id: id }, options);
-        return { cents: row?.cents ?? 0, claimed: row?.claimed === true };
-      },
-      async claimMock(id, cents) {
-        await mockBalances.updateOne({ _id: id }, { $setOnInsert: { cents: 0, claimed: false } }, { ...options, upsert: true });
-        const result = await mockBalances.updateOne({ _id: id, claimed: { $ne: true } },
-          { $inc: { cents }, $set: { claimed: true } }, options);
-        return result.modifiedCount === 1;
-      },
-      async debitMock(id, cents) {
-        const result = await mockBalances.updateOne({ _id: id, cents: { $gte: cents } }, { $inc: { cents: -cents } }, options);
-        return result.modifiedCount === 1;
-      },
-      creditMock: (id, cents) => mockBalances.updateOne({ _id: id }, { $inc: { cents } }, { ...options, upsert: true }),
       getWalletLink: userId => walletLinks.findOne({ _id: userId }, { ...options, ...withoutStorageId }),
       getWalletOwner: address => walletLinks.findOne({ address }, options),
       async insertWalletLink(userId, wallet) {
@@ -213,6 +207,20 @@ export function openMongo(config) {
           }
         }
         return { orphanProjects: plan.orphanProjects, counts: plan.counts };
+      }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' }, timeoutMS: 20_000 }));
+    },
+    async purgeMock(backup) {
+      return client.withSession(session => session.withTransaction(async () => {
+        const snapshot = {};
+        for (const collection of collections) snapshot[collection.collectionName] = await collection.find({}, { session }).toArray();
+        const plan = mockPurgePlan(snapshot);
+        if (backup) {
+          await backup(snapshot);
+          for (const [name, ids] of Object.entries(plan.remove)) {
+            if (ids.length) await db.collection(name).deleteMany({ _id: { $in: ids } }, { session });
+          }
+        }
+        return { projects: plan.projects, counts: plan.counts };
       }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' }, timeoutMS: 20_000 }));
     },
     async migrate() {

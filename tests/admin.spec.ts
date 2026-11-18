@@ -74,12 +74,13 @@ test('admin logs in with OTP, selects all periods and reviews a dispute on deskt
   await page.getByLabel('Kỳ thống kê', { exact: true }).selectOption('day');
   await expect(page.getByRole('heading', { name: 'Chi tiết theo ngày' })).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('tab', { name: /Tranh chấp/ }).click();
   await page.getByRole('button', { name: 'Mở hồ sơ', exact: true }).click();
   await expect(page.getByText('Milestone needs independent review', { exact: false })).toBeVisible();
   await page.screenshot({ path: '.local-data/ui-preview/admin-desktop.png', fullPage: true });
-  await page.getByLabel('Ghi chú / lý do quyết định').fill('Đã xem hồ sơ và bằng chứng');
-  await page.getByRole('button', { name: 'Lưu ghi chú xem xét' }).click();
-  await expect(page.getByText(/review: Đã xem hồ sơ và bằng chứng/)).toBeVisible();
+  await page.getByLabel('Phản hồi cho hai bên').fill('Đã xem hồ sơ và bằng chứng');
+  await page.getByRole('button', { name: 'Gửi phản hồi' }).click();
+  await expect(page.getByText('Đã xem hồ sơ và bằng chứng', { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: '.local-data/ui-preview/admin-mobile.png', fullPage: true });

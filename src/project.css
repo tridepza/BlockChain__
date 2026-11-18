@@ -1,0 +1,62 @@
+/* Complaints, evidence, deadlines and extensions inside a FESC project. */
+.fesc-section { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.fesc-section h3, .dispute-record h3, .extension-panel h3 { margin: 0 0 12px; font-size: 16px; }
+.dispute-record h4 { margin: 18px 0 8px; font-size: 14px; }
+
+.deadline-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.deadline-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.deadline-list li.current { border-color: var(--green); background: var(--green-soft); }
+.deadline-list li.late { border-color: #c2410c; background: #fff7ed; }
+.deadline-list b { font-weight: 600; }
+.deadline-list time { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.complaint-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.complaint-form, .extension-form { display: grid; gap: 14px; margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfb; }
+.complaint-form .panel-head { margin: 0; }
+.complaint-form h3 { margin: 0; }
+.complaint-form label, .extension-form label { display: grid; gap: 6px; font-size: 14px; font-weight: 600; }
+.complaint-form textarea, .extension-form textarea, .extension-form select, .extension-form input,
+.evidence-picker input[type="url"] { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); font: inherit; }
+.complaint-form textarea, .extension-form textarea { min-height: 96px; resize: vertical; }
+.complaint-form label.check { display: flex; align-items: flex-start; gap: 10px; font-weight: 500; }
+.complaint-form label.check input { margin-top: 3px; }
+
+.reason-list { display: grid; gap: 8px; }
+.reason-list legend, .evidence-picker legend { margin-bottom: 8px; font-size: 14px; font-weight: 600; }
+.evidence-picker legend small { font-weight: 400; color: var(--muted); }
+.reason { display: flex !important; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; font-weight: 400 !important; cursor: pointer; }
+.reason:has(input:checked) { border-color: var(--green); background: var(--green-soft); }
+.reason input { margin-top: 4px; }
+.reason span { display: grid; gap: 2px; }
+.reason small { color: var(--muted); }
+.reason.unavailable { cursor: not-allowed; opacity: .75; }
+
+.evidence-picker { display: grid; gap: 10px; }
+.file-drop { position: relative; display: grid; gap: 4px; place-items: center; padding: 18px; border: 1px dashed #9fb8a8; border-radius: 10px; background: white; text-align: center; cursor: pointer; }
+.file-drop:focus-within { outline: 2px solid #25805d; outline-offset: 2px; }
+.file-drop span { font-weight: 600; color: var(--green); }
+.file-drop small { color: var(--muted); font-weight: 400; }
+.file-drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.link-row { display: flex; gap: 8px; }
+.link-row input { flex: 1; }
+.evidence-chosen, .evidence-items, .admin-replies { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.evidence-chosen li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--green-soft); font-size: 14px; }
+.evidence-chosen span, .evidence-items li { overflow-wrap: anywhere; }
+.evidence-items li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.evidence-items .muted, .muted { color: var(--muted); }
+
+.dispute-record { margin-top: 18px; padding: 16px; border: 1px solid #f0c9a8; border-radius: 10px; background: #fffaf5; }
+.dispute-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
+.dispute-facts dt { font-size: 12px; color: var(--muted); }
+.dispute-facts dd { margin: 2px 0 0; font-weight: 600; }
+.dispute-note { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.admin-replies li { padding: 10px 12px; border-left: 3px solid var(--green); border-radius: 0 8px 8px 0; background: white; }
+.admin-replies p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.extension-request { padding: 12px 14px; border-radius: 8px; background: #eef6ff; }
+.extension-request p { margin: 0 0 6px; }
+
+@media (max-width: 480px) {
+  .link-row { flex-direction: column; }
+  .complaint-form, .extension-form { padding: 12px; }
+}

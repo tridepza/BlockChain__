@@ -21,7 +21,7 @@ contract Escrow is ReentrancyGuard {
     enum Stage { Pending, InProgress, Submitted, RevisionRequested, Disputed, Finalized, Voided }
     enum Outcome { None, Approved, Refunded, Arbitrated, Settled }
     enum Closure { None, Completed, CancelledBeforeFunding, FundingExpired, CancelledByConsent, StartExpired, Arbitrated, Settled }
-    enum Reason { Delivery, ReviewTimeout, WorkTimeout, CancelDeadlock }
+    enum Reason { Delivery, ReviewTimeout, WorkTimeout, CancelDeadlock, Other }
 
     struct Terms {
         bytes32 projectRef;
@@ -104,6 +104,7 @@ contract Escrow is ReentrancyGuard {
     event Resolved(bytes32 decisionHash, uint256 evidenceCount);
     event Withdrawn(address indexed beneficiary, uint256 amount);
     event MilestonePaid(uint256 indexed milestone, bytes32 evidenceHash, uint256 amount);
+    event DeadlineExtended(uint256 indexed milestone, bool wholeProject, uint64 newDeadline, uint64 delta);
 
     error Unauthorized();
     error InvalidState();
@@ -259,6 +260,10 @@ contract Escrow is ReentrancyGuard {
         } else if (reason == Reason.WorkTimeout) {
             if (msg.sender != client || (item.stage != Stage.InProgress && item.stage != Stage.RevisionRequested) ||
                 block.timestamp <= uint256(item.deadline) + (policyVersion == 2 ? 0 : WINDOW)) revert InvalidState();
+        } else if (reason == Reason.Other) {
+            // Policy 2: either party may complain with evidence while the milestone is open.
+            if (policyVersion != 2 || (item.stage != Stage.InProgress && item.stage != Stage.Submitted &&
+                item.stage != Stage.RevisionRequested)) revert InvalidState();
         } else if (firstCancelExpiry == 0 || block.timestamp <= firstCancelExpiry) {
             revert InvalidState();
         }
@@ -282,6 +287,52 @@ contract Escrow is ReentrancyGuard {
         for (uint256 i = current + 1; i < milestones.length; ++i) allocate(i, 0, Outcome.Refunded);
         emit Resolved(decisionHash, evidenceCount);
         close(Closure.Arbitrated);
+    }
+
+    // Policy 2: arbitrates only the disputed milestone and resumes work on the next one.
+    function resolveAndContinue(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash) external only(arbitrator) {
+        if (policyVersion != 2 || state != State.Disputed) revert InvalidState();
+        if (expectedEvidenceCount != evidenceCount) revert StaleAction();
+        if (decisionHash == bytes32(0)) revert InvalidTerms();
+        allocate(current, toFreelancer, Outcome.Arbitrated);
+        emit Resolved(decisionHash, evidenceCount);
+        ++current;
+        if (current == milestones.length) close(Closure.Arbitrated);
+        else {
+            activate();
+            advance(State.Active);
+        }
+    }
+
+    // Policy 2, Client only. A single milestone pushes later ones only as far as needed to keep due
+    // dates strictly increasing; a whole-project extension moves every open milestone by the same delta.
+    function extendDeadline(uint256 index, uint64 newDeadline, bool wholeProject, uint256 expectedVersion) external only(client) {
+        if (policyVersion != 2 || (state != State.Funded && state != State.Active)) revert InvalidState();
+        if (expectedVersion != version) revert StaleAction();
+        uint256 first = state == State.Active ? current : 0;
+        if (wholeProject) index = milestones.length - 1;
+        if (index < first || index >= milestones.length) revert InvalidState();
+        uint64 previous = milestones[index].baseDeadline;
+        if (newDeadline <= previous || newDeadline <= block.timestamp) revert InvalidTime();
+        uint64 delta = newDeadline - previous;
+        if (wholeProject) {
+            for (uint256 i = first; i < milestones.length; ++i) setDue(i, milestones[i].baseDeadline + delta);
+        } else {
+            setDue(index, newDeadline);
+            for (uint256 i = index + 1; i < milestones.length && milestones[i].baseDeadline <= milestones[i - 1].baseDeadline; ++i) {
+                setDue(i, milestones[i].baseDeadline + delta);
+            }
+        }
+        advance(state);
+        emit DeadlineExtended(index, wholeProject, newDeadline, delta);
+    }
+
+    function setDue(uint256 index, uint64 value) private {
+        Milestone storage item = milestones[index];
+        item.baseDeadline = value;
+        // A submitted milestone keeps its review deadline; open work gets the new due date.
+        if (state == State.Active && index == current &&
+            (item.stage == Stage.InProgress || item.stage == Stage.RevisionRequested)) item.deadline = value;
     }
 
     function proposeCancel(uint256 expectedVersion, bytes32 reasonHash) external participant {
@@ -411,6 +462,8 @@ contract Escrow is ReentrancyGuard {
 
 contract EscrowFactory {
     uint32 public constant LATEST_POLICY_VERSION = 2;
+    // Bumped when policy 2 gains features, so the upgrade script replaces an older policy-2 factory.
+    uint32 public constant FACTORY_REVISION = 2;
     bytes32 private constant TERMS_TAG = keccak256("FreelancerEscrow/Terms/v1");
     IERC20 public immutable token;
     bytes32 public immutable instanceKey;

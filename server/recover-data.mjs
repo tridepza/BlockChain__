@@ -29,7 +29,8 @@ try {
   }
   const sourceId = createHash('sha256').update(source + ':' + identity).digest('hex');
   const accounts = await query('SELECT * FROM users');
-  const projects = (await query('SELECT data FROM projects ORDER BY id')).map(row => JSON.parse(row.data));
+  // MOCK simulation projects are no longer supported; only FESC projects are recovered.
+  const projects = (await query('SELECT data FROM projects ORDER BY id')).map(row => JSON.parse(row.data)).filter(project => project.currency === 'FESC');
   const txs = (await query('SELECT data FROM transactions ORDER BY id')).map(row => JSON.parse(row.data));
   async function optionalTable(table) {
     try { return await query(`SELECT * FROM ${table}`); }
@@ -40,7 +41,6 @@ try {
   }
   const wallets = await optionalTable('wallet_links');
   const files = await optionalTable('delivery_files');
-  const balances = await optionalTable('mock_balances');
   const existing = await target.store.readWorkspace();
   const pending = projects.filter(project => !existing.projects.some(item => item.recoveredFrom?.source === sourceId && item.recoveredFrom.projectId === project.id));
   console.log(`${source}: ${accounts.length} tài khoản, ${projects.length} dự án, ${txs.length} giao dịch. Dự án chưa khôi phục: ${pending.length}.`);
@@ -68,13 +68,6 @@ try {
           const wallet = JSON.parse(row.data);
           if (await writes.getWalletOwner(wallet.address)) counts.walletConflicts++;
           else if (!await writes.insertWalletLink(id, wallet)) throw new Error('Ví thay đổi trong lúc khôi phục. Hãy chạy lại.');
-        }
-      }
-      for (const row of balances) {
-        const id = userMap.get(row.user_id);
-        if (newUsers.has(id)) {
-          if (Number(row.claimed)) await writes.claimMock(id, 0);
-          if (Number(row.cents)) await writes.creditMock(id, Number(row.cents));
         }
       }
       const projectMap = new Map();

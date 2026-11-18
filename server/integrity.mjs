@@ -35,3 +35,25 @@ export function integrityPlan(snapshot, now = Date.now()) {
   }
   return { remove, orphanProjects, counts: Object.fromEntries(Object.entries(remove).map(([name, ids]) => [name, ids.length])) };
 }
+
+// MOCK simulation data: non-FESC projects with their transactions and delivery files, plus every MOCK balance.
+export function mockPurgePlan(snapshot) {
+  const remove = {};
+  const mark = (collection, row) => (remove[collection] ??= []).push(row._id);
+  const projects = [];
+  const ids = new Set();
+  const files = new Set();
+  for (const project of snapshot.projects ?? []) {
+    if (project.currency === 'FESC') continue;
+    mark('projects', project);
+    ids.add(project.id);
+    projects.push({ id: project.id, title: project.title, status: project.status });
+    for (const milestone of project.milestones ?? []) for (const delivery of milestone.deliveries ?? []) {
+      for (const kind of ['preview', 'original']) if (delivery[kind]) files.add(`${delivery.id}:${kind}`);
+    }
+  }
+  for (const tx of snapshot.transactions ?? []) if (ids.has(tx.projectId) || tx.currency === 'MOCK') mark('transactions', tx);
+  for (const file of snapshot.delivery_files ?? []) if (files.has(file._id)) mark('delivery_files', file);
+  for (const row of snapshot.mock_balances ?? []) mark('mock_balances', row);
+  return { remove, projects, counts: Object.fromEntries(Object.entries(remove).map(([name, list]) => [name, list.length])) };
+}
