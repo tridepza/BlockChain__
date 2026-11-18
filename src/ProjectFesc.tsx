@@ -61,14 +61,12 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
   const [submitted, setSubmitted] = useState('');
   const [version, setVersion] = useState(0);
   const { id, freelancerId, paid, status: projectStatus } = project;
-  // While a work or review deadline is running, poll quietly so complaint options unlock on time.
-  const trackDeadline = !!status?.deadline;
 
   useEffect(() => {
     if (busy) return;
     let active = true;
-    async function load(showLoading = true) {
-      if (showLoading) setLoading(true);
+    async function load() {
+      setLoading(true);
       try {
         const next = await api<FescStatus>('projects/fesc', { projectId: id }, accountId);
         if (!active) return;
@@ -78,13 +76,12 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
       } catch (reason) {
         if (active) { setStatus(null); setReadError(errorMessage(reason)); }
       } finally {
-        if (active && showLoading) setLoading(false);
+        if (active) setLoading(false);
       }
     }
     void load();
-    const timer = trackDeadline ? window.setInterval(() => void load(false), 15_000) : undefined;
-    return () => { active = false; window.clearInterval(timer); };
-  }, [id, freelancerId, accountId, projectStatus, paid, busy, onChanged, version, trackDeadline]);
+    return () => { active = false; };
+  }, [id, freelancerId, accountId, projectStatus, paid, busy, onChanged, version]);
 
   async function execute(action: Action, extra: Record<string, unknown> = {}) {
     setBusy(true);
