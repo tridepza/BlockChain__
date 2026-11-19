@@ -161,6 +161,7 @@ Nếu máy đã cấu hình MongoDB, đặt `$env:ESCROW_DB = 'postgres'` trong 
 
 - **Workspace tài khoản.** Đăng ký một Client và một Freelancer. Dùng hai hồ sơ trình duyệt để giữ hai phiên và hai tài khoản MetaMask riêng. Client tạo dự án theo từng giai đoạn (tên, số FESC, hạn bàn giao); hạn toàn dự án là hạn của giai đoạn cuối. Hạn giai đoạn đầu cần cách hiện tại hơn 9 ngày để đủ 48 giờ ký quỹ và 7 ngày bắt đầu. Mọi giao dịch dùng **FESC** trên Hardhat Local; chế độ MOCK và bản demo đã được gỡ bỏ.
 - **Thời hạn và gia hạn.** Client có **5 ngày** nghiệm thu mỗi bản bàn giao. Client gia hạn một giai đoạn hoặc toàn dự án bằng MetaMask; Freelancer gửi yêu cầu gia hạn để Client chấp nhận hoặc từ chối.
+- **Tệp bàn giao.** Bản xem trước tối đa 2 MB. Bản gốc là tùy chọn, tối đa 10 MB.
 - **Khiếu nại.** Trong mục Ký quỹ FESC, bấm **Khiếu nại giai đoạn này**. Client chọn: bản bàn giao không đúng yêu cầu, quá hạn thời gian dự án (có thể yêu cầu chấm dứt hợp đồng) hoặc lý do khác. Freelancer chọn: Client quá hạn nghiệm thu 5 ngày hoặc lý do khác. Mọi khiếu nại cần ít nhất một bằng chứng: ảnh, tệp tối đa 100MB hoặc link. Tệp bằng chứng lưu ở `.data/evidence` trên máy chạy web; hãy sao lưu thư mục này cùng database.
 - **Phân xử.** Admin đọc hồ sơ, phản hồi cho hai bên, rồi quyết định cho riêng giai đoạn bị khiếu nại: giải ngân 100% cho Freelancer, chia đều 50/50 hoặc hoàn 100% cho Client, kèm tiếp tục giai đoạn sau hoặc chấm dứt hợp đồng. Kết quả được gửi Gmail cho hai bên. Xem [docs/admin.md](docs/admin.md).
 

@@ -311,6 +311,11 @@ test('Client tạo dự án FESC theo từng giai đoạn có hạn, chọn Free
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByLabel('Đơn vị ngân sách')).toHaveCount(0);
     await dialog.getByLabel('Tên dự án').fill(title);
+    const category = dialog.getByLabel('Danh mục', { exact: true });
+    const customCategory = dialog.getByLabel('Tên danh mục riêng (tùy chọn)', { exact: true });
+    await expect(customCategory).toHaveCount(0);
+    await category.selectOption({ label: 'Khác' });
+    await customCategory.fill('Thiết kế tương tác');
     await dialog.getByLabel('Mô tả').fill('Phát triển website theo hai giai đoạn');
     await dialog.getByLabel('Tên giai đoạn').first().fill('Thiết kế, giao diện');
     await expect(dialog.getByLabel('Tên giai đoạn').first()).toHaveValue('Thiết kế  giao diện');
@@ -329,11 +334,13 @@ test('Client tạo dự án FESC theo từng giai đoạn có hạn, chọn Free
     await page.setViewportSize({ width: 1280, height: 900 });
     await dialog.getByRole('button', { name: 'Tạo dự án', exact: true }).click();
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
+    await expect(page.getByText('Thiết kế tương tác · FESC trên Hardhat Local', { exact: true })).toBeVisible();
     await expect(page.getByText(/Hạn toàn dự án:/)).toBeVisible();
     await expect(page.getByRole('list', { name: 'Tiến trình dự án' }).locator('[aria-current="step"]')).toHaveText(/Chọn Freelancer/);
     await guest.goto('/');
     await click(guest, 'Xem dự án công khai');
     await expect(guest.getByRole('heading', { name: title })).toBeVisible();
+    await expect(guest.getByText('Thiết kế tương tác · 100.00 FESC', { exact: true })).toBeVisible();
     await expect(guest.getByText(/100\.00 FESC/)).toBeVisible();
     await perform(page, 'Chọn Freelancer', { label: 'Email của Freelancer', value: workerEmail });
     await expect(page.getByRole('list', { name: 'Tiến trình dự án' }).locator('[aria-current="step"]')).toHaveText(/Tạo & ký quỹ hợp đồng/);

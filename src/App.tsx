@@ -12,7 +12,7 @@ import AdminDashboard from './AdminDashboard';
 import { categoryLabel } from './ui-labels';
 import { api, ApiError, errorMessage } from './api';
 import {
-  canSeePrivate, categories, currentMilestone, deliveryFileLimit, deliveryPreviewLimit, firstDueBufferMs, getSubmissionVersion, money, WorkflowError,
+  bytesPerMB, canSeePrivate, categories, categoryNameLimit, currentMilestone, deliveryFileLimit, deliveryPreviewLimit, firstDueBufferMs, getSubmissionVersion, money, otherCategory, WorkflowError,
 } from './workflow';
 import type { Account, Project, ProjectAction, Tx, WorkspaceData } from './workflow';
 
@@ -26,7 +26,7 @@ const navigation = [
 type Page = typeof navigation[number]['id'] | 'detail';
 type Dialog = { kind: 'create' } | { kind: 'action'; projectId: number; action: ProjectAction };
 async function encodeDeliveryFile(file: File, limit: number) {
-  if (file.size > limit) throw new WorkflowError(413, `Tệp ${file.name} vượt giới hạn ${limit / (1024 * 1024)} MiB.`);
+  if (file.size > limit) throw new WorkflowError(413, `Tệp ${file.name} vượt giới hạn ${limit / bytesPerMB} MB.`);
   const data = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -401,6 +401,7 @@ const newRow = (): MilestoneRow => ({ key: ++rowKey, title: '', amount: '', due:
 // Milestones are entered as rows; the hidden fields keep the API's comma-separated format.
 function CreateProjectFields() {
   const [rows, setRows] = useState<MilestoneRow[]>(() => [newRow()]);
+  const [category, setCategory] = useState(categories[0]);
   const today = vnDate(Date.now());
   const firstMin = vnDate(Date.now() + firstDueBufferMs + 1000);
   const totalCents = rows.reduce((sum, row) => sum + Math.round(Number(row.amount || 0) * 100), 0);
@@ -409,7 +410,12 @@ function CreateProjectFields() {
   const update = (key: number, changes: Partial<MilestoneRow>) => setRows(current => current.map(row => row.key === key ? { ...row, ...changes } : row));
   return <>
     <label>Tên dự án<input name="title" required autoFocus maxLength={120} placeholder="VD: Xây dựng website bán hàng"/></label>
-    <label>Danh mục<select name="category">{categories.map(category => <option key={category} value={category}>{categoryLabel(category)}</option>)}</select></label>
+    <label><span id="project-category-label">Danh mục</span><select aria-labelledby="project-category-label" name="category" value={category} onChange={event => setCategory(event.target.value)}>
+      {categories.map(option => <option key={option} value={option}>{categoryLabel(option)}</option>)}
+    </select></label>
+    {category === otherCategory && <label>Tên danh mục riêng (tùy chọn)
+      <input name="customCategory" maxLength={categoryNameLimit} placeholder="VD: Biên tập video"/>
+    </label>}
     <label>Mô tả<textarea name="description" required maxLength={2000} placeholder="Mô tả phạm vi công việc, yêu cầu nghiệm thu…"/></label>
     <fieldset className="milestone-rows">
       <legend>Các giai đoạn (milestone) <small>· tối đa 10</small></legend>
@@ -470,10 +476,10 @@ function WorkspaceDialog({ dialog, busy, error, onSubmit, onClose }: {
           <p className="hint">Freelancer cần đã đăng ký tài khoản và liên kết ví MetaMask để ký hợp đồng.</p>
         </> : <>
           <label>Mô tả bàn giao<textarea name="note" required autoFocus maxLength={2000}/></label>
-          <label>Bản xem trước (PDF, PNG hoặc JPG, tối đa 2 MiB)
+          <label>Bản xem trước (PDF, PNG hoặc JPG, tối đa {deliveryPreviewLimit / bytesPerMB} MB)
             <input type="file" name="preview" accept=".pdf,.png,.jpg,.jpeg" required/>
           </label>
-          <label>Bản gốc (tùy chọn, tối đa 10 MiB)
+          <label>Bản gốc (tùy chọn, tối đa {deliveryFileLimit / bytesPerMB} MB)
             <input type="file" name="original" accept=".zip,.pdf,.png,.jpg,.jpeg,.txt"/>
           </label>
           <p className="hint">Bản gốc mở cho Client sau khi giải ngân. Lưu tệp xong, xác nhận bàn giao trong MetaMask.</p>

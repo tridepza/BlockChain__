@@ -29,8 +29,9 @@ export type Delivery = {
   original?: { name: string; sha256: string };
 };
 
-export const deliveryFileLimit = 10 * 1024 * 1024;
-export const deliveryPreviewLimit = 2 * 1024 * 1024;
+export const bytesPerMB = 1_000_000;
+export const deliveryFileLimit = 10 * bytesPerMB;
+export const deliveryPreviewLimit = 2 * bytesPerMB;
 
 
 export type Project = {
@@ -92,7 +93,9 @@ export type Tx = {
 
 export type WorkspaceData = { projects: Project[]; txs: Tx[] };
 export const money = (amount: number, currency: Currency = 'FESC') => `${amount.toFixed(2)} ${currency}`;
-export const categories = ['Web Development', 'UI/UX Design', 'Data Analytics', 'Mobile App'];
+export const otherCategory = 'Other';
+export const categoryNameLimit = 40;
+export const categories = ['Web Development', 'UI/UX Design', 'Data Analytics', 'Mobile App', otherCategory];
 
 export class WorkflowError extends Error {
   status: number;
@@ -186,9 +189,17 @@ export function createProject(actor: Account, input: Record<string, unknown>, id
   if (input.currency !== undefined && input.currency !== 'FESC') throw new WorkflowError(400, 'Dự án chỉ dùng FESC.');
   const title = text(input.title, 120);
   const description = text(input.description, 2000);
-  const category = text(input.category, 40);
-  if (!title || !description || !categories.includes(category)) {
+  const selectedCategory = text(input.category, categoryNameLimit);
+  if (!title || !description || !categories.includes(selectedCategory)) {
     throw new WorkflowError(400, 'Nhập tên, mô tả và danh mục hợp lệ.');
+  }
+  let category = selectedCategory;
+  if (selectedCategory === otherCategory && input.customCategory !== undefined) {
+    const custom = input.customCategory;
+    if (typeof custom !== 'string' || custom.trim().length > categoryNameLimit || /[\u0000-\u001f\u007f]/.test(custom)) {
+      throw new WorkflowError(400, `Tên danh mục riêng phải hợp lệ và có tối đa ${categoryNameLimit} ký tự.`);
+    }
+    category = custom.trim() || otherCategory;
   }
   const names = text(input.milestones, 800).split(',').map(name => name.trim());
   const amounts = text(input.amounts, 120).split(',').map(readCents);
