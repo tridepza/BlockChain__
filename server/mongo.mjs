@@ -84,10 +84,9 @@ export function openMongo(config) {
       countUsers: () => users.countDocuments({}, options),
       getAccount: id => users.findOne({ _id: id }, { ...options, projection: { _id: 0, id: 1, name: 1, email: 1, role: 1 } }),
       async listAccounts() {
-        const [accounts, links] = await Promise.all([
-          users.find({}, { ...options, projection: { _id: 0, id: 1, name: 1, email: 1, role: 1 } }).sort({ name: 1, _id: 1 }).toArray(),
-          walletLinks.find({}, { ...options, projection: { _id: 1, address: 1 } }).toArray(),
-        ]);
+        const accounts = await users.find({}, { ...options, projection: { _id: 0, id: 1, name: 1, email: 1, role: 1 } })
+          .sort({ name: 1, _id: 1 }).toArray();
+        const links = await walletLinks.find({}, { ...options, projection: { _id: 1, address: 1 } }).toArray();
         const addresses = new Map(links.map(link => [link._id, link.address]));
         return accounts.map(account => ({ ...account, address: addresses.get(account.id) ?? null }));
       },

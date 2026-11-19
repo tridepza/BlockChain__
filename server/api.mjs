@@ -161,7 +161,9 @@ function createDatabaseApi(store, root, options = {}) {
   async function notifyResolution(projectId, at, origin) {
     const { project, parties } = await store.transaction(async writes => {
       const project = await writes.getProject(projectId);
-      return { project, parties: await Promise.all([project.ownerId, project.freelancerId].filter(Boolean).map(id => writes.getAccount(id))) };
+      const parties = [await writes.getAccount(project.ownerId)];
+      if (project.freelancerId) parties.push(await writes.getAccount(project.freelancerId));
+      return { project, parties };
     });
     const entry = project.adminReview?.history.find(item => item.at === at);
     if (!entry) throw new WorkflowError(404, 'Không tìm thấy quyết định để gửi email.');
