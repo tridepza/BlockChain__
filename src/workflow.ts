@@ -60,7 +60,7 @@ export type Project = {
   evidenceUploads?: EvidenceRecord[];
   extensionRequest?: ExtensionRequest;
   extensionHistory?: (ExtensionRequest & { result: string })[];
-  cancellation?: { hash: string; reason?: 'unfunded' | 'fundingExpired' | 'consent' | 'startExpired' };
+  cancellation?: { hash?: string; reason?: 'beforeContract' | 'unfunded' | 'fundingExpired' | 'consent' | 'startExpired' };
   fesc?: { policyVersion?: number };
 };
 

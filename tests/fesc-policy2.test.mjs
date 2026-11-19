@@ -261,7 +261,7 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(history.total, 2);
   assert.ok(history.transactions.every(tx => tx.currency === 'FESC'));
 
-  // A Client can propose cancellation during a later milestone. Earlier payouts are kept.
+  // Either party can propose cancellation during a later milestone. Earlier payouts are kept.
   const cancelProject = { ...project, id: 2, title: 'Consensual cancellation', dueAt: iso(vnDate(now + 30 * day)),
     milestones: project.milestones.map((item, index) => ({ ...item, dueAt: iso(vnDate(now + (25 + index * 5) * day)) })) };
   db.prepare('INSERT INTO projects VALUES (?, ?)').run(2, JSON.stringify(cancelProject));
@@ -278,25 +278,26 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   await executeCancelProject('approve', 'client', { milestoneId: 1, submissionVersion: 1 });
   const beforeOffer = await cancelState('client');
   assert.equal(beforeOffer.paid, 0.1);
-  await cancelAction('proposeCancel', 'worker', { cancelVersion: beforeOffer.cancellation.version }, 403);
-  await executeCancelProject('proposeCancel', 'client', { cancelVersion: beforeOffer.cancellation.version });
+  assert.equal((await cancelState('worker')).cancellation.phase, 'propose');
+  await executeCancelProject('proposeCancel', 'worker', { cancelVersion: beforeOffer.cancellation.version });
   const clientPending = await cancelState('client');
-  assert.equal(clientPending.cancellation.phase, 'pending');
+  assert.equal(clientPending.cancellation.phase, 'confirm');
+  assert.equal(clientPending.cancellation.proposer, 'Freelancer');
   assert.equal(clientPending.projectStatus, 'In progress');
   const workerOffer = (await cancelState('worker')).cancellation;
-  assert.equal(workerOffer.phase, 'confirm');
+  assert.equal(workerOffer.phase, 'pending');
   assert.equal(workerOffer.amount, '0.2');
-  const offerInput = { cancelNonce: workerOffer.nonce, cancelDigest: workerOffer.digest };
-  await cancelAction('confirmCancel', 'client', offerInput, 403);
-  await cancelAction('confirmCancel', 'worker', { ...offerInput, cancelNonce: '0' }, 409);
+  const offerInput = { cancelNonce: clientPending.cancellation.nonce, cancelDigest: clientPending.cancellation.digest };
+  await cancelAction('confirmCancel', 'worker', offerInput, 403);
+  await cancelAction('confirmCancel', 'client', { ...offerInput, cancelNonce: '0' }, 409);
   await travel(3 * day + 60);
   assert.equal((await cancelState('worker')).disputeOptions.find(option => option.kind === 3).available, true);
-  await cancelAction('confirmCancel', 'worker', offerInput, 409);
+  await cancelAction('confirmCancel', 'client', offerInput, 409);
   const newVersion = (await cancelState('client')).cancellation.version;
-  await executeCancelProject('proposeCancel', 'client', { cancelVersion: newVersion });
-  const replacement = (await cancelState('worker')).cancellation;
+  await executeCancelProject('proposeCancel', 'worker', { cancelVersion: newVersion });
+  const replacement = (await cancelState('client')).cancellation;
   assert.notEqual(replacement.nonce, offerInput.cancelNonce);
-  const cancelReceipt = await executeCancelProject('confirmCancel', 'worker', { cancelNonce: replacement.nonce, cancelDigest: replacement.digest });
+  const cancelReceipt = await executeCancelProject('confirmCancel', 'client', { cancelNonce: replacement.nonce, cancelDigest: replacement.digest });
   const cancelled = await cancelState('client');
   assert.equal(cancelled.projectStatus, 'Cancelled');
   assert.equal(cancelled.claimable, '0.2');
@@ -347,6 +348,14 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   await execute('accept', 'worker', { projectId: 4 });
   await execute('allow', 'client', { projectId: 4 });
   await execute('fund', 'client', { projectId: 4 });
+  const clientOffer = (await expiryState(4, 'client')).cancellation;
+  await execute('proposeCancel', 'client', { projectId: 4, cancelVersion: clientOffer.version });
+  const forFreelancer = (await expiryState(4, 'worker')).cancellation;
+  assert.equal(forFreelancer.phase, 'confirm');
+  assert.equal(forFreelancer.proposer, 'Client');
+  const clientConfirmation = await request('projects/fesc', 'worker', { projectId: 4, action: 'confirmCancel',
+    cancelNonce: forFreelancer.nonce, cancelDigest: forFreelancer.digest });
+  assert.equal(clientConfirmation.from, wallets.worker.account.address);
   await travel(9 * day + 60);
   assert.equal((await expiryState(4, 'worker')).step, 'waiting');
   await request('projects/fesc', 'worker', { projectId: 4, action: 'expireStart' }, 409);
@@ -359,4 +368,52 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   const beforeExpiryWithdrawal = await clientBalance();
   await execute('withdraw', 'client', { projectId: 4 });
   assert.equal(await clientBalance(), beforeExpiryWithdrawal + parseUnits('0.3', 18));
+
+  // A newly assigned Freelancer can send a request without a wallet transaction.
+  seedExpiryProject(5);
+  const early = (id, action, projectId = 5, extra = {}, expected = 200) =>
+    request('projects/fesc', id, { projectId, action, ...extra }, expected);
+  await early('admin', 'proposeCancel', 5, {}, 404);
+  assert.equal((await expiryState(5, 'worker')).cancellation.phase, 'propose');
+  assert.deepEqual(await early('worker', 'proposeCancel'), { updated: true });
+  await early('worker', 'proposeCancel', 5, {}, 409);
+  const beforeCreation = (await expiryState(5, 'client')).cancellation;
+  assert.equal(beforeCreation.phase, 'confirm');
+  assert.equal(beforeCreation.walletRequired, false);
+  await early('worker', 'confirmCancel', 5, { cancelRequestId: beforeCreation.requestId }, 403);
+  await early('client', 'confirmCancel', 5, { cancelRequestId: 'stale' }, 409);
+  assert.deepEqual(await early('client', 'confirmCancel', 5, { cancelRequestId: beforeCreation.requestId }), { updated: true });
+  assert.equal((await expiryState(5, 'worker')).projectStatus, 'Cancelled');
+  assert.deepEqual(fescProject(5).cancellation, { reason: 'beforeContract' });
+  await early('client', 'create', 5, {}, 409);
+
+  // If a creation transaction was already prepared, it can still land. Close that escrow by receipt.
+  seedExpiryProject(6);
+  const quote = await early('client', 'create', 6);
+  await early('worker', 'proposeCancel', 6);
+  const reservedCancel = (await expiryState(6, 'client')).cancellation;
+  assert.ok(reservedCancel.availableAt);
+  await early('client', 'confirmCancel', 6, { cancelRequestId: reservedCancel.requestId }, 409);
+  await confirm(await wallets.client.sendTransaction({ to: quote.to, data: quote.data }));
+  const beforeFunding = (await expiryState(6, 'client')).cancellation;
+  assert.equal(beforeFunding.requestId, reservedCancel.requestId);
+  assert.equal(beforeFunding.walletRequired, true);
+  const earlyReceipt = await execute('confirmCancel', 'client', { projectId: 6, cancelRequestId: beforeFunding.requestId });
+  const closedEarly = await expiryState(6, 'worker');
+  assert.equal(closedEarly.projectStatus, 'Cancelled');
+  assert.equal(closedEarly.claimable, '0');
+  assert.deepEqual(fescProject(6).cancellation, { hash: earlyReceipt.transactionHash, reason: 'unfunded' });
+  assert.equal(fescProject(6).unfundedCancellation, undefined);
+  assert.deepEqual(fescProject(6).milestones.map(item => item.status), ['Voided', 'Voided']);
+
+  seedExpiryProject(7);
+  const expiredQuote = await early('client', 'create', 7);
+  await early('worker', 'proposeCancel', 7);
+  await travel(31 * 60);
+  const expiredOffer = (await expiryState(7, 'client')).cancellation;
+  assert.equal(expiredOffer.availableAt, undefined);
+  assert.deepEqual(await early('client', 'confirmCancel', 7, { cancelRequestId: expiredOffer.requestId }), { updated: true });
+  await assert.rejects(rpc.call({ to: expiredQuote.to, data: expiredQuote.data, account: wallets.client.account.address,
+    blockTag: 'pending' }));
+  assert.equal((await expiryState(7, 'worker')).projectStatus, 'Cancelled');
 });

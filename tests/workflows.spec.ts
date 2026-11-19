@@ -343,6 +343,14 @@ test('Client tạo dự án FESC theo từng giai đoạn có hạn, chọn Free
     await openProject(freelancer, title);
     await expect(freelancer.getByText('Thiết kế  giao diện')).toBeVisible();
     await expect(freelancer.getByText(/Hạn bàn giao ·/).first()).toBeVisible();
+    await click(freelancer, 'Đề nghị hủy hợp đồng');
+    await expect(freelancer.getByText(/Đang chờ Client đồng ý/)).toBeVisible();
+    await click(page, 'Làm mới FESC');
+    await expect(page.getByText(/Freelancer đã đề nghị hủy/)).toBeVisible();
+    await click(page, 'Đồng ý hủy hợp đồng');
+    await expect(page.getByText('Đã hủy', { exact: true })).toBeVisible();
+    await click(freelancer, 'Làm mới FESC');
+    await expect(freelancer.getByText('Đã hủy', { exact: true })).toBeVisible();
   } finally {
     await freelancerContext.close();
     await guestContext.close();

@@ -53,8 +53,13 @@ type FescStatus = {
   claimable?: string;
   cancellation?: {
     phase: 'propose' | 'idle' | 'pending' | 'confirm' | 'other';
-    amount: string;
-    version: string;
+    kind: 'unfunded' | 'funded';
+    proposer?: 'Client' | 'Freelancer';
+    amount?: string;
+    version?: string;
+    requestId?: string;
+    walletRequired?: boolean;
+    availableAt?: string;
     nonce?: string;
     digest?: string;
     expiresAt?: string;
@@ -153,8 +158,8 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
         projectId: id, action, milestoneId: status?.milestoneId, submissionVersion: status?.submissionVersion, ...extra,
       }, accountId);
       if ('updated' in tx) {
-        // Before the contract exists, deadlines are rescheduled without a transaction.
-        setNotice('Đã cập nhật thời hạn.');
+        setNotice(action === 'proposeCancel' ? 'Đã gửi đề nghị hủy. Đang chờ Client xác nhận.'
+          : action === 'confirmCancel' ? 'Đã hủy dự án trước khi tạo hợp đồng.' : 'Đã cập nhật thời hạn.');
         onChanged();
       } else {
         setNotice('Mở MetaMask để kiểm tra và xác nhận giao dịch.');
@@ -200,7 +205,8 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
   const disputed = project.status === 'Disputed';
   const cancelled = status?.projectStatus === 'Cancelled';
   const cancellation = status?.cancellation;
-  const canSignCancellation = !actionsBlocked && !loading && status?.gas !== '0';
+  const cancellationNeedsWallet = cancellation?.kind === 'funded' || cancellation?.walletRequired;
+  const canCancel = !actionsBlocked && !loading && !cancellation?.availableAt && (!cancellationNeedsWallet || status?.gas !== '0');
   const policy2 = status?.policyVersion === 2;
   const changed = () => { setVersion(value => value + 1); onChanged(); };
   return <section className="panel fesc-project" aria-labelledby="fesc-title">
@@ -227,7 +233,7 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
     {loading && <p className="hint" role="status">Đang đọc trạng thái FESC…</p>}
     {notice && <p className="hint" role="status">{notice}</p>}
     {submitted && <p className="hint">Giao dịch <code className="chain-address">{submitted}</code></p>}
-    {project.cancellation && project.cancellation.hash !== submitted &&
+    {project.cancellation?.hash && project.cancellation.hash !== submitted &&
       <p className="hint">Giao dịch đóng hợp đồng <code className="chain-address">{project.cancellation.hash}</code></p>}
     {error && <p className="form-error" role="alert">{error}</p>}
     {readError && <p className="form-error" role="alert">{readError}</p>}
@@ -258,13 +264,19 @@ export default function ProjectFesc({ project, accountId, role, onWallet, onDeli
     {!disputed && cancellation && cancellation.phase !== 'idle' && <div className="fesc-section">
       <h3>Hủy hợp đồng</h3>
       {cancellation.phase === 'other' ? <p className="hint">Hợp đồng đang có một đề nghị khác còn hiệu lực.</p> : <>
-        <p className="hint">Sau khi cả hai bên ký, hợp đồng kết thúc. Client có thể rút phần ký quỹ còn lại là {cancellation.amount} FESC. Các khoản đã giải ngân vẫn thuộc Freelancer.</p>
-        {cancellation.expiresAt && <p className="hint">{cancellation.phase === 'pending' ? 'Đang chờ Freelancer đồng ý' : 'Client đã đề nghị hủy'} · Hạn xác nhận <time dateTime={cancellation.expiresAt}>{vnTime(cancellation.expiresAt)}</time>.</p>}
-        {cancellation.phase === 'propose' && <button className="secondary" type="button" disabled={!canSignCancellation}
+        <p className="hint">{cancellation.kind === 'unfunded'
+          ? 'Freelancer có thể đề nghị hủy trước khi ký quỹ. Dự án chỉ đóng khi Client đồng ý. Chưa có FESC cần hoàn.'
+          : <>Sau khi cả hai bên ký, hợp đồng kết thúc. Client có thể rút phần ký quỹ còn lại là {cancellation.amount} FESC. Các khoản đã giải ngân vẫn thuộc Freelancer.</>}</p>
+        {cancellation.expiresAt && <p className="hint">{cancellation.phase === 'pending'
+          ? `Đang chờ ${role === 'Client' ? 'Freelancer' : 'Client'} đồng ý`
+          : `${cancellation.proposer} đã đề nghị hủy`} · Hạn xác nhận <time dateTime={cancellation.expiresAt}>{vnTime(cancellation.expiresAt)}</time>.</p>}
+        {cancellation.availableAt && <p className="hint">Yêu cầu tạo hợp đồng đang chờ tới <time dateTime={cancellation.availableAt}>{vnTime(cancellation.availableAt)}</time>. Làm mới sau thời điểm này hoặc sau khi hợp đồng được tạo.</p>}
+        {cancellation.phase === 'propose' && <button className="secondary" type="button" disabled={!canCancel}
           onClick={() => void execute('proposeCancel', { cancelVersion: cancellation.version })}>Đề nghị hủy hợp đồng</button>}
-        {cancellation.phase === 'confirm' && <button className="secondary" type="button" disabled={!canSignCancellation}
-          onClick={() => void execute('confirmCancel', { cancelNonce: cancellation.nonce, cancelDigest: cancellation.digest })}>Đồng ý hủy hợp đồng</button>}
-        {status?.gas === '0' && ['propose', 'confirm'].includes(cancellation.phase) && <p className="hint">Ví cần ETH thử để ký giao dịch.</p>}
+        {cancellation.phase === 'confirm' && <button className="secondary" type="button" disabled={!canCancel}
+          onClick={() => void execute('confirmCancel', { cancelNonce: cancellation.nonce, cancelDigest: cancellation.digest,
+            cancelRequestId: cancellation.requestId })}>Đồng ý hủy hợp đồng</button>}
+        {cancellationNeedsWallet && status?.gas === '0' && ['propose', 'confirm'].includes(cancellation.phase) && <p className="hint">Ví cần ETH thử để ký giao dịch.</p>}
       </>}
     </div>}
     {(disputed || project.adminReview) && <DisputeRecordView project={project} accountId={accountId} onChanged={changed}/>}

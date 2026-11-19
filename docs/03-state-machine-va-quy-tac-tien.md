@@ -176,7 +176,9 @@ Các ca cần bổ sung tình huống khi triển khai gồm đúng tại deadli
 
 ### 8.2. Phiên bản và đề nghị đồng thuận
 
-Trong giao diện FESC, Client gửi **Đề nghị hủy hợp đồng** sau khi ký quỹ hoặc khi dự án đang thực hiện. Freelancer được chọn ký **Đồng ý hủy hợp đồng** trong 72 giờ. Smart contract tổng quát cho phép hai bên đổi vai trò đề nghị và xác nhận, còn API của website chỉ chuẩn bị giao dịch hủy theo luồng Client đề nghị, Freelancer xác nhận. Khi mở tranh chấp, đề nghị hủy mất hiệu lực. Website ghi nhận hủy sau khi xác minh receipt trên đúng chain. Khoản chưa phân bổ trở thành khoản chờ rút của Client, kể cả khi các khoản nghiệm thu trước đó đã được chuyển thẳng cho Freelancer bằng FESC.
+Freelancer đã được chọn có thể **Đề nghị hủy hợp đồng** ngay trên website trước khi ký quỹ. Đề nghị có hiệu lực 72 giờ và cần Client đồng ý. Nếu chưa tạo hợp đồng, website đóng dự án mà không cần giao dịch. Nếu có giao dịch tạo hợp đồng đang chờ ký, Client cần chờ giao dịch đó hết hạn hoặc ký đóng hợp đồng sau khi nó được tạo. Với hợp đồng đã tạo và chưa nạp tiền, Client ký `cancelUnfunded` và website xác minh giao dịch đóng. Luồng đề nghị trên website bổ sung cho quy tắc hợp đồng ở bảng trên, nơi quyền ký `cancelUnfunded` thuộc Client.
+
+Sau khi ký quỹ, Client hoặc Freelancer đều có thể ký **Đề nghị hủy hợp đồng**, và bên còn lại ký **Đồng ý hủy hợp đồng** trong 72 giờ. Khi mở tranh chấp, đề nghị hủy mất hiệu lực. Website ghi nhận hủy sau khi xác minh giao dịch đã thành công trên đúng chain. Khoản chưa phân bổ trở thành khoản chờ rút của Client, còn khoản đã giải ngân thuộc Freelancer.
 
 Khi quá hạn chấp nhận hoặc ký quỹ, một trong hai bên có thể đóng hợp đồng chưa nạp. Khi Freelancer chưa bắt đầu đúng hạn sau ký quỹ, Client có thể đóng hợp đồng và rút lại tiền. Yêu cầu tạo hợp đồng giữ nguyên điều khoản trong tối đa 30 phút để bản đang mở trong MetaMask vẫn khớp với dự án. Sau hạn này, nếu factory chưa tạo hợp đồng, Client có thể chỉnh ngày và chuẩn bị lại giao dịch trên cùng dự án. Hạn giai đoạn đầu vẫn phải đủ thời gian chờ ký quỹ và bắt đầu.
 

@@ -4,6 +4,7 @@ import {
 } from 'viem';
 import { hardhat } from 'viem/chains';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { localChain } from '../src/local-chain.ts';
 import { applyProjectAction, cents, currentMilestone, getPendingDelivery, getSubmissionVersion, WorkflowError } from '../src/workflow.ts';
@@ -808,7 +809,8 @@ async function confirmedClosure(project, { escrow, blockNumber, version, closure
     rpc.getBlock({ blockNumber: event.blockNumber }),
   ]);
   const signers = rule.clientOnly ? [client] : [client, freelancer];
-  if (receipt.status !== 'success' || receipt.blockHash !== event.blockHash || block.hash !== receipt.blockHash ||
+  if (receipt.status !== 'success' || receipt.transactionHash !== event.transactionHash || receipt.blockNumber !== event.blockNumber ||
+      receipt.blockHash !== event.blockHash || block.hash !== receipt.blockHash || !block.transactions.includes(event.transactionHash) ||
       tx.blockHash !== receipt.blockHash || !tx.to || !isAddressEqual(tx.to, escrow) ||
       !signers.some(address => isAddressEqual(tx.from, address)) ||
       decodeFunctionData({ abi: escrowAbi, data: tx.input }).functionName !== rule.method) throw invalid();
@@ -834,7 +836,7 @@ async function reconcile(writes, project, chain) {
 
   async function record(input, receipt) {
     const result = applyProjectAction(project, clientActor, input);
-    project = result.project;
+    project = input.action === 'fund' ? { ...result.project, unfundedCancellation: undefined } : result.project;
     await writes.saveProject(project);
     await writes.addTransaction({ ...result.transactions[0], ...receipt, projectId: project.id, project: project.title,
       currency: 'FESC', status: 'Đã xác nhận', publicPayment: {
@@ -890,7 +892,7 @@ async function reconcile(writes, project, chain) {
         funded !== (cancellation.refund ? units(project.budget) : 0n)) {
       throw new WorkflowError(409, 'Các giai đoạn đã xử lý chưa khớp với giao dịch hủy FESC.');
     }
-    project = { ...project, status: 'Cancelled', extensionRequest: undefined,
+    project = { ...project, status: 'Cancelled', extensionRequest: undefined, unfundedCancellation: undefined,
       cancellation: { hash: cancellation.hash, reason: cancellation.reason },
       milestones: project.milestones.map((item, index) => index < cancellation.first ? item :
         { ...item, status: cancellation.refund ? 'Refunded' : 'Voided' }) };
@@ -940,12 +942,46 @@ function disputeOptions(owner, policy, stage, deadline, now) {
   ];
 }
 
+const isCancellationAction = action => action === 'proposeCancel' || action === 'confirmCancel';
+
+function unfundedCancellationStatus(project, owner, { walletRequired = false, availableAt } = {}) {
+  const request = project.unfundedCancellation;
+  const active = request && Date.parse(request.expiresAt) >= Date.now();
+  return { kind: 'unfunded', phase: active ? (owner ? 'confirm' : 'pending') : (owner ? 'idle' : 'propose'),
+    ...(active ? { requestId: request.id, expiresAt: request.expiresAt, proposer: 'Freelancer' } : {}),
+    walletRequired: active && owner && walletRequired, ...(active && owner && availableAt ? { availableAt } : {}) };
+}
+
+async function updateUnfundedCancellation(writes, project, owner, input, cancellation) {
+  if (input.action === 'proposeCancel') {
+    if (owner) throw new WorkflowError(403, 'Yêu cầu hủy trước ký quỹ do Freelancer đã được chọn gửi.');
+    if (cancellation.phase !== 'propose') throw new WorkflowError(409, 'Đã có đề nghị hủy đang chờ Client phản hồi.');
+    const request = { id: randomUUID(), expiresAt: new Date(Date.now() + 3 * Number(day) * 1000).toISOString() };
+    await writes.saveProject({ ...project, unfundedCancellation: request });
+    return { updated: true };
+  }
+  if (!owner) throw new WorkflowError(403, 'Chỉ Client được xác nhận đề nghị hủy này.');
+  if (cancellation.phase !== 'confirm' || input.cancelRequestId !== cancellation.requestId) {
+    throw new WorkflowError(409, 'Đề nghị hủy đã đổi hoặc hết hiệu lực. Hãy làm mới dự án.');
+  }
+  if (cancellation.availableAt) throw new WorkflowError(409, 'Chờ yêu cầu tạo hợp đồng hết hạn hoặc đóng hợp đồng trên Hardhat nếu đã được tạo.');
+  if (cancellation.walletRequired) return undefined;
+  await writes.saveProject({ ...project, status: 'Cancelled', extensionRequest: undefined, unfundedCancellation: undefined,
+    cancellation: { reason: 'beforeContract' },
+    milestones: project.milestones.map(item => ({ ...item, status: 'Voided' })) });
+  return { updated: true };
+}
+
 export async function projectFesc(root, writes, project, actor, input = {}) {
   const { action, milestoneId, submissionVersion, note } = input;
   const owner = actor.role === 'Client' && actor.id === project.ownerId;
   const assignee = actor.role === 'Freelancer' && actor.id === project.freelancerId;
   if (project.currency !== 'FESC' || (!owner && !assignee)) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
   const status = { step: 'waiting', message: '', projectStatus: project.status, paid: project.paid };
+  if (project.status === 'Cancelled' && project.cancellation?.reason === 'beforeContract') {
+    if (action) throw new WorkflowError(409, 'Dự án đã được hủy trước khi tạo hợp đồng.');
+    return { ...status, step: 'complete', message: 'Dự án đã hủy theo đề nghị của Freelancer trước khi tạo hợp đồng FESC.' };
+  }
   if (await belongsToPreviousChain(root, project.fesc?.deployment)) {
     const message = 'Dự án thuộc một blockchain local trước đây. Dữ liệu dự án vẫn được giữ, nhưng số dư và giao dịch cũ không thể xác minh trên blockchain hiện tại. Cần khôi phục blockchain cũ để tiếp tục dự án này.';
     if (action) throw new WorkflowError(409, message);
@@ -954,6 +990,11 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
   if (!project.freelancerId) {
     if (action) throw new WorkflowError(409, 'Chọn Freelancer để tạo hợp đồng FESC.');
     return { ...status, message: 'Chọn Freelancer để tạo hợp đồng FESC.' };
+  }
+
+  if (!project.fesc && project.status === 'Proposal sent' && !project.funded) {
+    status.cancellation = unfundedCancellationStatus(project, owner);
+    if (isCancellationAction(action)) return updateUnfundedCancellation(writes, project, owner, input, status.cancellation);
   }
 
   const clientWallet = await writes.getWalletLink(project.ownerId);
@@ -1032,6 +1073,11 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
   }
 
   if (escrow === zeroAddress) {
+    if (project.status === 'Proposal sent' && !project.funded) {
+      // While a previously issued creation transaction can still land, wait for it to expire or close the resulting escrow.
+      const availableAt = project.fesc && !quoteExpired ? isoTime(project.fesc.createBy) : undefined;
+      status.cancellation = unfundedCancellationStatus(project, owner, { availableAt });
+    }
     // Contract creation needs ≥ 48h funding + 7 days to start before the first agreed due date.
     const tooSoon = policy === 2 && BigInt(fesc.baseDues[0]) <= creationTime + 9n * day;
     if (tooSoon) step('waiting', owner ? 'Hạn mốc đầu cần cách hiện tại hơn 9 ngày để đủ thời gian ký quỹ và bắt đầu. Hãy gia hạn mốc đầu bên dưới.'
@@ -1065,15 +1111,20 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
     if (actionDeadline !== undefined) status.actionDeadline = isoTime(actionDeadline);
     status.canExtend = owner && policy === 2 && !expired && (state === 2 || state === 3);
     status.canRequestExtension = assignee && policy === 2 && !expired && (state === 2 || state === 3);
-    if (!expired && (state === 2 || state === 3)) {
+    if (!funded && state < 2 && project.status === 'Proposal sent') {
+      status.cancellation = unfundedCancellationStatus(project, owner, { walletRequired: true });
+    }
+    if (state === 2 || state === 3) {
       const [[author, expiresAt, offerVersion, digest, settlement], unallocated] = await Promise.all([
         read(escrow, escrowAbi, 'offer'), read(escrow, escrowAbi, 'unallocated'),
       ]);
-      status.cancellation = { phase: owner ? 'propose' : 'idle', amount: formatUnits(unallocated, 18), version: version.toString() };
+      status.cancellation = { kind: 'funded', phase: 'propose', amount: formatUnits(unallocated, 18), version: version.toString() };
       if (author !== zeroAddress && expiresAt >= nextTime && offerVersion === version) {
-        if (!settlement && isAddressEqual(author, client)) {
+        const fromClient = isAddressEqual(author, client);
+        if (!settlement && (fromClient || isAddressEqual(author, freelancer))) {
           const nonce = await read(escrow, escrowAbi, 'offerNonce');
-          Object.assign(status.cancellation, { phase: owner ? 'pending' : 'confirm', nonce: nonce.toString(), digest,
+          Object.assign(status.cancellation, { phase: isAddressEqual(author, wallet.address) ? 'pending' : 'confirm',
+            proposer: fromClient ? 'Client' : 'Freelancer', nonce: nonce.toString(), digest,
             expiresAt: isoTime(expiresAt) });
         } else Object.assign(status.cancellation, { phase: 'other', expiresAt: isoTime(expiresAt) });
       }
@@ -1177,6 +1228,7 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
         fundingExpired: 'Hợp đồng đã đóng vì quá hạn ký quỹ.',
         startExpired: 'Hợp đồng đã đóng vì quá hạn bắt đầu công việc.',
         consent: 'Hợp đồng đã hủy theo đồng thuận của hai bên.',
+        beforeContract: 'Dự án đã hủy trước khi tạo hợp đồng.',
       }[project.cancellation?.reason ?? 'consent'];
       if (claimable > 0n) step('withdraw', `${closed} Ví này có ${formatUnits(claimable, 18)} FESC chờ rút.`, escrowCall('withdraw'));
       else step('complete', closed);
@@ -1187,17 +1239,20 @@ export async function projectFesc(root, writes, project, actor, input = {}) {
   }
 
   if (!action) return status;
-  if (action === 'proposeCancel' || action === 'confirmCancel') {
+  if (isCancellationAction(action)) {
     const cancellation = status.cancellation;
-    if (!cancellation) throw new WorkflowError(409, 'Chỉ hủy hợp đồng đã ký quỹ và không có tranh chấp đang mở.');
-    if (action === 'proposeCancel') {
-      if (!owner) throw new WorkflowError(403, 'Chỉ Client của dự án được đề nghị hủy hợp đồng.');
+    if (!cancellation) throw new WorkflowError(409, 'Trạng thái hiện tại không cho phép đề nghị hoặc xác nhận hủy.');
+    if (cancellation.kind === 'unfunded') {
+      const updated = await updateUnfundedCancellation(writes, project, owner, input, cancellation);
+      if (updated) return updated;
+      call = escrowCall('cancelUnfunded');
+    } else if (action === 'proposeCancel') {
       if (cancellation.phase !== 'propose' || input.cancelVersion !== cancellation.version) {
         throw new WorkflowError(409, 'Đề nghị hoặc trạng thái hợp đồng đã đổi. Hãy làm mới dự án.');
       }
       call = escrowCall('proposeCancel', [chainState.version, hash(['FESC cancellation', termsHash, cancellation.version])]);
     } else {
-      if (!assignee) throw new WorkflowError(403, 'Chỉ Freelancer đã được chọn mới có thể xác nhận hủy.');
+      if (cancellation.phase === 'pending') throw new WorkflowError(403, 'Chỉ bên còn lại được xác nhận đề nghị hủy.');
       if (cancellation.phase !== 'confirm' || input.cancelNonce !== cancellation.nonce || input.cancelDigest !== cancellation.digest) {
         throw new WorkflowError(409, 'Đề nghị hủy đã đổi hoặc hết hiệu lực. Hãy làm mới dự án.');
       }
