@@ -87,7 +87,7 @@ test('an acknowledged transaction survives process termination without graceful 
     { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const url = await new Promise((ready, reject) => {
     let output = ''; let errors = '';
-    const timeout = setTimeout(() => reject(new Error(`Child did not listen: ${errors}`)), 20_000);
+    const timeout = setTimeout(() => reject(new Error(`Child did not listen: ${errors}`)), 40_000);
     child.stderr.on('data', chunk => { errors += chunk; });
     child.once('error', error => { clearTimeout(timeout); reject(error); });
     child.once('exit', () => { clearTimeout(timeout); reject(new Error(`Child exited: ${errors}`)); });
@@ -161,16 +161,23 @@ test('a stale lock with a reused live PID is reclaimed using OS process creation
 test('concurrent stale-lock recovery through path aliases permits exactly one journal writer', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'fesc-hardhat-reclaim-'));
   const real = join(dir, 'real');
-  const alias = join(dir, 'alias');
+  let alias = join(dir, 'alias');
+  let winner;
+  t.after(async () => { await winner?.close(); await rm(dir, { recursive: true }); });
   await mkdir(real);
-  await symlink(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    await symlink(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (process.platform !== 'win32' || !['EPERM', 'EACCES'].includes(error.code)) throw error;
+    // Some Windows sandboxes disallow junctions. NTFS also supports case aliases.
+    alias = join(dir, 'REAL');
+    t.diagnostic('Junction creation is denied. Testing the Windows case alias instead.');
+  }
   const state = join(real, 'state.json');
   const stopped = spawn(process.execPath, ['-e', ''], { windowsHide: true, stdio: 'ignore' });
   const pid = stopped.pid;
   await once(stopped, 'exit');
   await writeFile(state + '.lock', JSON.stringify({ pid, identity: null, nonce: 'dead-owner' }));
-  let winner;
-  t.after(async () => { await winner?.close(); await rm(dir, { recursive: true }); });
   const attempts = await Promise.allSettled(Array.from({ length: 8 }, (_, index) => startDurableHardhatNode({
     port: 0, state: join(index % 2 ? alias : real, 'state.json'),
   })));

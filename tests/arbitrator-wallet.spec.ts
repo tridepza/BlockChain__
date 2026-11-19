@@ -1,12 +1,15 @@
 import { expect, test } from '@playwright/test';
 
-for (const scenario of ['select-correct', 'keep-wrong', 'reject', 'account-changes', 'wrong-block', 'connect-only']) {
+for (const scenario of ['select-correct', 'keep-wrong', 'reject', 'account-changes', 'wrong-block', 'connect-only',
+  'wrong-receipt-hash', 'noncanonical-receipt', 'network-switch-after-send']) {
   test(`ví trọng tài: ${scenario}`, async ({ page }) => {
     await page.goto('/');
     const result = await page.evaluate(async scenario => {
       const expected = '0x1000000000000000000000000000000000000001';
       const wrong = '0x2000000000000000000000000000000000000002';
       const block = '0x' + 'a'.repeat(64);
+      const hash = '0x' + 'b'.repeat(64);
+      const otherHash = '0x' + 'c'.repeat(64);
       const calls: { method: string; params?: unknown[] }[] = [];
       let address = wrong, chain = '0x1';
       const provider = {
@@ -23,9 +26,15 @@ for (const scenario of ['select-correct', 'keep-wrong', 'reject', 'account-chang
           if (method === 'wallet_switchEthereumChain') { chain = '0x7a69'; return null; }
           if (method === 'eth_getBlockByNumber') {
             if (scenario === 'account-changes') address = wrong;
-            return { hash: scenario === 'wrong-block' ? '0x' + 'c'.repeat(64) : block };
+            return { hash: scenario === 'wrong-block' || (scenario === 'noncanonical-receipt' && params?.[0] === '0x2') ? otherHash : block };
           }
-          if (method === 'eth_sendTransaction') return '0x' + 'b'.repeat(64);
+          if (method === 'eth_sendTransaction') {
+            if (scenario === 'network-switch-after-send') chain = '0x1';
+            return hash;
+          }
+          if (method === 'eth_getTransactionReceipt') {
+            return { status: '0x1', transactionHash: scenario === 'wrong-receipt-hash' ? otherHash : hash, blockNumber: '0x2', blockHash: block };
+          }
           throw new Error('Unexpected wallet RPC: ' + method);
         },
       };
@@ -33,22 +42,34 @@ for (const scenario of ['select-correct', 'keep-wrong', 'reject', 'account-chang
       // Import the production transaction flow from the isolated test Vite server.
       const modulePath = '/src/WalletLink.tsx';
       const { sendLocalTransaction, connectLocalTransactionWallet } = await import(modulePath);
-      let error = '', sent = '';
+      let error = '', sent = '', confirmed = false;
       try {
         if (scenario === 'connect-only') await connectLocalTransactionWallet(expected, () => {});
-        else sent = (await sendLocalTransaction({ from: expected, to: wrong, data: '0x1234',
-          deploymentBlock: '0x1', deploymentBlockHash: block }, () => {})).hash;
+        else {
+          const transaction = await sendLocalTransaction({ from: expected, to: wrong, data: '0x1234',
+            deploymentBlock: '0x1', deploymentBlockHash: block }, () => {});
+          sent = transaction.hash;
+          confirmed = await transaction.confirmed();
+        }
       } catch (reason) { error = (reason as Error).message; }
-      return { calls, error, sent, expected, wrong };
+      return { calls, error, sent, expected, wrong, confirmed };
     }, scenario);
     const sends = result.calls.filter(call => call.method === 'eth_sendTransaction');
     expect(result.calls.filter(call => call.method === 'wallet_requestPermissions')).toHaveLength(1);
     if (scenario === 'select-correct') {
       expect(result.error).toBe('');
+      expect(result.confirmed).toBe(true);
       expect(result.sent).toBe('0x' + 'b'.repeat(64));
       expect(sends).toEqual([{ method: 'eth_sendTransaction', params: [{ from: result.expected,
         to: result.wrong, data: '0x1234', value: '0x0' }] }]);
       expect(result.calls).toContainEqual({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x7a69' }] });
+    } else if (['wrong-receipt-hash', 'noncanonical-receipt', 'network-switch-after-send'].includes(scenario)) {
+      expect(sends).toHaveLength(1);
+      expect(result.sent).toBe('0x' + 'b'.repeat(64));
+      expect(result.confirmed).toBe(false);
+      if (scenario === 'wrong-receipt-hash') expect(result.error).toContain('xác nhận giao dịch hợp lệ');
+      else if (scenario === 'noncanonical-receipt') expect(result.error).toContain('block của giao dịch');
+      else expect(result.error).toContain('Chọn lại mạng Hardhat Local');
     } else {
       expect(sends).toHaveLength(0);
       if (scenario === 'keep-wrong') {

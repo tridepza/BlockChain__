@@ -176,6 +176,10 @@ Các ca cần bổ sung tình huống khi triển khai gồm đúng tại deadli
 
 ### 8.2. Phiên bản và đề nghị đồng thuận
 
+Trong giao diện FESC, Client gửi **Đề nghị hủy hợp đồng** sau khi ký quỹ hoặc khi dự án đang thực hiện. Freelancer được chọn ký **Đồng ý hủy hợp đồng** trong 72 giờ. Smart contract tổng quát cho phép hai bên đổi vai trò đề nghị và xác nhận, còn API của website chỉ chuẩn bị giao dịch hủy theo luồng Client đề nghị, Freelancer xác nhận. Khi mở tranh chấp, đề nghị hủy mất hiệu lực. Website ghi nhận hủy sau khi xác minh receipt trên đúng chain. Khoản chưa phân bổ trở thành khoản chờ rút của Client, kể cả khi các khoản nghiệm thu trước đó đã được chuyển thẳng cho Freelancer bằng FESC.
+
+Khi quá hạn chấp nhận hoặc ký quỹ, một trong hai bên có thể đóng hợp đồng chưa nạp. Khi Freelancer chưa bắt đầu đúng hạn sau ký quỹ, Client có thể đóng hợp đồng và rút lại tiền. Yêu cầu tạo hợp đồng giữ nguyên điều khoản trong tối đa 30 phút để bản đang mở trong MetaMask vẫn khớp với dự án. Sau hạn này, nếu factory chưa tạo hợp đồng, Client có thể chỉnh ngày và chuẩn bị lại giao dịch trên cùng dự án. Hạn giai đoạn đầu vẫn phải đủ thời gian chờ ký quỹ và bắt đầu.
+
 | Dữ liệu | Quy tắc |
 | --- | --- |
 | Phiên bản công việc | Khởi tạo 0 khi tạo escrow; mỗi thao tác thành công thuộc danh sách mục 5 tăng đúng 1, kể cả khi đồng thời kích hoạt milestone kế. Giao dịch thất bại không tăng. |

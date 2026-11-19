@@ -2,7 +2,7 @@ export type Role = 'Client' | 'Freelancer';
 export type Currency = 'FESC';
 export type Account = { id: string; name: string; email: string; role: Role };
 type Status = 'Open' | 'Proposal sent' | 'Funded' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Completed' | 'Cancelled';
-type MilestoneStatus = 'Pending' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Paid' | 'Refunded';
+type MilestoneStatus = 'Pending' | 'In progress' | 'Submitted' | 'Revision requested' | 'Disputed' | 'Paid' | 'Refunded' | 'Voided';
 
 export type Milestone = {
   id: number;
@@ -14,6 +14,7 @@ export type Milestone = {
   submissionVersion?: number;
   deliveries?: Delivery[];
   revisionReason?: string;
+  revisionCount?: number;
   arbitration?: Arbitration;
 };
 
@@ -22,6 +23,8 @@ export type Delivery = {
   version: number;
   note: string;
   submittedAt?: string;
+  pending?: true;
+  submissionTx?: string;
   preview?: { name: string; sha256?: string };
   original?: { name: string; sha256: string };
 };
@@ -57,10 +60,11 @@ export type Project = {
   evidenceUploads?: EvidenceRecord[];
   extensionRequest?: ExtensionRequest;
   extensionHistory?: (ExtensionRequest & { result: string })[];
+  cancellation?: { hash: string; reason?: 'unfunded' | 'fundingExpired' | 'consent' | 'startExpired' };
   fesc?: { policyVersion?: number };
 };
 
-export type Arbitration = { decision: 'release' | 'split' | 'refund'; mode: 'continue' | 'terminate'; toFreelancer: number; toClient: number; paidOut?: boolean };
+export type Arbitration = { decision: 'release' | 'split' | 'refund' | 'allocation'; mode: 'continue' | 'terminate'; toFreelancer: number; toClient: number; paidOut?: boolean };
 export type EvidenceRecord = {
   id: string; kind: 'file' | 'link'; name?: string; url?: string; size?: number; sha256?: string;
   by?: string; byId?: string; at?: string; used?: boolean; note?: string; added?: boolean;
@@ -100,12 +104,34 @@ export class WorkflowError extends Error {
 }
 
 export const cents = (amount: number) => Math.round(amount * 100);
-const isSettled = (milestone: Milestone) => ['Paid', 'Refunded'].includes(milestone.status);
+const isSettled = (milestone: Milestone) => ['Paid', 'Refunded', 'Voided'].includes(milestone.status);
 export const currentMilestone = (project: Project) => project.milestones.find(m => !isSettled(m));
 
 export function getSubmissionVersion(milestone: Milestone) {
   // Existing projects stored the submission text without a version.
   return milestone.submissionVersion ?? (milestone.submission || milestone.status === 'Submitted' ? 1 : 0);
+}
+
+export function getPendingDelivery(milestone: Milestone | undefined) {
+  const deliveries = milestone?.deliveries;
+  const latest = deliveries?.[deliveries.length - 1];
+  return latest?.pending ? latest : undefined;
+}
+
+export function deliveryIsUnconfirmed(project: Project, milestone: Milestone, delivery: Delivery) {
+  // Older builds labeled a saved draft as Submitted before any wallet transaction.
+  const deliveries = milestone.deliveries;
+  return Boolean(delivery.pending || (project.fesc && milestone.status === 'Submitted' && !delivery.submissionTx &&
+    delivery.preview?.sha256 && delivery.id === deliveries?.[deliveries.length - 1]?.id));
+}
+
+export function hideUnconfirmedDeliveries(project: Project): Project {
+  return { ...project, milestones: project.milestones.map(milestone => {
+    if (!milestone.deliveries?.some(delivery => deliveryIsUnconfirmed(project, milestone, delivery))) return milestone;
+    const deliveries = milestone.deliveries.filter(delivery => !deliveryIsUnconfirmed(project, milestone, delivery));
+    const latest = deliveries[deliveries.length - 1];
+    return { ...milestone, deliveries, submission: latest?.note, submissionVersion: latest?.version ?? 0 };
+  }) };
 }
 
 // FESC still held by the contract for this project (funded minus paid out and refunded).
@@ -237,18 +263,17 @@ export function applyProjectAction(
   switch (input.action) {
     case 'submit': {
       if (!['Funded', 'In progress', 'Revision requested'].includes(p.status) ||
-        !['Pending', 'In progress', 'Revision requested'].includes(milestone.status)) throw invalidState();
+        !['Pending', 'In progress', 'Revision requested'].includes(milestone.status) || getPendingDelivery(milestone)) throw invalidState();
       if (!note) throw new WorkflowError(400, 'Nhập mô tả bàn giao.');
       const history = milestone.deliveries ?? (milestone.submission
         ? [{ id: crypto.randomUUID(), version: submissionVersion, note: milestone.submission }]
         : []);
-      const delivery = { id: crypto.randomUUID(), version: submissionVersion + 1, note, submittedAt: new Date().toISOString(), ...attachments };
+      const delivery: Delivery = { id: crypto.randomUUID(), version: submissionVersion + 1, note, pending: true, ...attachments };
       return {
         project: {
           ...p,
-          status: 'Submitted',
           milestones: updateMilestone({
-            status: 'Submitted', submission: note, submissionVersion: delivery.version, deliveries: [...history, delivery],
+            deliveries: [...history, delivery],
           }),
         },
       };

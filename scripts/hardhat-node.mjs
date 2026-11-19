@@ -22,7 +22,7 @@ async function processIdentity(pid) {
   if (process.platform === 'win32') {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
-    { windowsHide: true, timeout: 5000, maxBuffer: 16_384 });
+    { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 });
     const ticks = stdout.trim();
     if (!/^\d+$/.test(ticks)) throw new Error('Không đọc được thời điểm tạo tiến trình Windows.');
     return `windows:${ticks}`;

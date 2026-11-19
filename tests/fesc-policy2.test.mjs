@@ -114,7 +114,10 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   await request('projects/extension', 'worker', { projectId: 1, action: 'request', milestoneId: 1, dueDate: later, note: 'Need more time' });
   assert.equal(stored().extensionRequest.dueDate, later);
   await request('projects/fesc', 'worker', { projectId: 1, action: 'extend', milestoneId: 1, dueDate: later }, 409);
-  await execute('extend', 'client', { milestoneId: 1, dueDate: later });
+  await request('projects/extension', 'worker', { projectId: 1, action: 'request', milestoneId: 1, dueDate: later, note: 'Duplicate request' }, 409);
+  await request('projects/extension', 'client', { projectId: 1, action: 'decline', requestId: 'stale' }, 409);
+  await request('projects/fesc', 'client', { projectId: 1, action: 'extend', milestoneId: 1, dueDate: later }, 409);
+  await execute('extend', 'client', { milestoneId: 1, dueDate: later, whole: false, requestId: stored().extensionRequest.id });
   status = await state('worker');
   assert.equal(stored().milestones[0].dueAt, iso(later));
   assert.equal(status.deadline, iso(later));
@@ -123,9 +126,51 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   // Delivery, then the 5-day review window: the Freelancer may complain only after it passes.
   await request('projects/delivery', 'worker', { projectId: 1, action: 'submit', milestoneId: 1, note: 'Delivered',
     preview: { name: 'preview.pdf', data: Buffer.from('%PDF-test').toString('base64') } });
-  const submitted = await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
+  const firstDraft = stored().milestones[0].deliveries[0];
+  const previewStatus = async (id, delivery) => (await fetch(`${origin}/api/projects/1/milestones/1/deliveries/${delivery.id}/preview`, {
+    headers: { Cookie: `escrow_session=${tokens[id]}` },
+  })).status;
+  assert.equal(stored().status, 'In progress');
+  assert.equal((await request('workspace', 'client')).projects[0].milestones[0].deliveries.length, 0);
+  assert.equal(await previewStatus('client', firstDraft), 404);
+  assert.equal(await previewStatus('worker', firstDraft), 200);
+  // Old builds labeled drafts Submitted before the signature. Reconcile the legacy snapshot in place.
+  const legacy = stored();
+  legacy.status = 'Submitted';
+  legacy.milestones[0].status = 'Submitted';
+  legacy.milestones[0].submission = firstDraft.note;
+  legacy.milestones[0].submissionVersion = firstDraft.version;
+  delete legacy.milestones[0].deliveries[0].pending;
+  legacy.milestones[0].deliveries[0].submittedAt = new Date().toISOString();
+  db.prepare('UPDATE projects SET data = ? WHERE id = 1').run(JSON.stringify(legacy));
+  assert.equal((await request('workspace', 'client')).projects[0].milestones[0].deliveries.length, 0);
+  assert.equal(await previewStatus('client', firstDraft), 404);
+  assert.equal((await state('worker')).step, 'submit');
+  assert.equal(stored().status, 'In progress');
+  assert.equal(stored().milestones[0].deliveries[0].pending, true);
+  await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
+  const review = await state('client');
+  assert.equal(review.canRequestRevision, true);
+  assert.equal(await previewStatus('client', firstDraft), 200);
+  assert.match(stored().milestones[0].deliveries[0].submissionTx, /^0x[0-9a-f]{64}$/i);
+  const revise = { milestoneId: 1, submissionVersion: 1, note: 'Please amend the first deliverable.' };
+  await request('projects/fesc', 'worker', { projectId: 1, action: 'revise', ...revise }, 403);
+  await request('projects/fesc', 'client', { projectId: 1, action: 'revise', ...revise, submissionVersion: 0 }, 409);
+  await execute('revise', 'client', revise);
+  assert.equal((await state('worker')).step, 'upload');
+  assert.equal(stored().status, 'Revision requested');
+  assert.equal(stored().milestones[0].revisionReason, revise.note);
+  await request('projects/delivery', 'worker', { projectId: 1, action: 'submit', milestoneId: 1, note: 'Amended',
+    preview: { name: 'amended.pdf', data: Buffer.from('%PDF-test-amended').toString('base64') } });
+  const secondDraft = stored().milestones[0].deliveries[1];
+  assert.equal((await request('workspace', 'client')).projects[0].milestones[0].deliveries.length, 1);
+  assert.equal(await previewStatus('client', secondDraft), 404);
+  assert.equal((await state('worker')).submissionVersion, 2);
+  const submitted = await execute('submit', 'worker', { milestoneId: 1, submissionVersion: 2 });
   const submittedAt = Number((await rpc.getBlock({ blockNumber: submitted.blockNumber })).timestamp);
   status = await state('worker');
+  assert.equal(status.submissionVersion, 2);
+  assert.equal(await previewStatus('client', secondDraft), 200);
   assert.equal(status.deadline, new Date((submittedAt + 5 * day) * 1000).toISOString());
   assert.deepEqual(status.disputeOptions.map(option => [option.kind, option.available]), [[1, false], [4, true]]);
   await travel(5 * day + 60);
@@ -133,6 +178,9 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(status.disputeOptions[0].available, true);
   const log = await upload('worker', 'chat-log.txt', Buffer.from('Client did not reply for 5 days'));
   await execute('dispute', 'worker', { milestoneId: 1, reason: 1, note: 'Client did not review in time', evidenceIds: [log.id] });
+  assert.equal((await state('client')).cancellation, undefined);
+  await request('projects/fesc', 'client', { projectId: 1, action: 'proposeCancel', cancelVersion: '0' }, 409);
+  await request('projects/fesc', 'worker', { projectId: 1, action: 'confirmCancel' }, 409);
   let info = await request('admin/case?projectId=1', 'admin');
   assert.equal(info.project.dispute.by, 'Freelancer');
   assert.equal(info.project.dispute.label, 'Client quá hạn nghiệm thu (5 ngày)');
@@ -173,10 +221,19 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal(info.project.disputeHistory.length, 1);
   const refund = { projectId: 1, action: 'refund', mode: 'terminate', revision: 2, note: 'Refund the unfinished work', evidenceCount: '0' };
   await request('admin/case', 'worker', refund, 403);
-  const closed = await request('admin/case', 'admin', refund);
+  // Older cases may lack a saved decision draft. Recover the money and status from the receipt alone.
+  const resolveAbi = parseAbi(['function resolve(uint256 toFreelancer, uint256 expectedEvidenceCount, bytes32 decisionHash)']);
+  const externalResolution = await confirm(await wallets.admin.writeContract({ address: info.chain.escrow, abi: resolveAbi,
+    functionName: 'resolve', args: [0n, 0n, keccak256(stringToHex(refund.note))] }));
+  const closed = await request('admin/case?projectId=1', 'admin');
   assert.equal(closed.project.status, 'Completed');
   assert.equal(closed.project.milestones[1].status, 'Refunded');
   assert.equal(closed.project.disputeHistory.length, 2);
+  const recoveredEntry = closed.project.adminReview.history.at(-1);
+  assert.equal(recoveredEntry.hash, externalResolution.transactionHash);
+  assert.match(recoveredEntry.note, /Ghi chú gốc chưa được lưu/);
+  assert.equal(notices.length, 2);
+  await request('admin/case', 'admin', { projectId: 1, action: 'email', at: recoveredEntry.at });
   assert.equal(notices.length, 4);
   const escrowAbi = parseAbi(['function claimable(address beneficiary) view returns (uint256)']);
   assert.equal(await rpc.readContract({ address: info.chain.escrow, abi: escrowAbi, functionName: 'claimable', args: [wallets.client.account.address] }), 0n);
@@ -185,12 +242,14 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   assert.equal((await state('client')).step, 'complete');
   assert.equal(closed.project.milestones[1].arbitration.paidOut, true);
 
-  // Resending the result email records the delivery outcome.
-  const decisionAt = closed.project.adminReview.history.at(-1).at;
+  // Resending an older decision must mention its own milestone after another dispute is resolved.
+  const decisionAt = closed.project.adminReview.history.find(item => item.action === 'split').at;
   notices.length = 0;
   const resent = await request('admin/case', 'admin', { projectId: 1, action: 'email', at: decisionAt });
   assert.equal(resent.emailed, 'sent');
   assert.equal(notices.length, 2);
+  assert.match(notices[0].text, /Giai đoạn: First/);
+  assert.match(notices[0].text, /Chia đều 50\/50/);
 
   const accounts = await request('admin/accounts', 'admin');
   assert.equal(accounts.total, 3);
@@ -201,4 +260,103 @@ test('policy 2 FESC project: agreed deadlines, extensions, evidence complaints, 
   const history = await request('admin/transactions?q=ph%C3%A2n%20x%E1%BB%AD', 'admin');
   assert.equal(history.total, 2);
   assert.ok(history.transactions.every(tx => tx.currency === 'FESC'));
+
+  // A Client can propose cancellation during a later milestone. Earlier payouts are kept.
+  const cancelProject = { ...project, id: 2, title: 'Consensual cancellation', dueAt: iso(vnDate(now + 30 * day)),
+    milestones: project.milestones.map((item, index) => ({ ...item, dueAt: iso(vnDate(now + (25 + index * 5) * day)) })) };
+  db.prepare('INSERT INTO projects VALUES (?, ?)').run(2, JSON.stringify(cancelProject));
+  const cancelState = id => request('projects/fesc', id, { projectId: 2 });
+  const cancelAction = (action, id, extra = {}, expected = 200) => request('projects/fesc', id, { projectId: 2, action, ...extra }, expected);
+  const executeCancelProject = (action, id, extra = {}) => execute(action, id, { projectId: 2, ...extra });
+  await executeCancelProject('create', 'client'); await executeCancelProject('accept', 'worker');
+  await executeCancelProject('allow', 'client'); await executeCancelProject('fund', 'client');
+  assert.equal((await cancelState('client')).cancellation.phase, 'propose');
+  await executeCancelProject('start', 'worker');
+  await request('projects/delivery', 'worker', { projectId: 2, action: 'submit', milestoneId: 1, note: 'Delivered',
+    preview: { name: 'preview.pdf', data: Buffer.from('%PDF-test').toString('base64') } });
+  await executeCancelProject('submit', 'worker', { milestoneId: 1, submissionVersion: 1 });
+  await executeCancelProject('approve', 'client', { milestoneId: 1, submissionVersion: 1 });
+  const beforeOffer = await cancelState('client');
+  assert.equal(beforeOffer.paid, 0.1);
+  await cancelAction('proposeCancel', 'worker', { cancelVersion: beforeOffer.cancellation.version }, 403);
+  await executeCancelProject('proposeCancel', 'client', { cancelVersion: beforeOffer.cancellation.version });
+  const clientPending = await cancelState('client');
+  assert.equal(clientPending.cancellation.phase, 'pending');
+  assert.equal(clientPending.projectStatus, 'In progress');
+  const workerOffer = (await cancelState('worker')).cancellation;
+  assert.equal(workerOffer.phase, 'confirm');
+  assert.equal(workerOffer.amount, '0.2');
+  const offerInput = { cancelNonce: workerOffer.nonce, cancelDigest: workerOffer.digest };
+  await cancelAction('confirmCancel', 'client', offerInput, 403);
+  await cancelAction('confirmCancel', 'worker', { ...offerInput, cancelNonce: '0' }, 409);
+  await travel(3 * day + 60);
+  assert.equal((await cancelState('worker')).disputeOptions.find(option => option.kind === 3).available, true);
+  await cancelAction('confirmCancel', 'worker', offerInput, 409);
+  const newVersion = (await cancelState('client')).cancellation.version;
+  await executeCancelProject('proposeCancel', 'client', { cancelVersion: newVersion });
+  const replacement = (await cancelState('worker')).cancellation;
+  assert.notEqual(replacement.nonce, offerInput.cancelNonce);
+  const cancelReceipt = await executeCancelProject('confirmCancel', 'worker', { cancelNonce: replacement.nonce, cancelDigest: replacement.digest });
+  const cancelled = await cancelState('client');
+  assert.equal(cancelled.projectStatus, 'Cancelled');
+  assert.equal(cancelled.claimable, '0.2');
+  assert.equal(cancelled.paid, 0.1);
+  const cancelledProject = JSON.parse(db.prepare('SELECT data FROM projects WHERE id = 2').get().data);
+  assert.equal(cancelledProject.cancellation.hash, cancelReceipt.transactionHash);
+  assert.deepEqual(cancelledProject.milestones.map(item => item.status), ['Paid', 'Refunded']);
+  await cancelAction('confirmCancel', 'worker', offerInput, 409);
+  const clientBalance = () => rpc.readContract({ address: token, abi: tokenArtifact.abi, functionName: 'balanceOf', args: [wallets.client.account.address] });
+  const beforeWithdrawal = await clientBalance();
+  await executeCancelProject('withdraw', 'client');
+  assert.equal(await clientBalance(), beforeWithdrawal + parseUnits('0.2', 18));
+  assert.equal((await cancelState('client')).claimable, '0');
+  assert.equal(await rpc.readContract({ address: token, abi: tokenArtifact.abi, functionName: 'balanceOf', args: [wallets.worker.account.address] }), parseUnits('0.15', 18));
+
+  function seedExpiryProject(id) {
+    const future = { ...cancelProject, id, title: `Expiry project ${id}`, dueAt: iso(vnDate(now + 58 * day)),
+      milestones: cancelProject.milestones.map((item, index) => ({ ...item, dueAt: iso(vnDate(now + (53 + index * 5) * day)) })) };
+    db.prepare('INSERT INTO projects VALUES (?, ?)').run(id, JSON.stringify(future));
+  }
+  const expiryState = (projectId, id) => request('projects/fesc', id, { projectId });
+  const fescProject = id => JSON.parse(db.prepare('SELECT data FROM projects WHERE id = ?').get(id).data);
+  seedExpiryProject(3);
+  const staleCreate = await request('projects/fesc', 'client', { projectId: 3, action: 'create' });
+  const oldCreateBy = BigInt(fescProject(3).fesc.createBy);
+  const reserved = await expiryState(3, 'client');
+  assert.equal(reserved.canExtend, false);
+  assert.equal(reserved.actionDeadline, new Date(Number(oldCreateBy) * 1000).toISOString());
+  await request('projects/fesc', 'client', { projectId: 3, action: 'extend', milestoneId: 1, dueDate: vnDate(now + 55 * day) }, 409);
+  await travel(31 * 60);
+  assert.equal((await expiryState(3, 'client')).canExtend, true);
+  const renewedCreate = await request('projects/fesc', 'client', { projectId: 3, action: 'create' });
+  assert.notEqual(renewedCreate.data, staleCreate.data);
+  assert.ok(BigInt(fescProject(3).fesc.createBy) > oldCreateBy);
+  await execute('create', 'client', { projectId: 3 });
+  await request('projects/fesc', 'worker', { projectId: 3, action: 'expireFunding' }, 409);
+  await travel(2 * day + 60);
+  assert.equal((await expiryState(3, 'client')).step, 'expireFunding');
+  assert.equal((await expiryState(3, 'worker')).step, 'expireFunding');
+  await request('projects/fesc', 'worker', { projectId: 3, action: 'accept' }, 409);
+  const fundingExpiry = await execute('expireFunding', 'worker', { projectId: 3 });
+  assert.equal((await expiryState(3, 'client')).projectStatus, 'Cancelled');
+  assert.deepEqual(fescProject(3).cancellation, { reason: 'fundingExpired', hash: fundingExpiry.transactionHash });
+  assert.deepEqual(fescProject(3).milestones.map(item => item.status), ['Voided', 'Voided']);
+
+  seedExpiryProject(4);
+  await execute('create', 'client', { projectId: 4 });
+  await execute('accept', 'worker', { projectId: 4 });
+  await execute('allow', 'client', { projectId: 4 });
+  await execute('fund', 'client', { projectId: 4 });
+  await travel(9 * day + 60);
+  assert.equal((await expiryState(4, 'worker')).step, 'waiting');
+  await request('projects/fesc', 'worker', { projectId: 4, action: 'expireStart' }, 409);
+  const startExpiry = await execute('expireStart', 'client', { projectId: 4 });
+  const expired = await expiryState(4, 'client');
+  assert.equal(expired.step, 'withdraw');
+  assert.equal(expired.claimable, '0.3');
+  assert.equal(expired.paid, 0);
+  assert.deepEqual(fescProject(4).cancellation, { reason: 'startExpired', hash: startExpiry.transactionHash });
+  const beforeExpiryWithdrawal = await clientBalance();
+  await execute('withdraw', 'client', { projectId: 4 });
+  assert.equal(await clientBalance(), beforeExpiryWithdrawal + parseUnits('0.3', 18));
 });

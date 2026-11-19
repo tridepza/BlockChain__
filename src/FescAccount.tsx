@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
+import { parseUnits } from 'viem';
 import { api, errorMessage } from './api';
 import { sendLocalTransaction, walletError } from './WalletLink';
 import type { LocalTransaction } from './WalletLink';
 
-type Balance = { accountBalance: string; token: string; vault: string;
+type Balance = { accountBalance: string; token: string; vault: string; gas?: string;
   history: { hash: string; action: string; amount: string; block: string }[] };
 
 export default function FescAccount({ accountId, onChanged }: { accountId: string; onChanged: () => void }) {
@@ -13,18 +14,23 @@ export default function FescAccount({ accountId, onChanged }: { accountId: strin
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [pending, setPending] = useState<{ hash: string; confirmed: () => Promise<boolean> } | null>(null);
+  const available = balance ? parseUnits(balance.accountBalance, 18) : 0n;
+  const normalizedAmount = amount.trim().replace(',', '.');
+  const requested = /^\d{1,20}(\.\d{1,18})?$/.test(normalizedAmount) ? parseUnits(normalizedAmount, 18) : 0n;
+  const canWithdraw = requested > 0n && requested <= available && balance?.gas !== '0';
   const refresh = useCallback(async () => {
     setBalance(await api<Balance>('wallet/fesc-account', {}, accountId));
   }, [accountId]);
   useEffect(() => { void refresh().catch(reason => setError(errorMessage(reason))); }, [refresh]);
   async function run(withdraw = false) {
+    if (busy || (withdraw && !canWithdraw)) return;
     setBusy(true); setError(''); setMessage('');
     try {
       if (pending) {
         if (!await pending.confirmed()) { setMessage('Giao dịch vẫn đang chờ blockchain. Chưa thay đổi số dư.'); return; }
         setPending(null); setMessage('Đã rút FESC về ví MetaMask.');
       } else if (withdraw) {
-        const tx = await api<LocalTransaction>('wallet/fesc-account', { action: 'withdraw', amount }, accountId);
+        const tx = await api<LocalTransaction>('wallet/fesc-account', { action: 'withdraw', amount: normalizedAmount }, accountId);
         setMessage('Xác nhận rút FESC trong MetaMask.');
         const sent = await sendLocalTransaction(tx, setMessage);
         setPending(sent);
@@ -32,14 +38,15 @@ export default function FescAccount({ accountId, onChanged }: { accountId: strin
         setPending(null);
         setMessage('Đã rút FESC về ví MetaMask.');
       }
-      await refresh(); onChanged();
+      await refresh().catch(() => setError('Chưa đọc lại được số dư. Hãy bấm Đọc lại số dư để thử lại.'));
+      onChanged();
     } catch (reason) {
       if (typeof reason === 'object' && reason !== null && 'transactionFailed' in reason) setPending(null);
       setError(walletError(reason, 'Rút FESC'));
     }
     finally { setBusy(false); }
   }
-  const hasBalance = balance && Number(balance.accountBalance) > 0;
+  const hasBalance = available > 0n;
   if (!hasBalance && !pending && !message && !error) return null;
 
   return <section className="panel fesc-account" aria-labelledby="fesc-account-title">
@@ -48,9 +55,12 @@ export default function FescAccount({ accountId, onChanged }: { accountId: strin
     {hasBalance && <>
       <label>Số FESC rút<input inputMode="decimal" value={amount} disabled={busy || !!pending}
         onChange={event => setAmount(event.target.value)} maxLength={39}/></label>
+      {balance?.gas === '0' && <p className="hint">Ví cần ETH thử để trả phí giao dịch.</p>}
+      {amount && (requested === 0n || requested > available) &&
+        <p className="hint">Nhập số FESC dương, tối đa {balance?.accountBalance} FESC và 18 chữ số thập phân.</p>}
     </>}
     <div className="button-row">
-      {hasBalance && <button className="primary" disabled={busy || !!pending || !amount} onClick={() => void run(true)}>Rút FESC về ví</button>}
+      {hasBalance && <button className="primary" disabled={busy || !!pending || !canWithdraw} onClick={() => void run(true)}>Rút FESC về ví</button>}
       <button className="secondary" disabled={busy} onClick={() => void run()}>{pending ? 'Kiểm tra giao dịch' : 'Đọc lại số dư'}</button>
     </div>
     {pending && <p className="chain-address">Giao dịch đang chờ: {pending.hash}</p>}

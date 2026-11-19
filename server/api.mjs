@@ -1,14 +1,14 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { applyProjectAction, canSeePrivate, createProject, deliveryFileLimit, deliveryPreviewLimit, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
+import { applyProjectAction, canSeePrivate, createProject, deliveryFileLimit, deliveryIsUnconfirmed, deliveryPreviewLimit, hideUnconfirmedDeliveries, visibleWorkspace, WorkflowError } from '../src/workflow.ts';
 import { readDeliveryFiles, sendDeliveryFile } from './delivery.mjs';
 import { configuredDatabase } from './database.mjs';
 import { openSqlite } from './sqlite.mjs';
 import { sqlStore } from './sql-store.mjs';
 import { walletLinking } from './wallet.mjs';
 import { localFunding } from './local-funding.mjs';
-import { adminFescCase, adminFescStatistics, fescActions, fescWalletBalance, projectFesc, publicFescHolders, publicFescTransfers, reconcilePublicProjects } from './project-fesc.mjs';
+import { adminFescCase, adminFescStatistics, decisionLabels, fescActions, fescWalletBalance, projectFesc, publicFescHolders, publicFescTransfers, reconcilePublicProjects, recordFescArbitration } from './project-fesc.mjs';
 import { authOtp, validPassword } from './auth-otp.mjs';
 import { otpMailer } from './mail.mjs';
 import { publicProjectPayments } from './public-projects.mjs';
@@ -17,11 +17,9 @@ import { localChain } from '../src/local-chain.ts';
 import { rememberStorageTarget, sqliteTarget } from './storage-target.mjs';
 import { fescVault } from './fesc-vault.mjs';
 import { adminBuckets, adminEmails, adminPeriod, isAdminAccount, openAdminAnalytics } from './admin-analytics.mjs';
-import { discardEvidence, markEvidenceUsed, pickEvidence, receiveEvidence, sendEvidence } from './evidence.mjs';
-import { adminAccounts, adminFescServerSign, chainUnavailableMessage, dueSeconds } from './project-fesc.mjs';
+import { discardEvidence, receiveEvidence, sendEvidence } from './evidence.mjs';
+import { adminAccounts, chainUnavailableMessage, dueSeconds, supplementalEvidence, syncSupplementalEvidence } from './project-fesc.mjs';
 import { arbitratorSigner } from './arbitrator.mjs';
-
-const decisionLabels = { release: 'Giải ngân 100% cho Freelancer', split: 'Chia đều 50/50 cho hai bên', refund: 'Hoàn 100% cho Client' };
 
 function assertSameOrigin(req) {
   const origin = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
@@ -35,8 +33,11 @@ const isParty = (project, user) => Boolean(project) &&
 const findEvidence = (project, id) => (project?.evidenceUploads ?? []).find(item => item.id === id && item.kind === 'file');
 
 function resolutionEmail(project, entry, url) {
-  const milestone = project.milestones.find(item => item.arbitration && item.arbitration === entry.arbitration) ??
-    project.milestones.findLast(item => item.arbitration);
+  const decisions = project.adminReview.history.filter(item => Object.hasOwn(decisionLabels, item.action));
+  const decisionIndex = decisions.findIndex(item => item.at === entry.at);
+  const milestoneId = entry.milestoneId ?? project.disputeHistory?.[decisionIndex]?.milestoneId;
+  const milestone = project.milestones.find(item => item.id === milestoneId) ??
+    project.milestones.filter(item => item.arbitration)[decisionIndex];
   const result = entry.arbitration ?? milestone?.arbitration;
   return {
     subject: `Kết quả phân xử dự án #${project.id}: ${project.title}`,
@@ -46,7 +47,7 @@ function resolutionEmail(project, entry, url) {
       `Quyết định: ${decisionLabels[entry.action] ?? entry.action}`,
       ...(result ? [`Freelancer nhận: ${result.toFreelancer} FESC`, `Client nhận: ${result.toClient} FESC`,
         result.mode === 'continue' ? 'Hợp đồng: tiếp tục giai đoạn tiếp theo.' : 'Hợp đồng: chấm dứt, các giai đoạn còn lại hoàn cho Client.'] : []),
-      `Lý do của admin: ${entry.note}`,
+      `Ghi chú: ${entry.note}`,
       ...(entry.hash ? [`Mã giao dịch: ${entry.hash}`] : []), '',
       result?.paidOut ? 'FESC đã được chuyển thẳng về ví của hai bên trong giao dịch phân xử.'
         : 'Phần FESC được phân bổ nằm trong hợp đồng. Mở dự án và bấm "Rút FESC được phân xử" để nhận về ví.',
@@ -205,12 +206,21 @@ function createDatabaseApi(store, root, options = {}) {
 
   async function workspace(user) {
     const data = visibleWorkspace(await store.readWorkspaceForActor(user), user);
-    // The other party's unsubmitted uploads and complaint drafts stay private until submitted.
-    const projects = data.projects.map(project => ({ ...project,
-      ...(project.evidenceUploads ? { evidenceUploads: project.evidenceUploads.filter(item => item.used || item.byId === user.id) } : {}),
-      ...(project.fesc ? { fesc: { ...project.fesc, disputeDrafts: undefined } } : {}) }));
-    return { ...data, projects };
+    return { ...data, projects: data.projects.map(project => participantProject(project, user)) };
   }
+
+  function participantProject(project, user) {
+    // Only the uploader sees drafts until the matching receipt is confirmed.
+    return { ...(user.role === 'Freelancer' && user.id === project.freelancerId ? project : hideUnconfirmedDeliveries(project)),
+      ...(project.evidenceUploads ? { evidenceUploads: project.evidenceUploads.filter(item => item.used || item.byId === user.id) } : {}),
+      ...(project.fesc ? { fesc: { ...project.fesc, disputeDrafts: undefined, disputeDraft: undefined, revisionDrafts: undefined,
+        supplementalEvidenceDrafts: undefined, arbitrationDrafts: undefined } } : {}) };
+  }
+
+  const adminProject = project => ({ ...hideUnconfirmedDeliveries(project),
+    ...(project.evidenceUploads ? { evidenceUploads: project.evidenceUploads.filter(item => item.used) } : {}),
+    ...(project.fesc ? { fesc: { ...project.fesc, disputeDrafts: undefined, disputeDraft: undefined, revisionDrafts: undefined,
+      supplementalEvidenceDrafts: undefined, arbitrationDrafts: undefined } } : {}) });
 
   async function handle(req, res) {
     const path = req.url.split('?')[0];
@@ -239,8 +249,11 @@ function createDatabaseApi(store, root, options = {}) {
         if (method !== 'GET') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
         const [, projectId, milestoneId, deliveryId] = adminPreview;
         const project = await store.transaction(writes => writes.getProject(Number(projectId)));
-        const delivery = project?.milestones.find(item => item.id === Number(milestoneId))?.deliveries?.find(item => item.id === deliveryId);
-        if (!project || (!project.disputeReason && !project.adminReview) || !delivery?.preview) throw new WorkflowError(404, 'Bằng chứng không tồn tại trong hồ sơ tranh chấp.');
+        const milestone = project?.milestones.find(item => item.id === Number(milestoneId));
+        const delivery = milestone?.deliveries?.find(item => item.id === deliveryId);
+        if (!project || (!project.disputeReason && !project.adminReview) || !delivery?.preview || deliveryIsUnconfirmed(project, milestone, delivery)) {
+          throw new WorkflowError(404, 'Bằng chứng không tồn tại trong hồ sơ tranh chấp.');
+        }
         const file = await store.getDeliveryFile(deliveryId, 'preview');
         if (!file) throw new WorkflowError(404, 'Tệp bằng chứng không tồn tại.');
         return sendDeliveryFile(res, file);
@@ -253,35 +266,20 @@ function createDatabaseApi(store, root, options = {}) {
         return sendEvidence(root, res, item, new URLSearchParams(req.url.split('?')[1] ?? '').get('inline') === '1');
       }
       if (path === '/api/admin/case') {
+        if (method !== 'GET' && method !== 'POST') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
         const input = method === 'POST' ? await readJson(req) : Object.fromEntries(new URLSearchParams(req.url.slice(path.length + 1)));
         const id = Number(input.projectId);
         if (!Number.isSafeInteger(id) || id <= 0) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
-        // Record an on-chain complaint even if neither party has reopened the project since filing it.
-        await store.transaction(async writes => {
-          const latest = await writes.getProject(id);
-          if (latest?.currency === 'FESC' && latest.fesc && latest.status !== 'Completed') {
-            await projectFesc(root, writes, latest, { id: latest.ownerId, role: 'Client' }).catch(() => {});
-          }
-        });
-        // Without a transaction hash, the server signs the decision itself when it holds the arbitrator key,
-        // so admins need no wallet. The checks guarding a decision run before anything is signed; the usual
-        // confirmation below then verifies the mined transaction, records it and emails both parties.
-        if (method === 'POST' && decisionLabels[input.action] && !input.hash && options.serverArbitrator !== false) {
-          const pending = await store.transaction(writes => writes.getProject(id));
-          const note = typeof input.note === 'string' ? input.note.trim() : '';
-          if (pending?.currency === 'FESC' && pending.fesc && pending.status === 'Disputed' &&
-              account.id !== pending.ownerId && account.id !== pending.freelancerId &&
-              note.length >= 3 && note.length <= 2000 && input.revision === (pending.adminReview?.revision ?? 0)) {
-            try {
-              const hash = await adminFescServerSign(root, pending, { ...input, decision: input.action });
-              if (hash) input.hash = hash;
-            } catch (error) {
-              if (error instanceof WorkflowError && error.status === 503) throw new WorkflowError(409, await chainUnavailableMessage(root, pending));
-              throw error;
+        // Project status reads reconcile confirmed complaints and resolutions as well.
+        if (method === 'GET') {
+          await store.transaction(async writes => {
+            const latest = await writes.getProject(id);
+            if (latest?.currency === 'FESC' && latest.fesc && latest.status !== 'Completed') {
+              await projectFesc(root, writes, latest, { id: latest.ownerId, role: 'Client' });
             }
-          }
+          }).catch(() => {});
         }
-        const result = await store.transaction(async writes => {
+        const processCase = (submittedHash = input.hash) => store.transaction(async writes => {
           const current = await writes.getSessionUser(hashToken(token), true);
           if (!current || !isAdminAccount(current, options.adminEmails ?? adminEmails(root))) throw new WorkflowError(403, 'Quyền quản trị đã thay đổi.');
           let project = await writes.getProject(id);
@@ -291,13 +289,13 @@ function createDatabaseApi(store, root, options = {}) {
             if (project.currency === 'FESC') {
               try {
                 chain = await adminFescCase(root, project);
+                project = await syncSupplementalEvidence(writes, project, chain);
                 chain.serverSigner = options.serverArbitrator !== false && !!arbitratorSigner(root, chain.arbitrator);
               }
               catch { chain = { unavailable: true, message: await chainUnavailableMessage(root, project) }; }
             }
-            return { project, chain };
+            return { project: adminProject(project), chain };
           }
-          if (method !== 'POST') throw new WorkflowError(405, 'Phương thức không được hỗ trợ.');
           if (input.action === 'email') {
             const entry = project.adminReview?.history.find(item => item.at === input.at && decisionLabels[item.action]);
             if (!entry) throw new WorkflowError(404, 'Không tìm thấy quyết định để gửi lại email.');
@@ -306,32 +304,67 @@ function createDatabaseApi(store, root, options = {}) {
           const note = typeof input.note === 'string' ? input.note.trim() : '';
           if (note.length < 3 || note.length > 2000) throw new WorkflowError(400, 'Nội dung xử lý cần 3–2000 ký tự.');
           const revision = project.adminReview?.revision ?? 0;
-          if (input.revision !== revision) throw new WorkflowError(409, 'Hồ sơ đã thay đổi. Hãy tải lại trước khi xử lý.');
           if (!['review', 'release', 'split', 'refund'].includes(input.action)) throw new WorkflowError(400, 'Thao tác quản trị không hợp lệ.');
+          if (input.action !== 'review' && (current.id === project.ownerId || current.id === project.freelancerId)) {
+            throw new WorkflowError(403, 'Admin không được phân xử dự án của chính mình.');
+          }
+          const recorded = submittedHash && project.adminReview?.history.find(item => item.hash === submittedHash &&
+            item.action === input.action && item.note === note && item.arbitration?.mode === (input.mode ?? 'terminate'));
+          if (recorded) return { project: adminProject(project), ...(recorded.emailed === 'sent'
+            ? { emailed: 'sent' } : { notify: recorded.at }) };
+          if ((input.action === 'review' || !submittedHash) && input.revision !== revision) {
+            throw new WorkflowError(409, 'Hồ sơ đã thay đổi. Hãy tải lại trước khi xử lý.');
+          }
           if (project.status !== 'Disputed') throw new WorkflowError(409, 'Dự án không còn tranh chấp.');
-          let arbitration;
           if (input.action !== 'review') {
-            if (current.id === project.ownerId || current.id === project.freelancerId) throw new WorkflowError(403, 'Admin không được phân xử dự án của chính mình.');
             if (project.currency !== 'FESC') throw new WorkflowError(409, 'Dự án mô phỏng MOCK không còn được hỗ trợ.');
-            const resolution = await adminFescCase(root, project, { ...input, action: input.hash ? 'confirm' : 'prepare', decision: input.action });
-            if (!input.hash) return { transaction: resolution };
-            project = resolution.project;
-            arbitration = resolution.arbitration;
-            await writes.addTransaction({ ...resolution.transaction, projectId: id, project: project.title,
-              action: `Phân xử FESC: ${decisionLabels[input.action]}`, amount: arbitration.toFreelancer, currency: 'FESC', status: 'Đã xác nhận' });
+            const decision = { ...input, note, decision: input.action };
+            let resolution;
+            try {
+              const existingHash = submittedHash || await adminFescCase(root, project, { ...decision, action: 'recover' });
+              if (!existingHash) {
+                const transaction = await adminFescCase(root, project, { ...decision, action: 'prepare' });
+                const drafts = Object.entries(project.fesc.arbitrationDrafts ?? {}).filter(([data]) => data !== transaction.data).slice(-4);
+                const draft = { id: current.id, name: current.name, note };
+                await writes.saveProject({ ...project, fesc: { ...project.fesc,
+                  arbitrationDrafts: Object.fromEntries([...drafts, [transaction.data, draft]]) } });
+                return { transaction };
+              }
+              resolution = await adminFescCase(root, project, { ...decision, action: 'confirm', hash: existingHash });
+            } catch (error) {
+              if (error instanceof WorkflowError && error.status === 503) {
+                throw new WorkflowError(409, await chainUnavailableMessage(root, project));
+              }
+              throw error;
+            }
+            project = await recordFescArbitration(writes, resolution, current);
+            return { project: adminProject(project), notify: project.adminReview.history.at(-1).at };
           }
           const at = new Date().toISOString();
           // Admin replies are shared with both parties; decisions carry the on-chain allocation.
-          project = { ...project, adminReview: { revision: revision + 1, status: input.action === 'review' ? 'reviewing' : 'resolved',
-            history: [...(project.adminReview?.history ?? []), { actorId: current.id, actor: current.name, action: input.action, note, at,
-              ...(input.hash ? { hash: input.hash } : {}), ...(arbitration ? { arbitration } : {}) }] } };
+          project = { ...project, adminReview: { revision: revision + 1, status: 'reviewing',
+            history: [...(project.adminReview?.history ?? []), { actorId: current.id, actor: current.name, action: input.action, note, at }] } };
           await writes.saveProject(project);
-          return { project, ...(input.action === 'review' ? {} : { notify: at }) };
+          return { project: adminProject(project) };
         });
+        let result = await processCase();
+        if (result.transaction && options.serverArbitrator !== false) {
+          const signer = arbitratorSigner(root, result.transaction.from);
+          if (signer) {
+            // The preparation transaction rechecks the current session, case revision, evidence and funds.
+            // Keep broadcasts outside DB callbacks because Mongo can retry those automatically.
+            const sentHash = await signer.send(result.transaction);
+            try { result = await processCase(sentHash); }
+            catch (error) {
+              if (error instanceof WorkflowError && error.status === 403) throw error;
+              return json(res, 200, { pendingHash: sentHash });
+            }
+          }
+        }
         if (result.notify) {
           const origin = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
           result.emailed = await notifyResolution(id, result.notify, origin).catch(() => 'failed');
-          result.project = await store.transaction(writes => writes.getProject(id));
+          result.project = await store.transaction(async writes => adminProject(await writes.getProject(id)));
           delete result.notify;
         }
         return json(res, 200, result);
@@ -370,8 +403,8 @@ function createDatabaseApi(store, root, options = {}) {
           created: createdIn(range),
           completed: data.projects.filter(project => project.status === 'Completed').length,
         },
-        disputes: data.projects.filter(project => project.status === 'Disputed'),
-        resolvedDisputes: data.projects.filter(project => project.adminReview?.status === 'resolved') });
+        disputes: data.projects.filter(project => project.status === 'Disputed').map(adminProject),
+        resolvedDisputes: data.projects.filter(project => project.adminReview?.status === 'resolved').map(adminProject) });
     }
     const deliveryDownload = /^\/api\/projects\/(\d+)\/milestones\/(\d+)\/deliveries\/([\da-f-]{36})\/(preview|original)$/.exec(path);
     if (method === 'GET' && path === '/api/projects/public') {
@@ -519,7 +552,9 @@ function createDatabaseApi(store, root, options = {}) {
       if (!isClient && !isFreelancer) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
       const milestone = project.milestones.find(item => item.id === Number(milestoneId));
       const delivery = milestone?.deliveries?.find(item => item.id === deliveryId);
-      if (!delivery?.[kind]) throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      if (!delivery?.[kind] || (isClient && deliveryIsUnconfirmed(project, milestone, delivery))) {
+        throw new WorkflowError(404, 'Tệp bàn giao không tồn tại.');
+      }
       if (kind === 'original' && isClient && (milestone.status !== 'Paid' || milestone.submissionVersion !== delivery.version)) {
         throw new WorkflowError(403, 'Bản gốc chỉ mở cho phiên bản đã được giải ngân.');
       }
@@ -540,17 +575,22 @@ function createDatabaseApi(store, root, options = {}) {
       const params = new URLSearchParams(req.url.split('?')[1] ?? '');
       const projectId = Number(params.get('projectId'));
       const project = Number.isSafeInteger(projectId) ? await store.getProjectForActor(projectId, user) : undefined;
-      if (!isParty(project, user) || project.currency !== 'FESC') throw new WorkflowError(404, 'Dự án không tồn tại.');
-      if ((project.evidenceUploads ?? []).filter(item => !item.used && item.byId === user.id).length >= 30) {
-        throw new WorkflowError(409, 'Bạn có quá nhiều tệp chưa dùng. Hãy gửi khiếu nại hoặc bổ sung bằng chứng trước.');
-      }
+      const validateUpload = (project, actor) => {
+        if (!isParty(project, actor) || project.currency !== 'FESC') throw new WorkflowError(404, 'Dự án không tồn tại.');
+        if (['Completed', 'Cancelled'].includes(project.status)) throw new WorkflowError(409, 'Dự án đã kết thúc.');
+        if ((project.evidenceUploads ?? []).filter(item => !item.used && item.byId === actor.id).length >= 30) {
+          throw new WorkflowError(409, 'Bạn có quá nhiều tệp chưa dùng. Hãy gửi khiếu nại hoặc bổ sung bằng chứng trước.');
+        }
+      };
+      validateUpload(project, user);
       limitAttempts(req, path, 120);
       const item = { ...await receiveEvidence(root, req, params.get('name')), byId: user.id, by: user.role, at: new Date().toISOString() };
       try {
         await store.transaction(async writes => {
-          if (!await writes.getSessionUser(hashToken(token), true)) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
-          const latest = await writes.getProjectForActor(projectId, user);
-          if (!isParty(latest, user)) throw new WorkflowError(404, 'Dự án không tồn tại.');
+          const current = await writes.getSessionUser(hashToken(token), true);
+          if (!current) throw new WorkflowError(401, 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.');
+          const latest = await writes.getProjectForActor(projectId, current);
+          validateUpload(latest, current);
           await writes.saveProject({ ...latest, evidenceUploads: [...(latest.evidenceUploads ?? []), item] });
         });
       } catch (error) {
@@ -610,35 +650,38 @@ function createDatabaseApi(store, root, options = {}) {
         return json(res, 200, result);
       }
       if (path === '/api/projects/dispute-evidence') {
-        const project = await authenticatedWrite(async (writes, current) => {
+        walletApi.getOrigin(req);
+        if (!Number.isSafeInteger(body.projectId)) throw new WorkflowError(400, 'Mã dự án không hợp lệ.');
+        const result = await authenticatedWrite(async (writes, current) => {
           const latest = await writes.getProjectForActor(body.projectId, current);
-          if (!isParty(latest, current) || latest.status !== 'Disputed' || !latest.dispute) {
-            throw new WorkflowError(409, 'Chỉ bổ sung bằng chứng khi dự án đang tranh chấp.');
-          }
-          const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '';
-          const items = pickEvidence(latest, current, body.evidenceIds, body.links).map(item => ({ ...item, note, added: true }));
-          const next = markEvidenceUsed({ ...latest, dispute: { ...latest.dispute, evidence: [...latest.dispute.evidence, ...items] } }, items);
-          await writes.saveProject(next);
-          return next;
+          if (!isParty(latest, current)) throw new WorkflowError(404, 'Dự án FESC không tồn tại.');
+          return supplementalEvidence(root, writes, latest, current, body);
         });
-        return json(res, 200, { project });
+        return json(res, 200, result);
       }
       if (path === '/api/projects/extension') {
         // Freelancer asks; Client declines here or accepts by signing extendDeadline in the FESC panel.
         const project = await authenticatedWrite(async (writes, current) => {
-          const latest = await writes.getProjectForActor(body.projectId, current);
-          if (!isParty(latest, current) || latest.currency !== 'FESC' || latest.fesc?.policyVersion !== 2 ||
-              !['Funded', 'In progress', 'Revision requested', 'Submitted'].includes(latest.status)) {
+          let latest = await writes.getProjectForActor(body.projectId, current);
+          if (!isParty(latest, current) || latest.currency !== 'FESC' || latest.fesc?.policyVersion !== 2) {
             throw new WorkflowError(409, 'Dự án chưa thể gia hạn.');
           }
+          const chain = await projectFesc(root, writes, latest, current);
+          if (!chain.escrow || !(chain.canExtend || chain.canRequestExtension)) {
+            throw new WorkflowError(409, 'Trạng thái hợp đồng hiện tại chưa cho phép gia hạn.');
+          }
+          latest = await writes.getProjectForActor(body.projectId, current);
           if (body.action === 'decline') {
-            if (current.id !== latest.ownerId || !latest.extensionRequest) throw new WorkflowError(409, 'Không có yêu cầu gia hạn để từ chối.');
+            if (current.id !== latest.ownerId || !latest.extensionRequest || body.requestId !== latest.extensionRequest.id) {
+              throw new WorkflowError(409, 'Yêu cầu gia hạn đã đổi. Hãy làm mới dự án.');
+            }
             const next = { ...latest, extensionRequest: undefined,
               extensionHistory: [...(latest.extensionHistory ?? []), { ...latest.extensionRequest, result: 'declined', at: new Date().toISOString() }] };
             await writes.saveProject(next);
             return next;
           }
           if (body.action !== 'request' || current.id !== latest.freelancerId) throw new WorkflowError(400, 'Yêu cầu gia hạn không hợp lệ.');
+          if (latest.extensionRequest) throw new WorkflowError(409, 'Đang có yêu cầu gia hạn chờ Client trả lời.');
           const whole = body.whole === true;
           const milestone = whole ? latest.milestones.at(-1) : latest.milestones.find(item => item.id === body.milestoneId);
           const due = dueSeconds(body.dueDate);
@@ -652,7 +695,7 @@ function createDatabaseApi(store, root, options = {}) {
           await writes.saveProject(next);
           return next;
         });
-        return json(res, 200, { project });
+        return json(res, 200, { project: participantProject(project, user) });
       }
       if (path === '/api/wallet/local-funding') {
         walletApi.getOrigin(req);

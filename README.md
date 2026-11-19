@@ -226,8 +226,8 @@ Lệnh triển khai hợp đồng ERC-20 và cấp **1.000 FESC** cho mỗi ví 
 3. Mở `http://127.0.0.1:5173/` trong từng hồ sơ trình duyệt. Đăng nhập hai tài khoản web và liên kết đúng ví trong **Ví & giao dịch → Kết nối MetaMask**.
 4. **Client** vào **Dự án → Tạo dự án**, chọn **FESC**, nhập ngân sách và các milestone, rồi chọn Freelancer theo email. Trong chi tiết dự án, bấm **Tạo hợp đồng FESC** và ký trong MetaMask.
 5. **Freelancer** mở dự án, bấm **Làm mới FESC** nếu cần, rồi ký **Chấp nhận hợp đồng FESC**. **Client** đọc lại trạng thái, ký **Cấp quyền ký quỹ FESC** và **Ký quỹ FESC**. Số tiền nằm trong hợp đồng.
-6. **Freelancer** ký **Bắt đầu milestone**, bấm **Gửi bàn giao** để lưu tệp, rồi ký **Xác nhận bàn giao trong MetaMask**.
-7. **Client** làm mới trạng thái, kiểm tra bản xem trước và ký **Nghiệm thu & giải ngân FESC**. Hợp đồng chuyển đúng số tiền milestone vào ví Freelancer ngay trong giao dịch. Lặp lại bước bàn giao và nghiệm thu cho các milestone còn lại.
+6. **Freelancer** ký **Bắt đầu milestone**, bấm **Gửi bàn giao** để lưu tệp, rồi ký **Xác nhận bàn giao trong MetaMask**. Client xem được bản xem trước sau khi website xác minh giao dịch thành công.
+7. **Client** kiểm tra bản xem trước. Nếu cần sửa, nhập lý do và ký **Yêu cầu chỉnh sửa** trong thời hạn hợp đồng, tối đa hai lượt mỗi milestone. Freelancer tải bản sửa và ký gửi lại. Khi đã chấp nhận bản hiện hành, Client ký **Nghiệm thu & giải ngân FESC** để chuyển số tiền milestone vào ví Freelancer. Lặp lại bước bàn giao và nghiệm thu cho các milestone còn lại.
 
 Mục **Ký quỹ FESC** hiển thị số dư của bên đang đăng nhập, số token trong hợp đồng và số đã chuyển cho Freelancer. **Ví & giao dịch** hiển thị số dư FESC và mã giao dịch ký quỹ, giải ngân. Dùng địa chỉ token trong dự án để nhập đúng đồng FESC vào MetaMask.
 
@@ -258,7 +258,7 @@ npm.cmd run test:contracts
 
 Biên dịch trước khi chạy kiểm tra kiểu để sinh khai báo ABI. Test triển khai `ToolchainCheck`, `MockUSDC`, `EscrowFactory` và `Escrow` trên mạng mô phỏng tạm thời của Hardhat.
 
-Để chạy cả bài kiểm thử FESC qua API, giữ node Hardhat Local chạy, đặt `$env:ESCROW_TEST_FESC = '1'`, rồi chạy `npm.cmd test`. Bài kiểm thử tạo hợp đồng và cơ sở dữ liệu thử riêng.
+Sau khi biên dịch hợp đồng, `npm.cmd test` tự chạy cả luồng FESC qua API. Bài kiểm thử khởi động một node Hardhat ở cổng riêng và dùng SQLite cùng cấu hình email thử nghiệm.
 
 `EscrowFactory` nhận địa chỉ token và `instanceKey` khác 0. Mỗi lần triển khai dùng một khóa ngẫu nhiên 32 byte mới. `createEscrow(terms, expectedTermsHash)` tính lại hash theo [quy cách Giai đoạn 4](docs/04-kien-truc-erd-va-transaction-flow.md#74-file-điều-khoản-và-đề-nghị-đồng-thuận), kiểm tra hạn tạo và chỉ tạo một lần cho mỗi cặp Client–`agreementRef`. Các hàm xử lý milestone, phân xử và đồng thuận trong `Escrow` dùng ABI của bản Solidity khôi phục. Chữ ký hàm và event thực tế nằm trong ABI mới tại `.hardhat/artifacts/`. Thư mục `artifacts/` ở gốc là đầu ra của bản cũ.
 

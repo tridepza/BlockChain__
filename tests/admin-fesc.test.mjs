@@ -121,11 +121,31 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   assert.equal(preview.status, 200);
   assert.equal(await preview.text(), '%PDF-test');
   const escrow = info.chain.escrow;
-  const abi = parseAbi(['function addEvidence(bytes32 evidenceHash)', 'function claimable(address beneficiary) view returns (uint256)']);
-  await confirm(await wallets.worker.writeContract({ address: escrow, abi, functionName: 'addEvidence', args: [keccak256(stringToHex('extra evidence'))] }));
+  const abi = parseAbi(['function claimable(address beneficiary) view returns (uint256)']);
   const decision = { projectId: 1, action: 'release', revision: 0, note: 'First milestone accepted; future milestones refunded', evidenceCount: '0' };
   await request('admin/case', 'client', decision, 403);
+
+  // On-chain evidence invalidates a decision prepared before the new information was signed.
+  const stale = await request('admin/case', 'admin', decision);
+  const pendingEvidence = await request('projects/dispute-evidence', 'worker', { projectId: 1, action: 'prepare',
+    note: 'New detail from the Freelancer', links: ['https://example.com/detail'] });
+  await request('projects/dispute-evidence', 'admin', { projectId: 1, action: 'prepare', links: ['https://example.com/detail'] }, 404);
+  const beforeEvidence = await request('admin/case?projectId=1', 'admin');
+  assert.equal(beforeEvidence.project.dispute.evidence.length, 2);
+  assert.equal(beforeEvidence.project.fesc.supplementalEvidenceDrafts, undefined);
+  const evidenceConfirmation = { projectId: 1, action: 'confirm', evidenceHash: pendingEvidence.evidenceHash };
+  await request('projects/dispute-evidence', 'worker', { ...evidenceConfirmation, hash: funding.transactionHash }, 409);
+  const evidenceReceipt = await confirm(await wallets.worker.sendTransaction({ to: pendingEvidence.transaction.to, data: pendingEvidence.transaction.data }));
+  await assert.rejects(rpc.call({ to: stale.transaction.to, data: stale.transaction.data, account: wallets.admin.account.address }));
+  // The admin opening the case can recover already-confirmed evidence even if the browser was closed after signing.
+  const afterEvidence = await request('admin/case?projectId=1', 'admin');
+  assert.equal(afterEvidence.chain.evidenceCount, '1');
+  assert.equal(afterEvidence.project.dispute.evidence.length, 3);
+  assert.equal(afterEvidence.project.dispute.evidence.find(item => item.added).note, 'New detail from the Freelancer');
+  const confirmedEvidence = await request('projects/dispute-evidence', 'worker', { ...evidenceConfirmation, hash: evidenceReceipt.transactionHash });
+  assert.equal(confirmedEvidence.confirmed, true);
   await request('admin/case', 'admin', decision, 409);
+  decision.revision = afterEvidence.project.adminReview.revision;
   decision.evidenceCount = '1';
   const { transaction } = await request('admin/case', 'admin', decision);
   await assert.rejects(rpc.call({ to: transaction.to, data: transaction.data, account: wallets.client.account.address }));
@@ -133,14 +153,25 @@ test('admin FESC dispute requires arbitrator receipt, rejects stale evidence and
   const resolution = await confirm(await wallets.admin.sendTransaction({ to: transaction.to, data: transaction.data }));
   await request('admin/case', 'admin', { ...decision, hash: funding.transactionHash }, 409);
   await request('admin/case', 'admin', { ...decision, note: 'Tampered decision', hash: resolution.transactionHash }, 409);
+  // The participant sees the resolution even if the arbitrator never finished the website confirmation.
+  const recovered = await state('worker');
+  assert.equal(recovered.projectStatus, 'Completed');
+  assert.equal(recovered.workspaceChanged, true);
+  assert.equal(recovered.claimable, '0.1');
+  assert.equal((await state('worker')).workspaceChanged, undefined);
   const completed = await request('admin/case', 'admin', { ...decision, hash: resolution.transactionHash });
+  assert.equal(completed.project.adminReview.history.at(-1).hash, resolution.transactionHash);
   assert.equal(completed.project.paid, 0.1);
+  assert.equal(completed.project.adminReview.history.at(-1).note, decision.note);
+  assert.equal(completed.project.disputeHistory[0].evidence.length, 3);
+  assert.equal(completed.project.adminReview.history.filter(item => item.hash === resolution.transactionHash).length, 1);
   assert.equal(completed.project.status, 'Completed');
   assert.equal(completed.emailed, 'sent');
   assert.equal(notices.length, 2);
   assert.match(notices[0].subject, /Kết quả phân xử dự án #1/);
   assert.match(notices[0].text, /Giải ngân 100% cho Freelancer/);
-  await request('admin/case', 'admin', { ...decision, revision: 1, hash: resolution.transactionHash }, 409);
+  await request('admin/case', 'admin', { ...decision, hash: resolution.transactionHash });
+  assert.equal(notices.length, 2);
   assert.equal(await rpc.readContract({ address: escrow, abi, functionName: 'claimable', args: [wallets.worker.account.address] }), parseUnits('0.1', 18));
   assert.equal((await state('client')).step, 'withdraw');
   assert.equal((await state('worker')).step, 'withdraw');

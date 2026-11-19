@@ -251,6 +251,7 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
     void run(async () => {
       if (dialog.kind === 'create') {
         const result = await api<{ project: Project; data: WorkspaceData }>('projects', fields, actor.id);
+        workspaceRead.current = null;
         setData(result.data);
         select(result.project);
         setNotice('Đã tạo dự án.');
@@ -265,10 +266,14 @@ function Workspace({ user: actor, onProfile, onExit }: { user: Account; onProfil
             preview: await encodeDeliveryFile(preview, deliveryPreviewLimit),
             original: original instanceof File && original.size ? await encodeDeliveryFile(original, deliveryFileLimit) : undefined,
           };
-          setData(await api<WorkspaceData>('projects/delivery', data, actor.id));
+          const latest = await api<WorkspaceData>('projects/delivery', data, actor.id);
+          workspaceRead.current = null;
+          setData(latest);
           setNotice('Đã lưu tệp. Hãy xác nhận bàn giao trong MetaMask.');
         } else {
-          setData(await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id));
+          const latest = await api<WorkspaceData>('projects/action', { ...input, projectId: dialog.projectId }, actor.id);
+          workspaceRead.current = null;
+          setData(latest);
           setNotice(`Đã thực hiện ${actionLabels[dialog.action.action]}.`);
         }
       }
@@ -397,7 +402,7 @@ const newRow = (): MilestoneRow => ({ key: ++rowKey, title: '', amount: '', due:
 function CreateProjectFields() {
   const [rows, setRows] = useState<MilestoneRow[]>(() => [newRow()]);
   const today = vnDate(Date.now());
-  const firstMin = vnDate(Date.now() + firstDueBufferMs + 86_400_000);
+  const firstMin = vnDate(Date.now() + firstDueBufferMs + 1000);
   const totalCents = rows.reduce((sum, row) => sum + Math.round(Number(row.amount || 0) * 100), 0);
   const budget = (totalCents / 100).toFixed(2);
   const lastDue = rows[rows.length - 1]?.due ?? '';
@@ -427,7 +432,7 @@ function CreateProjectFields() {
       <div><small>Ngân sách (tổng các giai đoạn)</small><b>{budget} FESC</b></div>
       <div><small>Hạn toàn dự án</small><b>{lastDue ? new Date(`${lastDue}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' }) : '—'}</b></div>
     </div>
-    <p className="hint">Hạn tính đến hết ngày theo giờ Việt Nam và phải tăng dần. Hạn giai đoạn đầu cần sau {new Date(`${firstMin}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })} (đủ 2 ngày ký quỹ và 7 ngày bắt đầu). Hôm nay là {new Date(`${today}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })}.</p>
+    <p className="hint">Hạn tính đến hết ngày theo giờ Việt Nam và phải tăng dần. Hạn giai đoạn đầu có thể chọn từ {new Date(`${firstMin}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })} để đủ thời gian ký quỹ và bắt đầu. Hôm nay là {new Date(`${today}T00:00:00Z`).toLocaleDateString('vi-VN', { timeZone: 'UTC' })}.</p>
     <input type="hidden" name="currency" value="FESC"/>
     <input type="hidden" name="budget" value={budget}/>
     <input type="hidden" name="milestones" value={rows.map(row => row.title.trim()).join(',')}/>
@@ -500,6 +505,7 @@ const statusLabels: Record<Project['status'] | Project['milestones'][number]['st
   Pending: ['Chưa bắt đầu', 'neutral'],
   Paid: ['Đã giải ngân', 'green'],
   Refunded: ['Đã hoàn tiền', 'neutral'],
+  Voided: ['Đã đóng', 'neutral'],
 };
 
 function Status({ value }: { value: Project['status'] | Project['milestones'][number]['status'] }) {
@@ -578,7 +584,7 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
           {privateProject && <small>Đã trả Freelancer: {money(p.paid)}</small>}
         </div>
       </div>
-      {privateProject && <ProgressSteps project={p}/>}
+      {privateProject && p.status !== 'Cancelled' && <ProgressSteps project={p}/>}
       <div className="detail-actions">
         {owner && p.status === 'Open' && <button className="primary" onClick={() => onAction({ action: 'assign' })}>{actionLabels.assign}</button>}
       </div>
@@ -593,7 +599,8 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
           <div className="mile-number">{String(m.id).padStart(2, '0')}</div>
           <div className="mile-content">
             <div className="mile-heading">
-              <div className="mile-title"><b>{m.title}</b><Status value={m.status}/></div>
+              <div className="mile-title"><b>{m.title}</b>{p.cancellation && m.status === 'Refunded' && !m.arbitration
+                ? <span className="pill neutral">Được hoàn ký quỹ</span> : <Status value={m.status}/>}</div>
               <b className="mile-amount">{money(m.amount)}</b>
             </div>
             {m.dueAt && <p className={late ? 'hint late' : 'hint'}>{late ? 'Đã quá hạn bàn giao' : 'Hạn bàn giao'} · <time dateTime={m.dueAt}>{vnTime(m.dueAt)}</time></p>}
@@ -606,7 +613,7 @@ function ProjectDetail({ project: p, actor, onOpenWallet, onFescChanged, onActio
                   const url = `/api/projects/${p.id}/milestones/${m.id}/deliveries/${delivery.id}`;
                   const canDownloadOriginal = freelancer || (owner && m.status === 'Paid' && delivery.version === m.submissionVersion);
                   return <li key={delivery.id}>
-                    <b>Phiên bản {delivery.version}</b>
+                    <b>Phiên bản {delivery.version}</b>{delivery.pending && <span> · Chờ ký bàn giao</span>}
                     {delivery.submittedAt && <time dateTime={delivery.submittedAt}> · {vnTime(delivery.submittedAt)}</time>}
                     {delivery.version !== m.submissionVersion && <p>{delivery.note}</p>}
                     <div className="delivery-files">

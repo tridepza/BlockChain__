@@ -120,7 +120,10 @@ test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ c
     if (method === 'eth_chainId') return '0x7a69';
     if (method === 'eth_getBlockByNumber') return { hash: block };
     if (method === 'wallet_requestPermissions') return [];
-    if (method === 'eth_getTransactionReceipt') { confirmed = true; return { status: '0x1' }; }
+    if (method === 'eth_getTransactionReceipt') {
+      confirmed = true;
+      return { status: '0x1', transactionHash: hash, blockNumber: '0x2', blockHash: block };
+    }
   });
   await page.addInitScript(() => {
     let permitted = false;
@@ -170,6 +173,7 @@ test('FESC xin lại quyền Hardhat khi MetaMask đã kết nối nhưng từ c
   const actions = walletCalls.filter(call => ['eth_getBlockByNumber', 'eth_sendTransaction', 'wallet_requestPermissions'].includes(call.method));
   expect(actions.map(call => call.method)).toEqual([
     'eth_getBlockByNumber', 'eth_sendTransaction', 'wallet_requestPermissions', 'eth_getBlockByNumber', 'eth_sendTransaction',
+    'eth_getBlockByNumber', 'eth_getBlockByNumber',
   ]);
   expect(actions[2].params).toEqual([{ eth_accounts: {} }]);
   expect(actions[4].params).toEqual([{ from, to, data: '0x1234', value: '0x0' }]);
@@ -312,7 +316,7 @@ test('Client tạo dự án FESC theo từng giai đoạn có hạn, chọn Free
     await expect(dialog.getByLabel('Tên giai đoạn').first()).toHaveValue('Thiết kế  giao diện');
     await dialog.getByLabel('Số FESC').first().fill('40');
     const firstDue = dialog.getByLabel('Hạn bàn giao').first();
-    expect(await firstDue.getAttribute('min')).toBe(vnDay(10));
+    expect(await firstDue.getAttribute('min')).toBe(vnDay(9));
     await firstDue.fill(vnDay(15));
     await click(page, 'Thêm giai đoạn');
     await dialog.getByLabel('Tên giai đoạn').nth(1).fill('Lập trình');
@@ -358,7 +362,15 @@ test('khiếu nại cần lý do và bằng chứng; Client gia hạn hoặc Fre
     fesc: { policyVersion: 2 }, milestones: project.milestones.map((item: { status: string }, index: number) => index === 0 ? { ...item, status: 'In progress' } : item),
     extensionRequest: { id: 'r1', whole: false, milestoneId: 1, dueDate: vnDay(25), dueAt: new Date(Date.now() + 25 * 86_400_000).toISOString(),
       note: 'Cần thêm thời gian kiểm thử', at: new Date().toISOString() } };
-  await page.route('**/api/workspace', route => route.fulfill({ json: { projects: [active], txs: [] } }));
+  let extensionPending = true;
+  await page.route('**/api/workspace', route => route.fulfill({ json: {
+    projects: [{ ...active, extensionRequest: extensionPending ? active.extensionRequest : undefined }], txs: [],
+  } }));
+  await page.route('**/api/projects/extension', route => {
+    expect(route.request().postDataJSON()).toMatchObject({ action: 'decline', requestId: 'r1' });
+    extensionPending = false;
+    return route.fulfill({ json: { project: active } });
+  });
   const sent: Record<string, unknown>[] = [];
   await page.route('**/api/projects/fesc', async route => {
     const body = route.request().postDataJSON();
@@ -391,10 +403,17 @@ test('khiếu nại cần lý do và bằng chứng; Client gia hạn hoặc Fre
   await expect(page.getByRole('alert')).toContainText('http:// hoặc https://');
   await page.getByLabel('Link bằng chứng').fill('https://example.com/chat');
   await click(page, 'Thêm link');
+  let resumeUpload = () => {};
+  const uploadGate = new Promise<void>(resolve => { resumeUpload = resolve; });
+  await page.route('**/api/projects/evidence?*', async route => { await uploadGate; await route.continue(); });
   await page.locator('.evidence-picker input[type="file"]').setInputFiles({
     name: 'tin-nhan.txt', mimeType: 'text/plain', buffer: Buffer.from('Nhật ký trao đổi với Freelancer'),
   });
-  await expect(page.getByText(/tin-nhan\.txt/)).toBeVisible();
+  try {
+    await expect(page.getByText('Đang tải tin-nhan.txt…', { exact: true })).toBeVisible();
+    await expect(submit).toBeDisabled();
+  } finally { resumeUpload(); }
+  await expect(page.getByRole('button', { name: 'Bỏ tin-nhan.txt' })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: '.local-data/ui-preview/complaint-mobile.png', fullPage: true });
@@ -408,14 +427,77 @@ test('khiếu nại cần lý do và bằng chứng; Client gia hạn hoặc Fre
 
   // The Freelancer's request is shown with accept/decline; accepting signs the same extension on chain.
   await expect(page.getByText(/Freelancer xin gia hạn giai đoạn Thiết kế/)).toBeVisible();
+  await expect(page.getByLabel('Áp dụng cho')).toHaveCount(0);
   await click(page, 'Chấp nhận (ký MetaMask)');
   await expect.poll(() => sent.length).toBe(2);
-  expect(sent[1]).toMatchObject({ action: 'extend', whole: false, milestoneId: 1, dueDate: vnDay(25) });
+  expect(sent[1]).toMatchObject({ action: 'extend', whole: false, milestoneId: 1, dueDate: vnDay(25), requestId: 'r1' });
+  await click(page, 'Từ chối');
   await page.getByLabel('Áp dụng cho').selectOption('whole');
   await page.getByLabel('Hạn mới').fill(vnDay(40));
   await click(page, 'Gia hạn');
   await expect.poll(() => sent.length).toBe(3);
   expect(sent[2]).toMatchObject({ action: 'extend', whole: true, dueDate: vnDay(40) });
+});
+
+test('Freelancer kiểm tra lại giao dịch bằng chứng mà không ký lần hai', async ({ page }) => {
+  const from = '0x1000000000000000000000000000000000000001';
+  const to = '0x2000000000000000000000000000000000000002';
+  const block = '0x' + 'a'.repeat(64);
+  const hash = '0x' + 'b'.repeat(64);
+  const evidenceHash = '0x' + 'c'.repeat(64);
+  const evidenceUrl = 'https://example.com/more-evidence';
+  let signatures = 0;
+  await page.exposeFunction('evidenceWallet', (method: string) => {
+    if (method === 'eth_accounts') return [from];
+    if (method === 'eth_chainId') return '0x7a69';
+    if (method === 'eth_getBlockByNumber') return { hash: block };
+    if (method === 'eth_sendTransaction') { signatures++; return hash; }
+    if (method === 'eth_getTransactionReceipt') return { status: '0x1', transactionHash: hash, blockNumber: '0x2', blockHash: block };
+    throw new Error('Unexpected RPC: ' + method);
+  });
+  await page.addInitScript(() => {
+    const request = (window as unknown as { evidenceWallet: (method: string) => Promise<unknown> }).evidenceWallet;
+    Object.defineProperty(window, 'ethereum', { value: { isMetaMask: true, request: ({ method }: { method: string }) => request(method) } });
+  });
+  await register(page, 'Freelancer Bằng Chứng', 'additional-evidence@example.test', 'Freelancer');
+  await login(page);
+  const { user } = await (await page.request.get('/api/auth/me')).json();
+  const project = { id: 999, title: 'Dự án cần bổ sung bằng chứng', category: 'Web Development', description: 'Cần đối chiếu',
+    ownerId: 'client-1', client: 'Client A', freelancerId: user.id, freelancer: user.name,
+    status: 'Disputed', currency: 'FESC', budget: 100, funded: 100, paid: 0,
+    milestones: [{ id: 1, status: 'Disputed', title: 'Thiết kế', amount: 100 }],
+    dispute: { kind: 4, by: 'Client', label: 'Lý do khác', note: 'Cần làm rõ', openedAt: new Date().toISOString(), evidence: [] },
+  };
+  const input: Record<string, unknown>[] = [];
+  let recorded = false;
+  await page.route('**/api/workspace', route => route.fulfill({ json: { projects: [{ ...project, dispute: {
+    ...project.dispute, evidence: recorded ? [{ id: 'recorded-link', kind: 'link', url: evidenceUrl, by: 'Freelancer' }] : [],
+  } }], txs: [] } }));
+  await page.route('**/api/projects/fesc', route => route.fulfill({ json: { step: 'waiting', projectStatus: 'Disputed', paid: 0 } }));
+  await page.route('**/api/projects/dispute-evidence', route => {
+    const body = route.request().postDataJSON();
+    input.push(body);
+    if (body.action === 'prepare') return route.fulfill({ json: { evidenceHash, transaction: {
+      from, to, data: '0x1234', deploymentBlock: '0x1', deploymentBlockHash: block,
+    } } });
+    if (input.length === 2) return route.fulfill({ status: 503, json: { error: 'Chưa đối soát được bằng chứng.' } });
+    recorded = true;
+    return route.fulfill({ json: { project } });
+  });
+  await page.reload();
+  await openProject(page, project.title);
+  await click(page, 'Bổ sung bằng chứng');
+  await page.getByLabel('Link bằng chứng').fill(evidenceUrl);
+  await click(page, 'Thêm link');
+  await click(page, 'Gửi bằng chứng');
+  await expect(page.getByRole('alert')).toContainText('Chưa đối soát được bằng chứng.');
+  await expect(page.getByLabel('Link bằng chứng')).toBeDisabled();
+  await expect(page.getByText(hash, { exact: true })).toBeVisible();
+  await click(page, 'Kiểm tra giao dịch bằng chứng');
+  await expect(page.getByRole('link', { name: new RegExp(evidenceUrl) })).toBeVisible();
+  expect(signatures).toBe(1);
+  expect(input[0]).toMatchObject({ action: 'prepare', projectId: 999, links: [evidenceUrl] });
+  expect(input.slice(1)).toEqual([1, 2].map(() => ({ action: 'confirm', projectId: 999, evidenceHash, hash })));
 });
 
 test('OTP và giao dịch công khai hiển thị rõ trên điện thoại', async ({ page }) => {
@@ -638,7 +720,7 @@ for (const initialAccountBalance of [0, 10]) {
       }
       if (method === 'eth_getTransactionReceipt') {
         if (pendingWithdrawal) { walletBalance += amount; accountBalance -= amount; pendingWithdrawal = false; }
-        return { status: '0x1' };
+        return { status: '0x1', transactionHash: params?.[0], blockNumber: '0x2', blockHash: block };
       }
       throw new Error('Unexpected RPC: ' + method);
     });

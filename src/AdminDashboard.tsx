@@ -149,7 +149,11 @@ export default function AdminDashboard() {
   </main>;
 }
 
-type CaseData = { project: Project; chain?: { unavailable?: boolean; message?: string; arbitrator: string; evidenceCount: string; modes?: string[]; serverSigner?: boolean } };
+type CaseData = { project: Project; chain?: { unavailable?: boolean; message?: string; arbitrator: string; evidenceCount: string; state?: number; modes?: string[]; serverSigner?: boolean } };
+function hasNextMilestone(project: Project) {
+  const index = project.milestones.findIndex(item => item.status === 'Disputed');
+  return index >= 0 && index + 1 < project.milestones.length;
+}
 function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () => void }) {
   const [details, setDetails] = useState<CaseData | null>(null);
   const [reload, setReload] = useState(0);
@@ -168,7 +172,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
       if (!active) return;
       setDetails(value);
       // Continuing the contract is the default unless the complaint asks to end it.
-      if (value.chain?.modes?.includes('continue') && !value.project.dispute?.terminate) setMode('continue');
+      setMode(value.chain?.modes?.includes('continue') && hasNextMilestone(value.project) && !value.project.dispute?.terminate ? 'continue' : 'terminate');
     }).catch(reason => { if (active) setError(errorMessage(reason)); });
     return () => { active = false; };
   }, [projectId, reload]);
@@ -188,17 +192,24 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     try {
       const input = { projectId, action, note: text, mode, revision: details.project.adminReview?.revision ?? 0,
         evidenceCount: details.chain?.evidenceCount };
-      type CaseResult = { emailed?: string; transaction?: LocalTransaction };
-      if (action !== 'review' && !hash) setNotice('Đang ghi quyết định lên blockchain…');
+      type CaseResult = { emailed?: string; pendingHash?: string; transaction?: LocalTransaction };
+      if (action !== 'review') setNotice(hash ? 'Đang kiểm tra giao dịch đã gửi…' : 'Đang chuẩn bị giao dịch phân xử…');
       // The server signs with the arbitrator wallet when it can; otherwise it returns the transaction for MetaMask.
       let result = await api<CaseResult>('admin/case', { ...input, ...(hash && action !== 'review' ? { hash } : {}) });
       if (result.transaction) {
+        setNotice('Đang chờ bạn xác nhận giao dịch trong MetaMask…');
         const sent = await sendLocalTransaction(result.transaction, setNotice);
         setHash(sent.hash);
+        setNotice('Đã gửi giao dịch. Đang chờ Hardhat xác nhận…');
         if (!await sent.confirmed()) {
           setNotice('Giao dịch đang chờ xác nhận. Giữ mã giao dịch và bấm kiểm tra lại.'); return;
         }
         result = await api<CaseResult>('admin/case', { ...input, hash: sent.hash });
+      }
+      if (result.pendingHash) {
+        setHash(result.pendingHash);
+        setNotice('Đã gửi giao dịch. Giữ nguyên quyết định và bấm Kiểm tra và ghi nhận để cập nhật hồ sơ.');
+        return;
       }
       if (action === 'review') { setReply(''); setNotice('Đã gửi phản hồi. Hai bên xem được trong dự án.'); }
       else {
@@ -207,7 +218,10 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
           : 'Đã ghi nhận quyết định nhưng chưa gửi được email. Dùng nút gửi lại bên dưới.');
       }
       setReload(value => value + 1); onChanged();
-    } catch (reason) { setError(walletError(reason, 'Xử lý tranh chấp')); }
+    } catch (reason) {
+      if (reason && typeof reason === 'object' && 'transactionFailed' in reason && reason.transactionFailed === true) setHash('');
+      setNotice(''); setError(walletError(reason, 'Xử lý tranh chấp'));
+    }
     finally { setBusy(false); }
   }
   async function resend(at: string) {
@@ -220,8 +234,10 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
     finally { setBusy(false); }
   }
   const project = details?.project;
-  const modes = details?.chain?.modes ?? ['terminate'];
   const disputed = project?.milestones.find(item => item.status === 'Disputed');
+  const hasNext = project && hasNextMilestone(project);
+  const supportedModes = details?.chain?.modes ?? ['terminate'];
+  const modes = hasNext || hash ? supportedModes : ['terminate'];
   const shares: Record<string, [number, number]> | undefined = disputed
     ? { release: [disputed.amount, 0], split: [disputed.amount / 2, disputed.amount / 2], refund: [0, disputed.amount] } : undefined;
   const share = shares?.[decision];
@@ -256,10 +272,11 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
       </details>
       {history.length > 0 && <><h4>Lịch sử xử lý</h4>
         <ol className="admin-replies">{history.map(item => <li key={item.at}>
-          <small>{vnTime(item.at)} · {item.action === 'review' ? 'Phản hồi' : decisionText[item.action] ?? item.action}
+          <small>{vnTime(item.at)} · {item.action === 'allocation' ? 'Phân bổ theo quyết định trên blockchain'
+            : item.action === 'review' ? 'Phản hồi' : decisionText[item.action] ?? item.action}
             {item.arbitration && ` · ${modeText[item.arbitration.mode] ?? ''}`}</small>
           <p>{item.note}</p>
-          {decisionText[item.action] && <p className="hint">Email kết quả: {item.emailed === 'sent' ? 'đã gửi' : item.emailed === 'failed' ? 'gửi lỗi' : 'chưa gửi'}
+          {item.arbitration && <p className="hint">Email kết quả: {item.emailed === 'sent' ? 'đã gửi' : item.emailed === 'failed' ? 'gửi lỗi' : 'chưa gửi'}
             {item.emailed !== 'sent' && <> · <button type="button" className="text-btn" disabled={busy} onClick={() => void resend(item.at)}>Gửi lại email</button></>}</p>}
         </li>)}</ol></>}
       {project.status === 'Disputed' && <>
@@ -270,16 +287,16 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
         {details.chain?.unavailable && <p className="form-error">{details.chain.message}</p>}
         {details.chain?.arbitrator && <p className="hint">{details.chain.serverSigner
           ? 'Máy chủ tự ký quyết định bằng ví trọng tài của hợp đồng, admin không cần MetaMask.'
-          : <>Máy chủ không có khóa của ví trọng tài <code>{details.chain.arbitrator}</code>; cần ký bằng ví này trong MetaMask.</>} {modes.includes('continue') ? 'FESC được chuyển thẳng về ví hai bên ngay trong giao dịch phân xử.' : 'Hợp đồng theo quy tắc cũ chỉ phân bổ quyền rút; hai bên tự bấm Rút FESC trong dự án.'}</p>}
+          : <>Cần ký bằng ví trọng tài <code>{details.chain.arbitrator}</code> trong MetaMask.</>} {supportedModes.includes('continue') ? 'FESC được chuyển thẳng về ví hai bên ngay trong giao dịch phân xử.' : 'Hợp đồng theo quy tắc cũ phân bổ quyền rút FESC trong dự án.'}</p>}
         <label>Quyết định<select aria-label="Quyết định" value={decision} disabled={busy} onChange={event => { setDecision(event.target.value); setConfirm(false); }}>
           {Object.entries(decisionText).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         <label>Sau quyết định<select aria-label="Sau quyết định" value={mode} disabled={busy || modes.length < 2} onChange={event => { setMode(event.target.value); setConfirm(false); }}>
           {modes.map(value => <option key={value} value={value}>{modeText[value]}</option>)}
         </select></label>
-        {modes.length < 2 && <p className="hint">Hợp đồng theo quy tắc cũ chỉ hỗ trợ chấm dứt sau phân xử.</p>}
+        {modes.length < 2 && <p className="hint">{hasNext ? 'Hợp đồng theo quy tắc cũ chỉ hỗ trợ chấm dứt sau phân xử.' : 'Hợp đồng kết thúc sau khi phân xử giai đoạn cuối.'}</p>}
         <label>Ghi chú / lý do quyết định<textarea value={note} minLength={3} maxLength={2000} disabled={busy} onChange={event => { setNote(event.target.value); setConfirm(false); }}/></label>
-        {project.currency === 'FESC' && !details.chain?.serverSigner && <>
+        {project.currency === 'FESC' && (!details.chain?.serverSigner || hash || details.chain.state !== 4) && <>
           <label>Mã giao dịch phân xử đã gửi (nếu có)<input value={hash} disabled={busy} onChange={event => { setHash(event.target.value.trim()); setConfirm(false); }} placeholder="0x…"/></label>
           {hash && <p className="hint">Nhập đúng quyết định, lựa chọn sau quyết định và lý do đã dùng khi ký giao dịch này.</p>}
         </>}
@@ -289,7 +306,7 @@ function AdminCase({ projectId, onChanged }: { projectId: number; onChanged: () 
           {share && <p>Freelancer nhận {share[0]} FESC · Client nhận {share[1]} FESC</p>}
           <p>Lý do: {note}</p>
           <p className="hint">Kết quả được gửi qua email cho Client và Freelancer. Quyết định đã xác nhận không thể sửa lại.</p>
-          <div className="button-row"><button className="primary" disabled={busy} onClick={() => void send(decision, note)}>{busy ? 'Đang ghi lên blockchain…' : hash ? 'Kiểm tra và ghi nhận' : 'Xác nhận quyết định'}</button>
+          <div className="button-row"><button className="primary" disabled={busy} onClick={() => void send(decision, note)}>{busy ? 'Đang xử lý…' : hash ? 'Kiểm tra và ghi nhận' : 'Xác nhận quyết định'}</button>
             <button className="secondary" disabled={busy} onClick={() => setConfirm(false)}>Quay lại</button></div>
         </div>}
       </>}

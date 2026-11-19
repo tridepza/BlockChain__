@@ -29,8 +29,12 @@ test('projects are FESC-only with ordered due dates; the server records only ass
   assert.equal(schedule.dueAt, '2026-12-10T16:59:59.000Z');
   assert.equal(schedule.milestones[0].dueAt, '2026-11-28T16:59:59.000Z');
   const project = { ...schedule, freelancerId: worker.id, funded: 100, status: 'Funded' };
-  const submitted = applyProjectAction(project, worker, { action: 'submit', milestoneId: 1, note: 'Delivered' }).project;
-  assert.equal(submitted.milestones[0].status, 'Submitted');
+  const staged = applyProjectAction(project, worker, { action: 'submit', milestoneId: 1, note: 'Delivered' }).project;
+  assert.equal(staged.milestones[0].status, 'Pending');
+  assert.equal(staged.milestones[0].deliveries[0].pending, true);
+  assert.throws(() => applyProjectAction(staged, client, { action: 'approve', milestoneId: 1, submissionVersion: 1 }), { status: 409 });
+  // The chain reconciliation supplies the confirmed submission for the payment projection.
+  const submitted = { ...staged, status: 'Submitted', milestones: [{ ...staged.milestones[0], status: 'Submitted', submissionVersion: 1 }, staged.milestones[1]] };
   for (const action of ['dispute', 'revision', 'release', 'refund', 'requestCancel']) {
     assert.throws(() => applyProjectAction(submitted, client, { action, milestoneId: 1, submissionVersion: 1, note: 'x' }));
   }

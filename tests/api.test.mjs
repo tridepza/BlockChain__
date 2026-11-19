@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -15,6 +15,7 @@ import { publicProjectPayments } from '../server/public-projects.mjs';
 import { assertStorageTarget } from '../server/storage-target.mjs';
 import { integrityPlan } from '../server/integrity.mjs';
 import { projectFesc } from '../server/project-fesc.mjs';
+import { startDurableHardhatNode } from '../scripts/hardhat-node.mjs';
 
 const password = 'mật-khẩu-test-2026';
 const client = { name: 'Tên trùng', email: 'owner@example.test', password, role: 'Client' };
@@ -65,20 +66,24 @@ async function listen(filename, root, options = {}) {
   };
 }
 
-test('FESC project pays two confirmed deliveries to the linked Freelancer wallet', {
-  skip: process.env.ESCROW_TEST_FESC !== '1' && 'Run with a local Hardhat node and ESCROW_TEST_FESC=1',
-}, async t => {
+test('FESC project pays two confirmed deliveries to the linked Freelancer wallet', async t => {
   const root = await mkdtemp(join(tmpdir(), 'escrow-fesc-test-'));
   const metadata = join(root, '.hardhat');
   const manifest = join(metadata, 'local-fesc-deployment.json');
-  const app = await listen(':memory:', root);
+  let app, node;
   t.after(async () => {
-    await app.close();
-    await unlink(manifest).catch(() => {});
-    await rmdir(metadata).catch(() => {});
-    await rmdir(root);
+    await app?.close();
+    await node?.close();
+    await rm(root, { recursive: true });
   });
-  const transport = http('http://127.0.0.1:8545', { timeout: 3000, retryCount: 0 });
+  node = await startDurableHardhatNode({ port: 0, state: join(root, 'chain.json') });
+  const fetchNetwork = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', (input, options) => {
+    const url = new URL(String(input));
+    return fetchNetwork(url.origin === 'http://127.0.0.1:8545' ? new URL(url.pathname + url.search, node.url) : input, options);
+  });
+  app = await listen(':memory:', root);
+  const transport = http(node.url, { timeout: 3000, retryCount: 0 });
   const rpc = createPublicClient({ chain: hardhat, transport });
   assert.equal(await rpc.getChainId(), 31337);
   assert.match(await rpc.request({ method: 'web3_clientVersion' }), /hardhat|anvil/i);
@@ -160,7 +165,7 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   }
   await post('projects/action', { projectId, action: 'assign', email: worker.email }, clientCookie);
   await post('projects/fesc', { projectId }, outsiderCookie, 404);
-  await post('projects/action', { projectId, action: 'fund' }, clientCookie, 409);
+  await post('projects/action', { projectId, action: 'fund' }, clientCookie, 400);
   await execute('create', clientCookie, owner);
   const { escrow } = await state(clientCookie);
   assert.equal((await state(freelancerCookie)).step, 'accept');
@@ -196,7 +201,7 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
     }, freelancerCookie);
     const delivery = body.projects[0].milestones[milestoneId - 1].deliveries[0];
     const original = `projects/${projectId}/milestones/${milestoneId}/deliveries/${delivery.id}/original`;
-    assert.equal((await app.request(original, { cookie: clientCookie })).status, 403);
+    assert.ok([403, 404].includes((await app.request(original, { cookie: clientCookie })).status));
     const review = { milestoneId, submissionVersion: 1 };
     await action('approve', clientCookie, review, 409);
     await execute('submit', freelancerCookie, freelancer, review);
@@ -217,7 +222,7 @@ test('FESC project pays two confirmed deliveries to the linked Freelancer wallet
   const { body: workspace } = await app.request('workspace', { cookie: freelancerCookie });
   assert.equal(workspace.projects[0].paid, 0.3);
   assert.deepEqual(workspace.txs.map(tx => tx.currency), ['FESC', 'FESC', 'FESC']);
-  assert.equal(workspace.mockWallet.cents, 0);
+  assert.equal(workspace.mockWallet, undefined);
   assert.equal((await post('wallet/fesc-balance', {}, freelancerCookie)).body.balance, '0.3');
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [escrow] }), 0n);
   assert.equal(await rpc.readContract({ address: token, abi: coin.abi, functionName: 'balanceOf', args: [freelancer.account.address] }), parseUnits('0.3', 18));

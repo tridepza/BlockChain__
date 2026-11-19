@@ -7,7 +7,6 @@ Nếu thật sự cần cài lại thư viện sau khi cập nhật mã nguồn,
 ## Terminal 1: blockchain
 
 ```powershell
-cd "C:\Users\daoph\OneDrive\Documents\GitHub\BlockChain__"
 npm.cmd run chain:node
 ```
 
@@ -20,7 +19,6 @@ Chỉ một tiến trình được mở cùng một state, kể cả khi chọn 
 ## Terminal 2: website và API
 
 ```powershell
-cd "C:\Users\daoph\OneDrive\Documents\GitHub\BlockChain__"
 $env:ESCROW_DB = 'mongodb'
 npm.cmd run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
@@ -41,6 +39,7 @@ Muốn chạy kiểm thử:
 
 ```powershell
 npm.cmd run build
+npm.cmd run compile:contracts
 npm.cmd test
 npm.cmd run test:contracts
 npm.cmd run test:e2e
